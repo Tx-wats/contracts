@@ -1,7 +1,7 @@
-# stellar-txwatch-contracts
+# tx-watch-contracts
 
 Soroban smart contracts for on-chain alert configuration storage and watcher registry.  
-Part of the [Tx-wat](https://github.com/Tx-wat) organization.
+Part of the [TAX-WATs](https://github.com/TAX-WATs) organization.
 
 ## Contracts
 
@@ -52,7 +52,7 @@ flowchart TD
         WR["WatcherRegistry\n─────────────\nstores authorized\nwatcher addresses"]
     end
 
-    subgraph OffChain["Off-chain (stellar-txwatch-core)"]
+    subgraph OffChain["Off-chain (tx-watch-core)"]
         W["Watcher Node\n─────────────\npolls Horizon\nmatches rules\nfires webhooks"]
     end
 
@@ -325,8 +325,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Sister Repos
 
-- **Core engine:** https://github.com/Tx-wat/stellar-txwatch-core
-- **Web dashboard:** https://github.com/Tx-wat/stellar-txwatch-web
+- **Core engine:** https://github.com/TAX-WATs/tx-watch-core
+- **Web dashboard:** https://github.com/TAX-WATs/tx-watch-web
 
 ## License
 
