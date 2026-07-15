@@ -1,7 +1,7 @@
 # tx-watch-contracts
 
 Soroban smart contracts for on-chain alert configuration storage and watcher registry.  
-Part of the [TAX-WATs](https://github.com/TAX-WATs) organization.
+Part of the [Tx-wats](https://github.com/Tx-wats) organization.
 
 ## Contracts
 
@@ -325,8 +325,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Sister Repos
 
-- **Core engine:** https://github.com/TAX-WATs/tx-watch-core
-- **Web dashboard:** https://github.com/TAX-WATs/tx-watch-web
+- **Core engine:** https://github.com/Tx-wats/core
+- **Web dashboard:** https://github.com/Tx-wats/web
 
 ## License
 
