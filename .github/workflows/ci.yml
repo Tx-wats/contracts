@@ -66,6 +66,12 @@ jobs:
   audit:
     runs-on: ubuntu-latest
 
+    # rust-toolchain.toml applies to any cargo run from this checkout, so it
+    # would pull the audit back onto the pinned 1.85 even after installing
+    # stable. RUSTUP_TOOLCHAIN overrides the file for this job only.
+    env:
+      RUSTUP_TOOLCHAIN: stable
+
     steps:
       - uses: actions/checkout@v4
 
