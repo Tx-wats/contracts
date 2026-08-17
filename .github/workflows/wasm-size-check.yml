@@ -23,7 +23,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Build WASM binaries
-        run: cargo build --release --target wasm32-unknown-unknown
+        run: cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
 
       - name: Check binary sizes
         run: |

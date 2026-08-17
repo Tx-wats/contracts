@@ -1,10 +1,10 @@
 .PHONY: build test lint fmt deploy-testnet bindings clean
 
 build:
-	cargo build --release --target wasm32-unknown-unknown
+	cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
 
 test:
-	cargo test
+	cargo test --workspace --locked
 
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings

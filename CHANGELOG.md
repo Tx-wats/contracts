@@ -7,7 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — build and test suite restored
+
+The workspace did not compile and the test suite had never run. Both are now green.
+
+- **`alert-registry` did not build at all.** `panic_with_error!` was used without
+  being imported, and `register_alert` returned a bare `u64` from a function
+  declared `-> Result<u64, ContractError>`. No WASM artifact could be produced
+  from this repository before this change.
+- **`Cargo.lock` was git-ignored** while the toolchain was pinned to Rust 1.85,
+  so every clean checkout re-resolved dependencies and eventually picked crates
+  requiring Rust 1.88 — failing before compilation began. The lockfile is now
+  committed, the workspace declares `rust-version`, and the MSRV-aware resolver
+  (`resolver = "3"`) keeps resolution inside the pinned toolchain.
+- **CI built the whole workspace for `wasm32`**, which pulled `test-utils` in and
+  force-enabled soroban-sdk's `testutils` (requires `std`) on a `no_std` target.
+  WASM builds now target the two contract crates explicitly.
+- All CI invocations use `--locked` so dependency drift fails loudly instead of
+  silently changing what is built.
+- The test suite compiles and passes for the first time: **169 tests**, plus
+  `clippy -D warnings` and `cargo fmt --check` clean.
+
+### Fixed — correctness
+
+- **`update_alert` silently discarded rule validation.** It called
+  `validate_rules` and dropped the returned `Result`, so an alert could be
+  updated with rule descriptors that `register_alert` rejects. Now propagated.
+- **`update_webhook` accepted webhook hashes of any length**, while
+  `register_alert` required exactly 64 characters. Both now enforce the same rule.
+- **`replace_watcher` could drop the replacement watcher.** Corrected so the new
+  address is always added when it was not already registered.
+- `configs_paginated` could overflow on `offset + limit`; now saturating.
+- `AlertRegistry::transfer_admin` emitted no event, leaving a change of control
+  invisible on-chain. It now emits `("admin", "transfer")`.
+
 ### Added
+
+- **Two-phase webhook rotation** — `propose_webhook` stages a new hash in the new
+  `AlertConfig::pending_webhook_hash` field without disturbing the live webhook;
+  `confirm_webhook` promotes it and clears the pending slot, returning the new
+  `ContractError::NoPendingWebhook` when no rotation is in progress. This
+  behaviour was already specified in `docs/alert-registry.md` and covered by
+  tests, but had never been implemented. Emits `alert.wh_prop` / `alert.wh_conf`.
+- **`renew_alert_ttl`** — owner-authenticated TTL extension that leaves
+  `updated_at` untouched, so renewing storage does not make an alert reappear in
+  `get_alerts_modified_since` incremental syncs.
+
+### Removed
+
+- `contracts/alert-registry/src/{contract,storage,types}.rs` — 857 lines of a
+  second, divergent `AlertRegistry` implementation that was never declared as a
+  module and therefore compiled into nothing.
+- Root-level `task1.md`, `task2.md` and `issue.md` scratch notes (the first two
+  described work already shipped; the third contained the word "test").
 - **Feature A — `watcher.remove` event**: `WatcherRegistry::remove_watcher` now emits
   `(Symbol("watcher"), Symbol("remove"))` with `data = watcher: Address` **only when the
   watcher was actually present** (no-op removals are silent). Dependent systems such as

@@ -57,6 +57,36 @@ Emitted when an alert's webhook hash is rotated.
 
 ---
 
+### `alert.wh_prop`
+
+Emitted when a webhook rotation is staged via `propose_webhook`. The live
+`webhook_hash` is unchanged at this point.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("wh_prop")` |
+| Data | `(id: u64, caller: Address)` |
+
+**Status:** ✅ implemented (`propose_webhook`)
+
+---
+
+### `alert.wh_conf`
+
+Emitted when a staged webhook hash is promoted to the live one via
+`confirm_webhook`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("wh_conf")` |
+| Data | `(id: u64, caller: Address)` |
+
+**Status:** ✅ implemented (`confirm_webhook`)
+
+---
+
 ### `alert.remove`
 
 Emitted when an alert is removed by its owner or by an admin.
@@ -113,7 +143,7 @@ Emitted when the admin role is transferred to a new address.
 | Topic 1 | `Symbol("transfer")` |
 | Data | `(old_admin: Address, new_admin: Address)` |
 
-**Status:** 🔲 planned (`transfer_admin`)
+**Status:** ✅ implemented (`transfer_admin`)
 
 ---
 
@@ -191,7 +221,7 @@ Emitted when the watcher registry admin role is transferred.
 | Topic 1 | `Symbol("transfer")` |
 | Data | `(old_admin: Address, new_admin: Address)` |
 
-**Status:** 🔲 planned (`transfer_admin`)
+**Status:** ✅ implemented (`transfer_admin`)
 
 ---
 

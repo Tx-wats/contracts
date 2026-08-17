@@ -18,10 +18,27 @@ pub fn str(env: &Env, s: &str) -> String {
     String::from_str(env, s)
 }
 
+/// A 64-character webhook hash of repeated `c`.
+///
+/// `register_alert`, `update_webhook` and `propose_webhook` all require a
+/// webhook hash of exactly 64 characters; vary `c` when a test needs two
+/// hashes that must differ.
+pub fn hash64c(env: &Env, c: char) -> String {
+    let buf = [c as u8; 64];
+    String::from_str(env, core::str::from_utf8(&buf).unwrap())
+}
+
+/// The default valid 64-character webhook hash.
+pub fn hash64(env: &Env) -> String {
+    hash64c(env, '0')
+}
+
 /// Build a Soroban [`String`] consisting of `n` repetitions of the ASCII
 /// character `ch`.  Handy for boundary-length tests.
 pub fn str_repeat(env: &Env, ch: char, n: usize) -> String {
-    let s = std::iter::repeat(ch).take(n).collect::<std::string::String>();
+    let s = std::iter::repeat(ch)
+        .take(n)
+        .collect::<std::string::String>();
     String::from_str(env, &s)
 }
 

@@ -1,8 +1,8 @@
 # Build output
 target/
 
-# Cargo lock (library crates; keep for binaries if needed)
-Cargo.lock
+# Cargo.lock is committed: these crates compile to deployable WASM artifacts,
+# so builds must be reproducible across contributors, CI, and deployments.
 
 # Soroban test snapshots
 **/test_snapshots/
