@@ -29,15 +29,13 @@ make bindings
 
 ## TypeScript Bindings
 
-TypeScript bindings for the AlertRegistry contract are available on npm:
+TypeScript bindings for the AlertRegistry contract live in
+[bindings/alert-registry/](bindings/alert-registry/) — see its
+[README](bindings/alert-registry/README.md) for usage examples.
 
-```bash
-npm install @tx-wat/alert-registry-bindings
-```
-
-See [bindings/alert-registry/README.md](bindings/alert-registry/README.md) for usage examples.
-
-To generate bindings locally:
+Bindings are published to npm as `@tx-wat/alert-registry-bindings` by the
+[publish-bindings workflow](.github/workflows/publish-bindings.yml) when a GitHub release is
+tagged. Until the first tagged release, generate them locally:
 
 ```bash
 make bindings
@@ -292,6 +290,8 @@ automatically from the compiled WASM on every release using
 ```bash
 npm install @tx-wat/watcher-registry @stellar/stellar-sdk
 ```
+
+> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings` from the repository root.
 
 ```typescript
 import { Client, networks } from "@tx-wat/watcher-registry";

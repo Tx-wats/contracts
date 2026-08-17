@@ -1,7 +1,10 @@
 use crate::AlertRegistry;
-use crate::ContractError;
 use crate::AlertRegistryClient;
-use soroban_sdk::{testutils::Address as _, vec, Address, Env, String, Vec};
+use crate::ContractError;
+use soroban_sdk::{
+    testutils::{Address as _, Events as _, Ledger as _},
+    vec, Address, Env, String, Vec,
+};
 
 fn setup() -> (Env, AlertRegistryClient<'static>) {
     let env = Env::default();
@@ -9,6 +12,18 @@ fn setup() -> (Env, AlertRegistryClient<'static>) {
     let contract_id = env.register(AlertRegistry, ());
     let client = AlertRegistryClient::new(&env, &contract_id);
     (env, client)
+}
+
+/// A 64-character webhook hash of repeated `c` — `register_alert`,
+/// `update_webhook` and `propose_webhook` all require exactly 64 characters.
+fn hash64c(env: &Env, c: char) -> String {
+    let buf = [c as u8; 64];
+    String::from_str(env, core::str::from_utf8(&buf).unwrap())
+}
+
+/// The default valid 64-character webhook hash.
+fn hash64(env: &Env) -> String {
+    hash64c(env, '0')
 }
 
 fn str(env: &Env, s: &str) -> String {
@@ -39,7 +54,7 @@ fn test_register_and_get_alert() {
         &owner,
         &target,
         &str(&env, "My Alert"),
-        &str(&env, "hash123"),
+        &hash64c(&env, '4'),
         &vec![&env, str(&env, "rule:transfer")],
     );
 
@@ -60,7 +75,7 @@ fn test_update_alert() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env, str(&env, "rule:transfer")],
     );
 
@@ -87,7 +102,7 @@ fn test_remove_alert() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
@@ -107,7 +122,7 @@ fn test_update_unauthorized() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
@@ -121,7 +136,7 @@ fn test_update_unauthorized() {
 }
 
 #[test]
-#[should_panic(expected = "invalid rule descriptor")]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn test_register_alert_rejects_invalid_rules() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
@@ -131,13 +146,13 @@ fn test_register_alert_rejects_invalid_rules() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env, str(&env, "rule:unknown")],
     );
 }
 
 #[test]
-#[should_panic(expected = "invalid rule descriptor")]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn test_update_alert_rejects_invalid_rules() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
@@ -147,7 +162,7 @@ fn test_update_alert_rejects_invalid_rules() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env, str(&env, "rule:transfer")],
     );
 
@@ -166,16 +181,16 @@ fn test_admin_remove_any_alert() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env, str(&env, "rule:mint")],
     );
 
-    assert_eq!(client.remove_alert_by_admin(&admin, &id), ());
+    client.remove_alert_by_admin(&admin, &id);
     assert!(client.get_alert(&id).is_none());
 }
 
 #[test]
-#[should_panic(expected = "owner alert limit exceeded")]
+#[should_panic(expected = "Error(Contract, #10)")]
 fn test_admin_set_per_owner_alert_limit() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
@@ -188,14 +203,14 @@ fn test_admin_set_per_owner_alert_limit() {
         &owner,
         &target,
         &str(&env, "Alert1"),
-        &str(&env, "hash1"),
+        &hash64c(&env, '1'),
         &vec![&env, str(&env, "rule:transfer")],
     );
     client.register_alert(
         &owner,
         &target,
         &str(&env, "Alert2"),
-        &str(&env, "hash2"),
+        &hash64c(&env, '2'),
         &vec![&env, str(&env, "rule:mint")],
     );
 }
@@ -207,17 +222,17 @@ fn test_admin_transfer_admin() {
     client.initialize(&admin);
     let new_admin = Address::generate(&env);
 
-    assert_eq!(client.transfer_admin(&admin, &new_admin), ());
+    client.transfer_admin(&admin, &new_admin);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
     let id = client.register_alert(
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env, str(&env, "rule:transfer")],
     );
-    assert_eq!(client.remove_alert_by_admin(&new_admin, &id), ());
+    client.remove_alert_by_admin(&new_admin, &id);
 }
 
 // 5. Unauthorized remove rejected
@@ -232,7 +247,7 @@ fn test_remove_unauthorized() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
@@ -258,7 +273,7 @@ fn test_get_alerts_for_contract_empty() {
     let (env, client) = setup();
     let querier = Address::generate(&env);
     let target = Address::generate(&env);
-    assert_eq!(client.get_alerts_for_contract(&querier, &target).unwrap().len(), 0);
+    assert_eq!(client.get_alerts_for_contract(&querier, &target).len(), 0);
 }
 
 // 8. Index queries
@@ -269,11 +284,23 @@ fn test_index_queries() {
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    client.register_alert(&owner, &target, &str(&env, "A1"), &str(&env, "h1"), &vec![&env]);
-    client.register_alert(&owner, &target, &str(&env, "A2"), &str(&env, "h2"), &vec![&env]);
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A1"),
+        &hash64c(&env, '1'),
+        &vec![&env],
+    );
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A2"),
+        &hash64c(&env, '2'),
+        &vec![&env],
+    );
 
-    assert_eq!(client.get_alerts_for_contract(&querier, &target).unwrap().len(), 2);
-    assert_eq!(client.get_alerts_by_owner(&querier, &owner).unwrap().len(), 2);
+    assert_eq!(client.get_alerts_for_contract(&querier, &target).len(), 2);
+    assert_eq!(client.get_alerts_by_owner(&querier, &owner).len(), 2);
 }
 
 // 9. get_alert_count is monotonic
@@ -284,9 +311,9 @@ fn test_get_alert_count() {
     let target = Address::generate(&env);
 
     assert_eq!(client.get_alert_count(), 0);
-    let id = client.register_alert(&owner, &target, &str(&env, "A"), &str(&env, "h"), &vec![&env]);
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
     assert_eq!(client.get_alert_count(), 1);
-    client.register_alert(&owner, &target, &str(&env, "B"), &str(&env, "h"), &vec![&env]);
+    client.register_alert(&owner, &target, &str(&env, "B"), &hash64(&env), &vec![&env]);
     assert_eq!(client.get_alert_count(), 2);
     client.remove_alert(&owner, &id);
     assert_eq!(client.get_alert_count(), 2);
@@ -300,8 +327,8 @@ fn test_get_active_alert_count() {
     let target = Address::generate(&env);
 
     assert_eq!(client.get_active_alert_count(&owner), 0);
-    let id1 = client.register_alert(&owner, &target, &str(&env, "A"), &str(&env, "h"), &vec![&env]);
-    let _id2 = client.register_alert(&owner, &target, &str(&env, "B"), &str(&env, "h"), &vec![&env]);
+    let id1 = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+    let _id2 = client.register_alert(&owner, &target, &str(&env, "B"), &hash64(&env), &vec![&env]);
     assert_eq!(client.get_active_alert_count(&owner), 2);
     client.remove_alert(&owner, &id1);
     assert_eq!(client.get_active_alert_count(&owner), 1);
@@ -314,12 +341,23 @@ fn test_update_webhook() {
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    let id = client.register_alert(&owner, &target, &str(&env, "A"), &str(&env, "old-hash"), &vec![&env]);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64c(&env, 'a'),
+        &vec![&env],
+    );
     assert_eq!(
-        client.try_update_webhook(&owner, &id, &str(&env, "new-hash")).unwrap(),
+        client
+            .try_update_webhook(&owner, &id, &hash64c(&env, 'b'))
+            .unwrap(),
         Ok(())
     );
-    assert_eq!(client.get_alert(&id).unwrap().webhook_hash, str(&env, "new-hash"));
+    assert_eq!(
+        client.get_alert(&id).unwrap().webhook_hash,
+        hash64c(&env, 'b')
+    );
 }
 
 // 11. update_webhook unauthorized
@@ -330,10 +368,10 @@ fn test_update_webhook_unauthorized() {
     let attacker = Address::generate(&env);
     let target = Address::generate(&env);
 
-    let id = client.register_alert(&owner, &target, &str(&env, "A"), &str(&env, "hash"), &vec![&env]);
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
     assert_eq!(
         client
-            .try_update_webhook(&attacker, &id, &str(&env, "evil-hash"))
+            .try_update_webhook(&attacker, &id, &hash64c(&env, 'e'))
             .unwrap_err()
             .unwrap(),
         ContractError::Unauthorized
@@ -375,13 +413,19 @@ fn test_active_defaults_to_true() {
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    let id = client.register_alert(&owner, &target, &str(&env, "Alert"), &str(&env, "hash"), &vec![&env]);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
     assert!(client.get_alert(&id).unwrap().active);
 }
 
 // 13. register_alert rejects more than 50 rules
 #[test]
-#[should_panic(expected = "too many rules: maximum is 50")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_register_alert_too_many_rules() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
@@ -391,18 +435,18 @@ fn test_register_alert_too_many_rules() {
     for _ in 0..51u32 {
         rules.push_back(str(&env, "rule"));
     }
-    client.register_alert(&owner, &target, &str(&env, "A"), &str(&env, "h"), &rules);
+    client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
 }
 
 // 14. update_alert rejects more than 50 rules
 #[test]
-#[should_panic(expected = "too many rules: maximum is 50")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_update_alert_too_many_rules() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    let id = client.register_alert(&owner, &target, &str(&env, "A"), &str(&env, "h"), &vec![&env]);
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
 
     let mut rules: Vec<String> = vec![&env];
     for _ in 0..51u32 {
@@ -420,21 +464,28 @@ fn test_register_alert_exactly_50_rules() {
 
     let mut rules: Vec<String> = vec![&env];
     for i in 0..50u32 {
-        rules.push_back(str(&env, if i % 2 == 0 { "rule:transfer" } else { "rule:mint" }));
+        rules.push_back(str(
+            &env,
+            if i % 2 == 0 {
+                "rule:transfer"
+            } else {
+                "rule:mint"
+            },
+        ));
     }
-    let id = client.register_alert(&owner, &target, &str(&env, "A"), &str(&env, "h"), &rules);
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
     assert_eq!(client.get_alert(&id).unwrap().rules.len(), 50);
 }
 
 // 16. Label exceeding 128 bytes is rejected
 #[test]
-#[should_panic(expected = "label exceeds 128 bytes")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_label_too_long() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
     let long_label = str(&env, &"a".repeat(129));
-    client.register_alert(&owner, &target, &long_label, &str(&env, "hash"), &vec![&env]);
+    client.register_alert(&owner, &target, &long_label, &hash64(&env), &vec![&env]);
 }
 
 // 17. Label at exactly 128 bytes is accepted
@@ -444,7 +495,7 @@ fn test_label_max_length_accepted() {
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
     let max_label = str(&env, &"a".repeat(128));
-    client.register_alert(&owner, &target, &max_label, &str(&env, "hash"), &vec![&env]);
+    client.register_alert(&owner, &target, &max_label, &hash64(&env), &vec![&env]);
 }
 
 // ── Soroban string-length boundary tests ─────────────────────────────────────
@@ -456,24 +507,24 @@ fn test_label_max_length_accepted() {
 
 // 18. Label of 8 192 bytes (Soroban max) is rejected by the app guard.
 #[test]
-#[should_panic(expected = "label exceeds 128 bytes")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_label_at_soroban_max_rejected_by_app_guard() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
     let label = str_repeat(&env, 'a', 8192);
-    client.register_alert(&owner, &target, &label, &str(&env, "hash"), &vec![&env]);
+    client.register_alert(&owner, &target, &label, &hash64(&env), &vec![&env]);
 }
 
 // 19. Label of 8 191 bytes (one below Soroban max) is also rejected by the app guard.
 #[test]
-#[should_panic(expected = "label exceeds 128 bytes")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_label_one_below_soroban_max_rejected_by_app_guard() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
     let label = str_repeat(&env, 'b', 8191);
-    client.register_alert(&owner, &target, &label, &str(&env, "hash"), &vec![&env]);
+    client.register_alert(&owner, &target, &label, &hash64(&env), &vec![&env]);
 }
 
 // 20. A Soroban String of exactly 8 192 bytes can be constructed without panicking.
@@ -497,7 +548,7 @@ fn test_renew_alert_ttl_happy_path() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env, str(&env, "rule:transfer")],
     );
 
@@ -531,7 +582,7 @@ fn test_renew_alert_ttl_unauthorized() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
@@ -572,22 +623,22 @@ fn test_propose_webhook_stores_pending_hash() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "old-hash"),
+        &hash64c(&env, 'a'),
         &vec![&env],
     );
 
     assert_eq!(
         client
-            .try_propose_webhook(&owner, &id, &str(&env, "new-hash"))
+            .try_propose_webhook(&owner, &id, &hash64c(&env, 'b'))
             .unwrap(),
         Ok(())
     );
 
     let cfg = client.get_alert(&id).unwrap();
     // Live hash must still be the original
-    assert_eq!(cfg.webhook_hash, str(&env, "old-hash"));
+    assert_eq!(cfg.webhook_hash, hash64c(&env, 'a'));
     // Pending hash must be set
-    assert_eq!(cfg.pending_webhook_hash, Some(str(&env, "new-hash")));
+    assert_eq!(cfg.pending_webhook_hash, Some(hash64c(&env, 'b')));
 }
 
 // confirm_webhook — happy path: pending hash is promoted to live hash
@@ -601,17 +652,17 @@ fn test_confirm_webhook_promotes_pending_hash() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "old-hash"),
+        &hash64c(&env, 'a'),
         &vec![&env],
     );
 
-    client.propose_webhook(&owner, &id, &str(&env, "new-hash")).unwrap();
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
 
     assert_eq!(client.try_confirm_webhook(&owner, &id).unwrap(), Ok(()));
 
     let cfg = client.get_alert(&id).unwrap();
     // Live hash must now be the new one
-    assert_eq!(cfg.webhook_hash, str(&env, "new-hash"));
+    assert_eq!(cfg.webhook_hash, hash64c(&env, 'b'));
     // Pending hash must be cleared
     assert!(cfg.pending_webhook_hash.is_none());
 }
@@ -627,7 +678,7 @@ fn test_confirm_webhook_no_pending_returns_error() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
@@ -652,13 +703,13 @@ fn test_propose_webhook_unauthorized() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
     assert_eq!(
         client
-            .try_propose_webhook(&attacker, &id, &str(&env, "evil-hash"))
+            .try_propose_webhook(&attacker, &id, &hash64c(&env, 'e'))
             .unwrap_err()
             .unwrap(),
         ContractError::Unauthorized
@@ -677,11 +728,11 @@ fn test_confirm_webhook_unauthorized() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
-    client.propose_webhook(&owner, &id, &str(&env, "new-hash")).unwrap();
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
 
     assert_eq!(
         client
@@ -700,7 +751,7 @@ fn test_propose_webhook_not_found() {
 
     assert_eq!(
         client
-            .try_propose_webhook(&caller, &999u64, &str(&env, "hash"))
+            .try_propose_webhook(&caller, &999u64, &hash64(&env))
             .unwrap_err()
             .unwrap(),
         ContractError::AlertNotFound
@@ -733,17 +784,17 @@ fn test_propose_webhook_overwrites_previous_pending() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "original"),
+        &hash64c(&env, 's'),
         &vec![&env],
     );
 
-    client.propose_webhook(&owner, &id, &str(&env, "first-pending")).unwrap();
-    client.propose_webhook(&owner, &id, &str(&env, "second-pending")).unwrap();
+    client.propose_webhook(&owner, &id, &hash64c(&env, 't'));
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'u'));
 
     let cfg = client.get_alert(&id).unwrap();
-    assert_eq!(cfg.pending_webhook_hash, Some(str(&env, "second-pending")));
+    assert_eq!(cfg.pending_webhook_hash, Some(hash64c(&env, 'u')));
     // Live hash still unchanged
-    assert_eq!(cfg.webhook_hash, str(&env, "original"));
+    assert_eq!(cfg.webhook_hash, hash64c(&env, 's'));
 }
 
 // Full rotation flow: propose → confirm → propose again → confirm again
@@ -757,22 +808,22 @@ fn test_webhook_rotation_full_cycle() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "v1"),
+        &hash64c(&env, 'p'),
         &vec![&env],
     );
 
     // First rotation
-    client.propose_webhook(&owner, &id, &str(&env, "v2")).unwrap();
-    client.confirm_webhook(&owner, &id).unwrap();
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'q'));
+    client.confirm_webhook(&owner, &id);
     let cfg = client.get_alert(&id).unwrap();
-    assert_eq!(cfg.webhook_hash, str(&env, "v2"));
+    assert_eq!(cfg.webhook_hash, hash64c(&env, 'q'));
     assert!(cfg.pending_webhook_hash.is_none());
 
     // Second rotation
-    client.propose_webhook(&owner, &id, &str(&env, "v3")).unwrap();
-    client.confirm_webhook(&owner, &id).unwrap();
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'r'));
+    client.confirm_webhook(&owner, &id);
     let cfg = client.get_alert(&id).unwrap();
-    assert_eq!(cfg.webhook_hash, str(&env, "v3"));
+    assert_eq!(cfg.webhook_hash, hash64c(&env, 'r'));
     assert!(cfg.pending_webhook_hash.is_none());
 }
 
@@ -787,11 +838,11 @@ fn test_propose_webhook_emits_event() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
-    client.propose_webhook(&owner, &id, &str(&env, "new-hash")).unwrap();
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
 
     assert!(!env.events().all().is_empty());
 }
@@ -807,12 +858,12 @@ fn test_confirm_webhook_emits_event() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
-    client.propose_webhook(&owner, &id, &str(&env, "new-hash")).unwrap();
-    client.confirm_webhook(&owner, &id).unwrap();
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
+    client.confirm_webhook(&owner, &id);
 
     assert!(!env.events().all().is_empty());
 }
@@ -828,7 +879,7 @@ fn test_pending_webhook_hash_none_on_registration() {
         &owner,
         &target,
         &str(&env, "Alert"),
-        &str(&env, "hash"),
+        &hash64(&env),
         &vec![&env],
     );
 
@@ -847,11 +898,14 @@ fn test_ten_alerts_same_owner_same_contract() {
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
     // webhook_hash must be exactly 64 characters
-    let webhook_hash = str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let webhook_hash = str(
+        &env,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
     // 10 distinct labels
     let labels = [
-        "Alert 0", "Alert 1", "Alert 2", "Alert 3", "Alert 4",
-        "Alert 5", "Alert 6", "Alert 7", "Alert 8", "Alert 9",
+        "Alert 0", "Alert 1", "Alert 2", "Alert 3", "Alert 4", "Alert 5", "Alert 6", "Alert 7",
+        "Alert 8", "Alert 9",
     ];
 
     for label in labels {
@@ -866,12 +920,12 @@ fn test_ten_alerts_same_owner_same_contract() {
 
     // Both indexes must contain exactly 10 entries
     assert_eq!(
-        client.get_alerts_by_owner(&owner, &owner).unwrap().len(),
+        client.get_alerts_by_owner(&owner, &owner).len(),
         10,
         "owner index must contain exactly 10 entries"
     );
     assert_eq!(
-        client.get_alerts_for_contract(&owner, &target).unwrap().len(),
+        client.get_alerts_for_contract(&owner, &target).len(),
         10,
         "contract index must contain exactly 10 entries"
     );

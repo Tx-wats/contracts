@@ -42,10 +42,22 @@ if [[ "$NETWORK" == "testnet" ]]; then
 fi
 
 echo "==> Building contracts..."
-cargo build --release --target wasm32-unknown-unknown
+# Only the contract crates: building the whole workspace for wasm32 pulls in
+# test-utils, which force-enables soroban-sdk's std-only `testutils` feature.
+cargo build --release --target wasm32-unknown-unknown --locked \
+  -p alert-registry -p watcher-registry
 
-ALERT_WASM="target/wasm32-unknown-unknown/release/alert_registry.wasm"
-WATCHER_WASM="target/wasm32-unknown-unknown/release/watcher_registry.wasm"
+# Rust 1.82+ emits the WebAssembly reference-types proposal, which the Soroban
+# host rejects at upload ("reference-types not enabled"). `stellar contract
+# optimize` runs wasm-opt, which lowers the module back into the accepted
+# subset — so this step is required for deployability, not just size.
+echo "==> Optimizing WASM for on-chain upload..."
+for w in alert_registry watcher_registry; do
+  stellar contract optimize --wasm "target/wasm32-unknown-unknown/release/$w.wasm"
+done
+
+ALERT_WASM="target/wasm32-unknown-unknown/release/alert_registry.optimized.wasm"
+WATCHER_WASM="target/wasm32-unknown-unknown/release/watcher_registry.optimized.wasm"
 
 echo "==> Deploying Alert Registry..."
 ALERT_ID=$(stellar contract deploy \
