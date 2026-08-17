@@ -17,9 +17,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
+      # read rust-toolchain.toml. Parse the pin so that file stays the one source
+      # of truth for the Rust version.
+      - name: Resolve pinned toolchain
+        id: rust
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.channel }}
           targets: wasm32-unknown-unknown
 
       - name: Build WASM binaries
