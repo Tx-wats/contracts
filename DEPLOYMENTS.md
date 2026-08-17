@@ -13,8 +13,15 @@ After running `scripts/deploy.sh`, replace the placeholder values with the print
 
 | Contract | Address |
 |---|---|
-| Alert Registry | `CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` |
-| Watcher Registry | `CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` |
+| Alert Registry | `CDSO4GGZH7KBUQYKOIQDCMCFSRYEPOVDUX7Z4IB5TWNTLT2GDRKDQOYR` |
+| Watcher Registry | `CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J` |
+
+Deployed and initialized on 2026-08-17. Verified end to end on-chain:
+`register_alert` → `get_alert`, then a full `propose_webhook` → `confirm_webhook`
+rotation emitting `alert.wh_prop` and `alert.wh_conf`.
+
+- [Alert Registry on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CDSO4GGZH7KBUQYKOIQDCMCFSRYEPOVDUX7Z4IB5TWNTLT2GDRKDQOYR)
+- [Watcher Registry on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J)
 
 ### Testnet Network Details
 
