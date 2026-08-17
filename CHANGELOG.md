@@ -28,6 +28,17 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - The test suite compiles and passes for the first time: **169 tests**, plus
   `clippy -D warnings` and `cargo fmt --check` clean.
 
+### Security
+
+- **RUSTSEC-2026-0009 (`time`)** — the advisory scan could not run at all
+  (cargo-audit needs rustc >= 1.88) and the patched `time` release needs the
+  same, so the 1.85 pin made the advisory unfixable. The toolchain is bumped to
+  1.90.0 with a declared MSRV of 1.88, `time` is updated to 0.3.55, and the
+  audit runs as its own CI job on stable so it is never coupled to the
+  contracts' MSRV again. The crate reaches the workspace only through
+  `soroban-ledger-snapshot` (host/test tooling) and is not part of the deployed
+  `wasm32` artifact.
+
 ### Fixed — correctness
 
 - **`update_alert` silently discarded rule validation.** It called

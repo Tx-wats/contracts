@@ -1,3 +1,6 @@
 [toolchain]
-channel = "1.85.0"
+# Bumped from 1.85.0: the patched `time` (RUSTSEC-2026-0009) and current
+# cargo-audit both require rustc >= 1.88, so the old pin made the advisory
+# unfixable and blocked the audit from running at all.
+channel = "1.90.0"
 targets = ["wasm32-unknown-unknown"]

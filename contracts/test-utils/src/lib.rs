@@ -36,9 +36,7 @@ pub fn hash64(env: &Env) -> String {
 /// Build a Soroban [`String`] consisting of `n` repetitions of the ASCII
 /// character `ch`.  Handy for boundary-length tests.
 pub fn str_repeat(env: &Env, ch: char, n: usize) -> String {
-    let s = std::iter::repeat(ch)
-        .take(n)
-        .collect::<std::string::String>();
+    let s = std::iter::repeat_n(ch, n).collect::<std::string::String>();
     String::from_str(env, &s)
 }
 
