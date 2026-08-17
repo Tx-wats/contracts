@@ -57,11 +57,23 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
-      # Issue #105 — Dependency vulnerability scanning.
-      # cargo-audit's current release requires a newer rustc than the toolchain
-      # pinned in rust-toolchain.toml, so run the advisory scan through the
-      # RustSec action rather than compiling the binary against the pin.
+  # Issue #105 — Dependency vulnerability scanning.
+  #
+  # cargo-audit's current release needs a newer rustc than the toolchain pinned
+  # in rust-toolchain.toml, so installing it against the pin fails. `cargo audit`
+  # only reads Cargo.lock and never compiles this workspace, so it runs in its
+  # own job on stable — independent of the MSRV the contracts are built with.
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
       - name: Cargo audit
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo audit
