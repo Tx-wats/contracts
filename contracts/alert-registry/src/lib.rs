@@ -7,9 +7,12 @@
 //   - `#[contractimpl]` re-exports getters, so `#[must_use]` is not ours to add
 #![allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, vec,
-    Address, Env, String, Vec,
+    contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
+    symbol_short, vec, Address, Env, String, Vec,
 };
+
+contractmeta!(key = "Name", val = "AlertRegistry");
+contractmeta!(key = "Version", val = "0.1.0");
 
 // ── Storage keys ────────────────────────────────────────────────────────────
 
@@ -252,6 +255,18 @@ impl AlertRegistry {
     /// watcher-gating has not been enabled.
     pub fn get_watcher_registry(env: Env) -> Option<Address> {
         env.storage().instance().get(&symbol_short!("WATCHREG"))
+    }
+
+    /// Return `true` if watcher-gating is currently enabled (a `WatcherRegistry`
+    /// contract address is configured), `false` otherwise.
+    ///
+    /// # Arguments
+    /// * `env` - Soroban environment.
+    ///
+    /// # Returns
+    /// `true` if a watcher registry address is set, `false` otherwise.
+    pub fn is_watcher_gating_enabled(env: Env) -> bool {
+        Self::get_watcher_registry(env).is_some()
     }
 
     // ── Alert mutations ───────────────────────────────────────────────────
@@ -1844,6 +1859,7 @@ mod tests {
     fn test_get_watcher_registry_none_before_set() {
         let (_env, client) = setup();
         assert!(client.get_watcher_registry().is_none());
+        assert!(!client.is_watcher_gating_enabled());
     }
 
     // 16. set_watcher_registry persists and get_watcher_registry returns it
@@ -1862,6 +1878,23 @@ mod tests {
             alert_client.get_watcher_registry().unwrap(),
             watcher_contract_id
         );
+        assert!(alert_client.is_watcher_gating_enabled());
+    }
+
+    // 16b. is_watcher_gating_enabled convenience getter
+    #[test]
+    #[cfg(feature = "testutils")]
+    fn test_is_watcher_gating_enabled() {
+        let (env, alert_client, watcher_client) = setup_with_watcher_registry();
+        assert!(!alert_client.is_watcher_gating_enabled());
+
+        let admin = Address::generate(&env);
+        alert_client.initialize(&admin);
+
+        let watcher_contract_id = watcher_client.address.clone();
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+        assert!(alert_client.is_watcher_gating_enabled());
     }
 
     // 17. Only admin can set watcher registry

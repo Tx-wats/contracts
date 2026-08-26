@@ -55,6 +55,9 @@ bash scripts/deploy.sh
 5. Update the relevant doc in `docs/`.
 
 ## Sister Repos
-
+ 
 - **Core engine:** https://github.com/Tx-wat/stellar-txwatch-core
 - **Web dashboard:** https://github.com/Tx-wat/stellar-txwatch-web
+
+See [docs/compatibility.md](docs/compatibility.md) for the cross-repository compatibility matrix and release checklist.
+
