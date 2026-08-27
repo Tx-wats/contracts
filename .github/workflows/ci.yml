@@ -57,6 +57,10 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      # Issue #111 — Verify events documentation matches source emissions
+      - name: Check events documentation
+        run: bash scripts/check-events-doc.sh
+
   # Issue #105 — Dependency vulnerability scanning.
   #
   # cargo-audit's current release needs a newer rustc than the toolchain pinned

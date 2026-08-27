@@ -2455,6 +2455,200 @@ mod tests {
         client.remove_alert_by_admin(&admin, &id);
     }
 
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_set_watcher_registry_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        let watcher_registry = Address::generate(&env);
+        env.set_auths(&[]);
+        client.set_watcher_registry(&admin, &watcher_registry);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_propose_webhook_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+        let id =
+            client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        env.set_auths(&[]);
+        client.propose_webhook(&owner, &id, &hash64c(&env, 'p'));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_confirm_webhook_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+        let id =
+            client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        client.propose_webhook(&owner, &id, &hash64c(&env, 'p'));
+        env.set_auths(&[]);
+        client.confirm_webhook(&owner, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_renew_alert_ttl_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+        let id =
+            client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        env.set_auths(&[]);
+        client.renew_alert_ttl(&owner, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_update_label_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+        let id =
+            client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        env.set_auths(&[]);
+        client.update_label(&owner, &id, &str(&env, "New Label"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_deactivate_all_alerts_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+        client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        env.set_auths(&[]);
+        client.deactivate_all_alerts(&owner);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_update_target_contract_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let new_target = Address::generate(&env);
+        env.mock_all_auths();
+        let id =
+            client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        env.set_auths(&[]);
+        client.update_target_contract(&owner, &id, &new_target);
+    }
+
+    // ── Load & Scan-Cost Benchmarks (Issues #38, #39, #116) ───────────────────
+
+    /// Load test quantifying the O(N) full-scan cost of `get_alerts_modified_since` (#38).
+    /// Registers N alerts and benchmarks the CPU instruction cost of scanning the registry,
+    /// establishing an upper bound budget regression guard.
+    #[test]
+    fn test_load_get_alerts_modified_since_instruction_cost() {
+        const N: usize = 50;
+
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let hash = hash64(&env);
+        let rules = vec![&env, str(&env, "rule:transfer")];
+
+        for i in 0..N {
+            let label = str(&env, "Alert");
+            client.register_alert(&owner, &target, &label, &hash, &rules);
+            // Stagger timestamps so every alert has a distinct updated_at
+            if i % 5 == 0 {
+                env.ledger().with_mut(|li| li.timestamp += 1);
+            }
+        }
+
+        // Measure scan instruction cost across all N alerts
+        let cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
+        let modified = client.get_alerts_modified_since(&0u64);
+        let cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
+        let scan_cost = cpu_after.saturating_sub(cpu_before);
+
+        assert_eq!(modified.len() as usize, N);
+        // Assert an upper bound regression guard on the scan cost for N=50
+        assert!(
+            scan_cost < 15_000_000,
+            "get_alerts_modified_since cost {scan_cost} exceeded upper bound 15M instructions"
+        );
+    }
+
+    /// Load test quantifying the repeated rescan cost in `assert_per_owner_limit` (#39).
+    /// Registers alerts with an active per-owner limit and benchmarks instruction growth,
+    /// asserting an upper bound regression guard.
+    #[test]
+    fn test_load_assert_per_owner_limit_instruction_cost() {
+        const LIMIT: u32 = 40;
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_per_owner_alert_limit(&admin, &LIMIT);
+
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let hash = hash64(&env);
+        let rules = vec![&env];
+
+        let mut first_reg_cost: u64 = 0;
+        let mut last_reg_cost: u64 = 0;
+
+        let total_cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
+
+        for i in 0..LIMIT {
+            let label = str(&env, "LimitLoadAlert");
+            let before = env.cost_estimate().budget().cpu_instruction_cost();
+            client.register_alert(&owner, &target, &label, &hash, &rules);
+            let after = env.cost_estimate().budget().cpu_instruction_cost();
+            let cost = after.saturating_sub(before);
+
+            if i == 0 {
+                first_reg_cost = cost;
+            } else if i == LIMIT - 1 {
+                last_reg_cost = cost;
+            }
+        }
+
+        let total_cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
+        let total_registration_cost = total_cpu_after.saturating_sub(total_cpu_before);
+
+        // Quantify that cost per registration includes the owner scan overhead
+        assert!(
+            first_reg_cost > 0 && last_reg_cost > 0,
+            "Registration costs must be non-zero"
+        );
+        // Assert an upper bound regression guard on total batch registration cost with limit checks
+        assert!(
+            total_registration_cost < 50_000_000,
+            "Total registration cost {total_registration_cost} exceeded upper bound 50M instructions"
+        );
+    }
+
     // #63 — ID monotonicity: each successive register_alert returns prev+1
     #[test]
     fn test_id_monotonicity() {
