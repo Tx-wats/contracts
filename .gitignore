@@ -25,3 +25,8 @@ abi/
 .env
 .env.*
 !.env.example
+
+# cargo-mutants output
+mutants.out/
+mutants.out.old/
+
