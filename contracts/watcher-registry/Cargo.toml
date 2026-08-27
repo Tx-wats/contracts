@@ -3,6 +3,11 @@ name = "watcher-registry"
 version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
+description = "Soroban smart contract for managing authorized watcher addresses on Stellar"
+license = "Apache-2.0"
+repository = "https://github.com/Tx-wat/contracts"
+homepage = "https://github.com/Tx-wat/contracts"
+documentation = "https://docs.rs/watcher-registry"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

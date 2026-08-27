@@ -89,7 +89,14 @@ stellar contract invoke \
   -- initialize \
   --admin "$ADMIN_ADDRESS"
 
+ALERT_HASH=$(sha256sum "$ALERT_WASM" | awk '{print $1}')
+WATCHER_HASH=$(sha256sum "$WATCHER_WASM" | awk '{print $1}')
+
 echo ""
 echo "==> Deployment complete ($NETWORK). Update DEPLOYMENTS.md with:"
 echo "    Alert Registry:   $ALERT_ID"
 echo "    Watcher Registry: $WATCHER_ID"
+echo ""
+echo "==> WASM hashes (copy into DEPLOYMENTS.md):"
+echo "    Alert Registry:   $ALERT_HASH"
+echo "    Watcher Registry: $WATCHER_HASH"

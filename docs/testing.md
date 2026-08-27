@@ -118,3 +118,41 @@ The fuzz target subjects `AlertRegistry::validate_rule` and `AlertRegistry::vali
 | Regression tests | Yes / Context-dependent | Historical bugs in CHANGELOG.md cannot resurface |
 | Fuzz tests | N/A (libFuzzer) | Rule-descriptor parsing robustness under arbitrary inputs |
 
+## Auth-Required Test Coverage Checklist
+
+Every state-mutating public function in both contracts has been audited and equipped with a dedicated regression test confirming `require_auth()` is strictly enforced.
+
+### AlertRegistry
+
+| Function | Required Signer | Auth Required Test | Status |
+|---|---|---|:---:|
+| `register_alert` | `owner` | `test_register_alert_requires_auth` | ✅ |
+| `update_alert` | `caller` (owner) | `test_update_alert_requires_auth` | ✅ |
+| `update_webhook` | `caller` (owner) | `test_update_webhook_requires_auth` | ✅ |
+| `propose_webhook` | `caller` (owner) | `test_propose_webhook_requires_auth` | ✅ |
+| `confirm_webhook` | `caller` (owner) | `test_confirm_webhook_requires_auth` | ✅ |
+| `renew_alert_ttl` | `caller` (owner) | `test_renew_alert_ttl_requires_auth` | ✅ |
+| `update_label` | `caller` (owner) | `test_update_label_requires_auth` | ✅ |
+| `update_target_contract` | `caller` (owner) | `test_update_target_contract_requires_auth` | ✅ |
+| `deactivate_all_alerts` | `caller` (owner) | `test_deactivate_all_alerts_requires_auth` | ✅ |
+| `remove_alert` | `caller` (owner) | `test_remove_alert_requires_auth` | ✅ |
+| `remove_alert_by_admin` | `admin` | `test_remove_alert_by_admin_requires_auth` | ✅ |
+| `transfer_admin` | `admin` | `test_transfer_admin_requires_auth` | ✅ |
+| `set_per_owner_alert_limit` | `admin` | `test_set_per_owner_alert_limit_requires_auth` | ✅ |
+| `set_watcher_registry` | `admin` | `test_set_watcher_registry_requires_auth` | ✅ |
+| `bump_alert` | *None* (permissionless keeper) | *Tested via `test_bump_alert_by_third_party`* | N/A |
+| `initialize` | *None* (first-caller bootstrap) | *Tested via `test_double_initialize`* | N/A |
+
+### WatcherRegistry
+
+| Function | Required Signer | Auth Required Test | Status |
+|---|---|---|:---:|
+| `initialize` | `admin` | `test_initialize_requires_admin_auth` | ✅ |
+| `add_admin` | `caller` (admin) | `test_add_admin_requires_auth` | ✅ |
+| `remove_admin` | `caller` (admin) | `test_remove_admin_requires_auth` | ✅ |
+| `transfer_admin` | `admin` | `test_transfer_admin_requires_auth` | ✅ |
+| `register_watcher` | `admin` | `test_register_watcher_requires_auth` | ✅ |
+| `remove_watcher` | `admin` | `test_remove_watcher_requires_auth` | ✅ |
+| `replace_watcher` | `admin` | `test_replace_watcher_requires_auth` | ✅ |
+| `clear_all_watchers` | `admin` | `test_clear_all_watchers_requires_auth` | ✅ |
+

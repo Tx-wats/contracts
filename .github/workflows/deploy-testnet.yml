@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*.*.*'
 
+concurrency:
+  group: deploy-testnet-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -41,48 +45,64 @@ jobs:
           echo "$OUTPUT"
           ALERT_ID=$(echo "$OUTPUT" | grep "Alert Registry deployed:" | awk '{print $NF}')
           WATCHER_ID=$(echo "$OUTPUT" | grep "Watcher Registry deployed:" | awk '{print $NF}')
+          ALERT_HASH=$(echo "$OUTPUT" | grep "Alert Registry:" | tail -1 | awk '{print $NF}')
+          WATCHER_HASH=$(echo "$OUTPUT" | grep "Watcher Registry:" | tail -1 | awk '{print $NF}')
           echo "alert_id=$ALERT_ID" >> "$GITHUB_OUTPUT"
           echo "watcher_id=$WATCHER_ID" >> "$GITHUB_OUTPUT"
+          echo "alert_hash=$ALERT_HASH" >> "$GITHUB_OUTPUT"
+          echo "watcher_hash=$WATCHER_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Update DEPLOYMENTS.md
         env:
           ALERT_ID: ${{ steps.deploy.outputs.alert_id }}
           WATCHER_ID: ${{ steps.deploy.outputs.watcher_id }}
+          ALERT_HASH: ${{ steps.deploy.outputs.alert_hash }}
+          WATCHER_HASH: ${{ steps.deploy.outputs.watcher_hash }}
           TAG: ${{ github.ref_name }}
         run: |
           python3 - <<'EOF'
           import os, re
           from datetime import datetime, timezone
 
-          alert_id  = os.environ["ALERT_ID"]
+          alert_id   = os.environ["ALERT_ID"]
           watcher_id = os.environ["WATCHER_ID"]
-          tag       = os.environ["TAG"]
-          date      = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          alert_hash   = os.environ["ALERT_HASH"]
+          watcher_hash = os.environ["WATCHER_HASH"]
+          tag        = os.environ["TAG"]
+          date       = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
           text = open("DEPLOYMENTS.md").read()
 
-          # Replace contract addresses in the current-deployment table
-          text = re.sub(r"(Alert Registry \| )`[^`]+`", rf"\1`{alert_id}`", text)
-          text = re.sub(r"(Watcher Registry \| )`[^`]+`", rf"\1`{watcher_id}`", text)
+          # Replace contract addresses and WASM hashes in the current-deployment table
+          text = re.sub(r"(Alert Registry \| )`[^`]+`(\| )`[^`]+`", rf"\1`{alert_id}`\2`{alert_hash}`", text)
+          text = re.sub(r"(Watcher Registry \| )`[^`]+`(\| )`[^`]+`", rf"\1`{watcher_id}`\2`{watcher_hash}`", text)
 
           # Prepend new history rows before the placeholder row
           history_rows = (
-              f"| {date} | Alert Registry | `{alert_id}` | {tag} |\n"
-              f"| {date} | Watcher Registry | `{watcher_id}` | {tag} |\n"
+              f"| {date} | Alert Registry | `{alert_id}` | `{alert_hash}` | {tag} |\n"
+              f"| {date} | Watcher Registry | `{watcher_id}` | `{watcher_hash}` | {tag} |\n"
           )
           text = text.replace(
-              "| — | — | — | Initial placeholder |",
-              history_rows + "| — | — | — | Initial placeholder |",
+              "| — | — | — | — | Initial placeholder |",
+              history_rows + "| — | — | — | — | Initial placeholder |",
               1,
           )
 
           open("DEPLOYMENTS.md", "w").write(text)
           EOF
 
-      - name: Commit updated DEPLOYMENTS.md
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add DEPLOYMENTS.md
-          git commit -m "chore: update DEPLOYMENTS.md for ${{ github.ref_name }}"
-          git push origin HEAD:main
+      - name: Create Pull Request with updated DEPLOYMENTS.md
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: update DEPLOYMENTS.md for ${{ github.ref_name }}"
+          branch: "deploy/update-deployments-${{ github.ref_name }}"
+          title: "chore: update DEPLOYMENTS.md for ${{ github.ref_name }}"
+          body: |
+            Automated update of `DEPLOYMENTS.md` after deploying to testnet.
+
+            **Tag:** `${{ github.ref_name }}`
+            **Alert Registry:** `${{ steps.deploy.outputs.alert_id }}`
+            **Watcher Registry:** `${{ steps.deploy.outputs.watcher_id }}`
+
+            Please review the deployment addresses before merging.
+          labels: deployment

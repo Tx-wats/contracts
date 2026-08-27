@@ -317,7 +317,17 @@ See [DEPLOYMENTS.md](DEPLOYMENTS.md).
 
 - [Alert Registry function reference](docs/alert-registry.md)
 - [Watcher Registry function reference](docs/watcher-registry.md)
+- [Compatibility Matrix](docs/compatibility.md)
 - [Ecosystem submission guide](docs/ecosystem-submission.md)
+
+## Compatibility Matrix
+
+| Contract Tag / Version | Soroban SDK | npm Bindings | Core Engine | Web Dashboard | Status |
+|---|---|---|---|---|---|
+| **`v0.1.0`** | 22.0.0 | `^0.1.0` | `^0.1.0` | `^0.1.0` | Stable |
+| **`v0.2.0`** *(main)* | 22.0.0 | `^0.2.0` | `^0.2.0` | `^0.2.0` | Active Development |
+
+See [docs/compatibility.md](docs/compatibility.md) for the detailed compatibility matrix, policy, and release checklist.
 
 ## Contributing
 
@@ -325,9 +335,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Sister Repos
 
-- **Core engine:** https://github.com/Tx-wats/core
-- **Web dashboard:** https://github.com/Tx-wats/web
+- **Core engine:** https://github.com/Tx-wat/stellar-txwatch-core
+- **Web dashboard:** https://github.com/Tx-wat/stellar-txwatch-web
 
 ## License
 
 MIT
+

@@ -499,6 +499,16 @@ Returns the configured `WatcherRegistry` contract address, or `None` if watcher-
 
 ---
 
+### `is_watcher_gating_enabled`
+
+Convenience boolean getter returning `true` if watcher-gating is currently active (`WATCHREG` is configured), or `false` otherwise.
+
+**Parameters:** none
+
+**Returns:** `bool`
+
+---
+
 ## Errors
 
 | Variant | Code | Description |
