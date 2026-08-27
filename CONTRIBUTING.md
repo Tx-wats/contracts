@@ -54,6 +54,11 @@ bash scripts/deploy.sh
 4. Run `cargo test` to confirm everything passes.
 5. Update the relevant doc in `docs/`.
 
+## Documentation Guidelines
+
+- **`docs/` directory:** Reserved strictly for durable, evergreen reference material (e.g., architecture guides, storage layouts, event catalogs, protocol specifications, API references).
+- **PR summaries & changelog notes:** Do not commit temporary per-PR summaries or change descriptions directly into `docs/`. PR details belong in GitHub pull request descriptions, and notable changes should be added to `CHANGELOG.md`.
+
 ## Sister Repos
  
 - **Core engine:** https://github.com/Tx-wat/stellar-txwatch-core

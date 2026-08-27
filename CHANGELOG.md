@@ -54,6 +54,11 @@ The workspace did not compile and the test suite had never run. Both are now gre
 
 ### Added
 
+- **`get_alerts_by_owner_paginated` and `get_contract_alerts_paginated`** — paginated
+  retrieval of alert configs by owner address and contract-indexed lookups using a shared
+  `configs_paginated` helper (#39).
+- **`test_remove_watcher_not_registered`** — test verifying that calling `remove_watcher`
+  on a never-registered address completes without error and leaves the watcher list unchanged (#59).
 - **Two-phase webhook rotation** — `propose_webhook` stages a new hash in the new
   `AlertConfig::pending_webhook_hash` field without disturbing the live webhook;
   `confirm_webhook` promotes it and clears the pending slot, returning the new
@@ -65,6 +70,9 @@ The workspace did not compile and the test suite had never run. Both are now gre
   `get_alerts_modified_since` incremental syncs.
 
 ### Removed
+
+- `docs/pr-get-alerts-by-owner-paginated.md` and `docs/pr-remove-watcher-not-registered.md` —
+  removed stray per-PR change summaries in favor of durable reference documentation (#106).
 
 - `contracts/alert-registry/src/{contract,storage,types}.rs` — 857 lines of a
   second, divergent `AlertRegistry` implementation that was never declared as a
