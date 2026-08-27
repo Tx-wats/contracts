@@ -1,8 +1,24 @@
 # Ecosystem Submission Guide
 
-This document tracks the submission of `stellar-txwatch-contracts` to the
+This document tracks the submission status of `stellar-txwatch-contracts` to the
 Stellar Developer Tools ecosystem listing and the Soroban example contracts
 repository.
+
+---
+
+## Submission Status
+
+| Target | Status | Submission Date | PR / Tracking Link | Outcome / Notes |
+|---|---|---|---|---|
+| **Stellar Developer Tools Listing** (`stellar/stellar-docs`) | `Pending Submission` | — | — | Ready for PR submission to `stellar/stellar-docs` under Smart Contracts / Monitoring |
+| **Soroban Example Contracts** (`stellar/soroban-examples`) | `Pending Submission` | — | — | Ready for PR submission to `stellar/soroban-examples` once v0.1.0 release is tagged |
+| **npm Bindings Publishing** (`@tx-wat/watcher-registry`) | `Configured` | 2025-05-28 | [`.github/workflows/publish-bindings.yml`](../.github/workflows/publish-bindings.yml) | Automated CI publish on tagged release |
+
+> **Status Values:**
+> - `Pending Submission`: Ready to be submitted, awaiting submission PR creation.
+> - `Under Review`: PR submitted, awaiting maintainer review/merge.
+> - `Accepted` / `Merged`: PR merged and live in upstream documentation/repository.
+> - `Rejected` / `Revision Requested`: Feedback received requiring changes.
 
 ---
 

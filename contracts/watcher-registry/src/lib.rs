@@ -7,8 +7,12 @@
 //   - `#[contractimpl]` re-exports getters, so `#[must_use]` is not ours to add
 #![allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Env, Vec,
+    contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec, Address,
+    Env, Vec,
 };
+
+contractmeta!(key = "Name", val = "WatcherRegistry");
+contractmeta!(key = "Version", val = "0.1.0");
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 

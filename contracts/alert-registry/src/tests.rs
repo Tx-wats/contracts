@@ -930,3 +930,10 @@ fn test_ten_alerts_same_owner_same_contract() {
         "contract index must contain exactly 10 entries"
     );
 }
+
+#[test]
+fn test_is_watcher_gating_enabled_default_false() {
+    let (_env, client) = setup();
+    assert!(!client.is_watcher_gating_enabled());
+    assert!(client.get_watcher_registry().is_none());
+}
