@@ -52,7 +52,12 @@ bash scripts/deploy.sh
 2. If it mutates state, call `<caller>.require_auth()` as the first line.
 3. Add at least one test in the `#[cfg(test)]` module covering the happy path and any auth rejection.
 4. Run `cargo test` to confirm everything passes.
-5. Update the relevant doc in `docs/`.
+5. Update the relevant documentation to prevent documentation drift:
+   - If this emits a new event, update `docs/events.md`.
+   - If this adds a storage key, update `docs/storage.md`.
+   - If this changes TTL behavior, update `docs/ttl.md`.
+   - Update contract-specific documentation in `docs/<contract-name>.md`.
+6. Note: An automated doc-sync check (issue #110) runs in CI as a backstop to catch cases where these manual documentation steps are missed.
 
 ## Sister Repos
  
