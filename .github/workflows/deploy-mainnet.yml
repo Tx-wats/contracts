@@ -1,26 +1,25 @@
-name: Deploy to Testnet
+name: Deploy to Mainnet
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_dispatch:
 
 concurrency:
-  group: deploy-testnet-${{ github.ref }}
+  group: deploy-mainnet
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: mainnet-production
+      url: https://stellar.expert/explorer/public
+
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
 
-      # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
-      # read rust-toolchain.toml. Parse the pin so that file stays the one source
-      # of truth for the Rust version.
       - name: Resolve pinned toolchain
         id: rust
         run: |
@@ -40,8 +39,9 @@ jobs:
         id: deploy
         env:
           STELLAR_IDENTITY: deployer
+          NETWORK: mainnet
         run: |
-          OUTPUT=$(bash scripts/deploy.sh 2>&1)
+          OUTPUT=$(bash scripts/deploy.sh --network mainnet 2>&1)
           echo "$OUTPUT"
           ALERT_ID=$(echo "$OUTPUT" | grep "Alert Registry deployed:" | awk '{print $NF}')
           WATCHER_ID=$(echo "$OUTPUT" | grep "Watcher Registry deployed:" | awk '{print $NF}')
@@ -52,7 +52,6 @@ jobs:
         env:
           ALERT_ID: ${{ steps.deploy.outputs.alert_id }}
           WATCHER_ID: ${{ steps.deploy.outputs.watcher_id }}
-          TAG: ${{ github.ref_name }}
         run: |
           python3 - <<'EOF'
           import os, re
@@ -60,19 +59,26 @@ jobs:
 
           alert_id  = os.environ["ALERT_ID"]
           watcher_id = os.environ["WATCHER_ID"]
-          tag       = os.environ["TAG"]
           date      = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
           text = open("DEPLOYMENTS.md").read()
 
-          # Replace contract addresses in the current-deployment table
-          text = re.sub(r"(Alert Registry \| )`[^`]+`", rf"\1`{alert_id}`", text)
-          text = re.sub(r"(Watcher Registry \| )`[^`]+`", rf"\1`{watcher_id}`", text)
+          # Replace placeholder addresses in the mainnet table
+          text = re.sub(
+              r"(Alert Registry \| )`CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`",
+              rf"\1`{alert_id}`",
+              text,
+          )
+          text = re.sub(
+              r"(Watcher Registry \| )`CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`",
+              rf"\1`{watcher_id}`",
+              text,
+          )
 
           # Prepend new history rows before the placeholder row
           history_rows = (
-              f"| {date} | Alert Registry | `{alert_id}` | {tag} |\n"
-              f"| {date} | Watcher Registry | `{watcher_id}` | {tag} |\n"
+              f"| {date} | Mainnet | Alert Registry | `{alert_id}` | Production deployment |\n"
+              f"| {date} | Mainnet | Watcher Registry | `{watcher_id}` | Production deployment |\n"
           )
           text = text.replace(
               "| — | — | — | Initial placeholder |",
@@ -86,15 +92,14 @@ jobs:
       - name: Create Pull Request with updated DEPLOYMENTS.md
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore: update DEPLOYMENTS.md for ${{ github.ref_name }}"
-          branch: "deploy/update-deployments-${{ github.ref_name }}"
-          title: "chore: update DEPLOYMENTS.md for ${{ github.ref_name }}"
+          commit-message: "chore: update DEPLOYMENTS.md for mainnet deployment"
+          branch: "deploy/mainnet"
+          title: "chore: update DEPLOYMENTS.md for mainnet deployment"
           body: |
-            Automated update of `DEPLOYMENTS.md` after deploying to testnet.
+            Automated update of `DEPLOYMENTS.md` after mainnet deployment.
 
-            **Tag:** `${{ github.ref_name }}`
             **Alert Registry:** `${{ steps.deploy.outputs.alert_id }}`
             **Watcher Registry:** `${{ steps.deploy.outputs.watcher_id }}`
 
-            Please review the deployment addresses before merging.
-          labels: deployment
+            Please verify the deployed contracts on Stellar Expert before merging.
+          labels: deployment, mainnet
