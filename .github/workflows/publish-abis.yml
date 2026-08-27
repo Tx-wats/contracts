@@ -4,6 +4,10 @@ on:
   release:
     types: [published]
 
+concurrency:
+  group: publish-abis-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish-abis:
     runs-on: ubuntu-latest

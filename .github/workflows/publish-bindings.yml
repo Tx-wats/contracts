@@ -8,6 +8,10 @@ on:
   release:
     types: [published]
 
+concurrency:
+  group: publish-bindings-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish-bindings:
     runs-on: ubuntu-latest
