@@ -197,6 +197,20 @@ Emitted when a watcher address is de-authorised.
 
 ---
 
+### `watcher.replace`
+
+Emitted when an existing watcher address is atomically replaced with a new watcher address.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("watcher")` |
+| Topic 1 | `Symbol("replace")` |
+| Data | `(old_watcher: Address, new_watcher: Address)` |
+
+**Status:** ✅ implemented (`replace_watcher`)
+
+---
+
 ### `admin.init`
 
 Emitted when the watcher registry admin is first initialised.
@@ -207,7 +221,35 @@ Emitted when the watcher registry admin is first initialised.
 | Topic 1 | `Symbol("init")` |
 | Data | `(admin: Address)` |
 
-**Status:** 🔲 planned (`initialize`)
+**Status:** ✅ implemented (`initialize`)
+
+---
+
+### `admin.add`
+
+Emitted when a new admin is added to the admin set.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("add")` |
+| Data | `(caller: Address, new_admin: Address)` |
+
+**Status:** ✅ implemented (`add_admin`)
+
+---
+
+### `admin.remove`
+
+Emitted when an admin is removed from the admin set.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("remove")` |
+| Data | `(caller: Address, target_admin: Address)` |
+
+**Status:** ✅ implemented (`remove_admin`)
 
 ---
 

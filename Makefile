@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt deploy-testnet bindings clean
+.PHONY: build test lint fmt check-events deploy-testnet bindings clean
 
 build:
 	cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
@@ -11,6 +11,9 @@ lint:
 
 fmt:
 	cargo fmt --all
+
+check-events:
+	bash scripts/check-events-doc.sh
 
 deploy-testnet:
 	bash scripts/deploy.sh
