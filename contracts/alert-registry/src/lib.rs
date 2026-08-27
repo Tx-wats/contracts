@@ -17,6 +17,10 @@ use soroban_sdk::{
 #[path = "tests.rs"]
 mod contract_tests;
 
+#[cfg(test)]
+#[path = "regression_tests.rs"]
+mod regression_tests;
+
 // ── TTL constants ─────────────────────────────────────────────────────────────
 
 /// Default TTL applied to persistent storage entries on every write.
@@ -1081,25 +1085,6 @@ impl AlertRegistry {
         Ok(())
     }
 
-    fn validate_rules(env: &Env, rules: &Vec<String>) -> Result<(), ContractError> {
-        if rules.len() > 50 {
-            return Err(ContractError::TooManyRules);
-        }
-        for i in 0..rules.len() {
-            Self::validate_rule(env, &rules.get(i).unwrap())?;
-        }
-        Ok(())
-    }
-
-    fn validate_rule(env: &Env, rule: &String) -> Result<(), ContractError> {
-        let transfer = String::from_str(env, "rule:transfer");
-        let mint = String::from_str(env, "rule:mint");
-        if *rule != transfer && *rule != mint {
-            return Err(ContractError::InvalidRuleDescriptor);
-        }
-        Ok(())
-    }
-
     fn remove_alert_record(env: &Env, config: &AlertConfig, config_id: u64, caller: &Address) {
         env.storage()
             .persistent()
@@ -1276,6 +1261,44 @@ impl AlertRegistry {
             }
         }
         out
+    }
+}
+
+impl AlertRegistry {
+    /// Validates a single rule descriptor string.
+    ///
+    /// Accepts only `"rule:transfer"` and `"rule:mint"`.
+    /// Returns [`ContractError::InvalidRuleDescriptor`] on any other string.
+    ///
+    /// Exposed for testing, integration, and fuzz testing.
+    /// # Errors
+    /// Returns [`ContractError::InvalidRuleDescriptor`] if `rule` is not recognized.
+    pub fn validate_rule(env: &Env, rule: &String) -> Result<(), ContractError> {
+        let transfer = String::from_str(env, "rule:transfer");
+        let mint = String::from_str(env, "rule:mint");
+        if *rule != transfer && *rule != mint {
+            return Err(ContractError::InvalidRuleDescriptor);
+        }
+        Ok(())
+    }
+
+    /// Validates a vector of rule descriptors.
+    ///
+    /// Ensures at most 50 rules are supplied and each rule matches a recognized prefix.
+    /// Exposed for testing, integration, and fuzz testing.
+    /// # Errors
+    /// Returns [`ContractError::TooManyRules`] if rules length exceeds 50.
+    /// Returns [`ContractError::InvalidRuleDescriptor`] if any rule descriptor is invalid.
+    /// # Panics
+    /// Panics if indexing into `rules` fails unexpectedly.
+    pub fn validate_rules(env: &Env, rules: &Vec<String>) -> Result<(), ContractError> {
+        if rules.len() > 50 {
+            return Err(ContractError::TooManyRules);
+        }
+        for i in 0..rules.len() {
+            Self::validate_rule(env, &rules.get(i).unwrap())?;
+        }
+        Ok(())
     }
 }
 

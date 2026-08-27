@@ -88,6 +88,26 @@ fn test_update_unauthorized() {
 }
 ```
 
+## Regression Testing
+
+Each contract contains a dedicated `regression_tests` module (`contracts/alert-registry/src/regression_tests.rs` and `contracts/watcher-registry/src/regression_tests.rs`) tied directly to historical bugs documented in `CHANGELOG.md`.
+
+These tests run automatically on every `cargo test` execution and in CI to guarantee that resolved correctness bugs, missing function bodies, event emission oversights, or parameter boundary errors never resurface.
+
+## Fuzz Testing
+
+The `alert-registry` contract includes `cargo-fuzz` targets for fuzz testing rule-descriptor parsing and validation (`contracts/alert-registry/fuzz`).
+
+### Running Fuzz Tests
+
+```bash
+# Run the validate_rule fuzz target for 30 seconds
+cd contracts/alert-registry
+cargo +nightly fuzz run validate_rule -- -max_total_time=30
+```
+
+The fuzz target subjects `AlertRegistry::validate_rule` and `AlertRegistry::validate_rules` to random byte streams, arbitrary UTF-8 strings, length boundaries, format-string-like patterns (`%s`, `%x`, `%n`), and invalid prefixes, verifying invariant enforcement and absence of panics. See [Fuzz Testing Findings](fuzzing-findings.md) for full execution results and coverage data.
+
 ## Summary
 
 | Test type | Use `mock_all_auths()`? | What it verifies |
@@ -95,3 +115,6 @@ fn test_update_unauthorized() {
 | Happy path | Yes | Business logic works correctly |
 | Unauthorized caller | Yes | Ownership guards reject wrong callers |
 | Auth required | No | `require_auth()` is present and enforced |
+| Regression tests | Yes / Context-dependent | Historical bugs in CHANGELOG.md cannot resurface |
+| Fuzz tests | N/A (libFuzzer) | Rule-descriptor parsing robustness under arbitrary inputs |
+
