@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — bindings & docs
+
+- **Published bindings baked a fake contract ID.** `publish-bindings.yml` passed
+  a literal `CXXX…` placeholder to `stellar contract bindings typescript`, and
+  `bindings/watcher-registry/src/index.ts` shipped the same placeholder for both
+  networks, so the package README's own usage example was non-functional as
+  published. CI now resolves the real address from `DEPLOYMENTS.md` via
+  `scripts/deployment_address.py`, **fails the publish job loudly** if it is
+  still a placeholder, overlays it into `src/index.ts`, and runs a post-publish
+  smoke test that instantiates the client against the deployed testnet address.
+  `networks.testnet.contractId` now holds the real testnet address;
+  `networks.mainnet.contractId` is `""` until mainnet is deployed (issue #90).
+  (issues #72, #73)
+- **`docs/watcher-registry.md` documented typed errors as raw panics.** Each
+  `**Panics:**` note is rewritten to describe the `Result<(), ContractError>` /
+  `try_*` pattern, and a new **Errors** table lists all five `ContractError`
+  variants with their discriminants. (issue #65)
+- **`docs/events.md` did not explain `replace_watcher`'s dual event.** A single
+  `replace_watcher` emits both `watcher.remove` and `watcher.replace` for the
+  same `old_watcher`; this is now documented with a worked indexer
+  de-duplication example. (issue #70)
+
 ### Fixed — build and test suite restored
 
 The workspace did not compile and the test suite had never run. Both are now green.

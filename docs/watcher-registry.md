@@ -4,6 +4,26 @@ Contract that stores authorized watcher node addresses on-chain. Only registered
 
 ---
 
+## Error handling: raw vs `try_` calls
+
+Every mutating entrypoint returns `Result<(), ContractError>` rather than
+panicking on a business-rule violation. How that surfaces through the generated
+SDK client depends on which method you call:
+
+- **Raw call** (`client.register_watcher(...)`) — an `Err(ContractError::X)`
+  from the contract is turned into a host error and the call **panics** with
+  `Error(Contract, #N)`, where `N` is the discriminant from the
+  [Errors](#errors) table.
+- **`try_` call** (`client.try_register_watcher(...)`) — returns
+  `Ok(Ok(()))` on success and `Ok(Err(ContractError::X))` on a typed failure,
+  so you can match the variant without catching a panic.
+
+Use `try_*` whenever a failure is an expected outcome you want to handle (for
+example, `WatcherNotFound` from `replace_watcher`). This mirrors the SDK
+behaviour described in [testing.md](./testing.md).
+
+---
+
 ## Functions
 
 ### `initialize`
@@ -18,9 +38,9 @@ Initializes the registry with an admin address. Can only be called once.
 |---|---|---|
 | `admin` | `Address` | Initial admin of the registry |
 
-**Returns:** nothing
+**Returns:** `Result<(), ContractError>`
 
-**Panics:** `"already initialized"` if called more than once.
+**Errors:** returns `ContractError::AlreadyInitialized` if called more than once. Through a raw client call this surfaces as a panic with `Error(Contract, #1)`; via `try_initialize` it is `Ok(Err(ContractError::AlreadyInitialized))`.
 
 ---
 
@@ -37,9 +57,14 @@ Adds an address to the authorized watcher set. Idempotent — registering an alr
 | `admin` | `Address` | Current admin |
 | `watcher` | `Address` | Watcher address to authorize |
 
-**Returns:** nothing
+**Returns:** `Result<(), ContractError>`
 
-**Panics:** `"unauthorized"` if `admin` does not match the stored admin.
+**Errors:**
+
+- `ContractError::NotInitialized` (`#3`) if the contract has not been initialized.
+- `ContractError::Unauthorized` (`#2`) if `admin` is not in the admin set.
+
+A raw client call panics with `Error(Contract, #N)`; `try_register_watcher` returns `Ok(Err(ContractError::…))`.
 
 ---
 
@@ -56,9 +81,14 @@ Removes an address from the authorized watcher set.
 | `admin` | `Address` | Current admin |
 | `watcher` | `Address` | Watcher address to remove |
 
-**Returns:** nothing
+**Returns:** `Result<(), ContractError>`
 
-**Panics:** `"unauthorized"` if `admin` does not match the stored admin.
+**Errors:**
+
+- `ContractError::NotInitialized` (`#3`) if the contract has not been initialized.
+- `ContractError::Unauthorized` (`#2`) if `admin` is not in the admin set.
+
+Removing an address that is not registered is a no-op — it returns `Ok(())` and emits no event. A raw client call panics with `Error(Contract, #N)`; `try_remove_watcher` returns `Ok(Err(ContractError::…))`.
 
 ---
 
@@ -113,9 +143,14 @@ Transfers the admin role to a new address.
 | `admin` | `Address` | Current admin |
 | `new_admin` | `Address` | Address to become the new admin |
 
-**Returns:** nothing
+**Returns:** `Result<(), ContractError>`
 
-**Panics:** `"unauthorized"` if `admin` does not match the stored admin.
+**Errors:**
+
+- `ContractError::NotInitialized` (`#3`) if the contract has not been initialized.
+- `ContractError::Unauthorized` (`#2`) if `admin` is not in the admin set.
+
+Replaces the **entire** admin set with `new_admin`. A raw client call panics with `Error(Contract, #N)`; `try_transfer_admin` returns `Ok(Err(ContractError::…))`.
 
 ---
 
@@ -125,9 +160,25 @@ Returns the current admin address.
 
 **Parameters:** none
 
-**Returns:** `Address`
+**Returns:** `Result<Address, ContractError>`
 
-**Panics:** `"not initialized"` if the contract has not been initialized.
+**Errors:** returns `ContractError::NotInitialized` (`#3`) if the contract has not been initialized. A raw client call panics with `Error(Contract, #3)`; `try_get_admin` returns `Ok(Err(ContractError::NotInitialized))`.
+
+---
+
+## Errors
+
+The contract defines a single error enum ([`lib.rs`](../contracts/watcher-registry/src/lib.rs)). Each variant is returned as `Err(ContractError::…)` from the relevant entrypoint.
+
+| Variant | Discriminant | Returned by | Meaning |
+|---|---|---|---|
+| `AlreadyInitialized` | `1` | `initialize` | `initialize` was called after the registry was already set up. |
+| `Unauthorized` | `2` | `add_admin`, `remove_admin`, `transfer_admin`, `register_watcher`, `remove_watcher`, `replace_watcher`, `clear_all_watchers` | The caller is not a member of the admin set. |
+| `NotInitialized` | `3` | every admin-gated entrypoint, `get_admins`, `get_admin` | A privileged call or admin read happened before `initialize`. |
+| `LastAdmin` | `4` | `remove_admin` | Removing this admin would leave the registry with no admins, permanently locking it. |
+| `WatcherNotFound` | `5` | `replace_watcher` | `old_watcher` is not currently registered, so there is nothing to replace. |
+
+See [Error handling: raw vs `try_` calls](#error-handling-raw-vs-try_-calls) for how these surface through the generated SDK client.
 
 ---
 

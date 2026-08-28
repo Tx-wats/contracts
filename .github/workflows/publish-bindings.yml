@@ -57,16 +57,81 @@ jobs:
             | tar -xz -C /usr/local/bin stellar
           stellar --version
 
+      # ── Resolve the real deployed contract ID ───────────────────────────────
+      # DEPLOYMENTS.md is the source of truth. This step fails the publish job
+      # loudly if the testnet address is still a placeholder, so we never ship
+      # bindings baked with a fake contract ID. Mainnet is optional: it is only
+      # overlaid once it has been deployed (issue #90).
+      - name: Resolve deployed contract IDs
+        id: contract
+        run: |
+          testnet_id=$(python3 scripts/deployment_address.py --network testnet --contract "Watcher Registry")
+          echo "testnet_id=$testnet_id" >> "$GITHUB_OUTPUT"
+          echo "Resolved testnet Watcher Registry: $testnet_id"
+
+          if mainnet_id=$(python3 scripts/deployment_address.py --network mainnet --contract "Watcher Registry" 2>/dev/null); then
+            echo "mainnet_id=$mainnet_id" >> "$GITHUB_OUTPUT"
+            echo "Resolved mainnet Watcher Registry: $mainnet_id"
+          else
+            echo "mainnet_id=" >> "$GITHUB_OUTPUT"
+            echo "Mainnet Watcher Registry not deployed yet — leaving networks.mainnet.contractId empty."
+          fi
+
       # ── Generate TypeScript bindings ─────────────────────────────────────────
       # `stellar contract bindings typescript` reads the WASM contract spec and
       # emits a fully-typed npm package into the output directory.
       - name: Generate WatcherRegistry TypeScript bindings
+        env:
+          TESTNET_ID: ${{ steps.contract.outputs.testnet_id }}
         run: |
           stellar contract bindings typescript \
             --wasm target/wasm32-unknown-unknown/release/watcher_registry.wasm \
-            --contract-id CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
+            --contract-id "$TESTNET_ID" \
             --output-dir bindings/watcher-registry \
             --overwrite
+
+      # ── Overlay the real contract IDs into the hand-maintained entry point ───
+      # src/index.ts ships in the published package and exports the `networks`
+      # map. Re-read the resolved addresses from DEPLOYMENTS.md here so the
+      # published value can never drift from the source of truth, matching the
+      # promise in src/index.ts.
+      - name: Overlay contract IDs into src/index.ts
+        env:
+          TESTNET_ID: ${{ steps.contract.outputs.testnet_id }}
+          MAINNET_ID: ${{ steps.contract.outputs.mainnet_id }}
+        run: |
+          node - <<'EOF'
+          const fs = require("fs");
+          const path = "bindings/watcher-registry/src/index.ts";
+          const testnetId = process.env.TESTNET_ID;
+          const mainnetId = process.env.MAINNET_ID || "";
+
+          if (!testnetId) {
+            console.error("TESTNET_ID is empty — refusing to publish placeholder bindings.");
+            process.exit(1);
+          }
+
+          let src = fs.readFileSync(path, "utf8");
+          if (!src.includes("testnet:") || !src.includes("mainnet:")) {
+            console.error(`${path} no longer contains the networks map — cannot overlay contract IDs.`);
+            process.exit(1);
+          }
+
+          const setContractId = (network, id) => {
+            const re = new RegExp(`(${network}:\\s*\\{[\\s\\S]*?contractId:\\s*)"[^"]*"`);
+            if (!re.test(src)) {
+              console.error(`Could not find ${network}.contractId in ${path}.`);
+              process.exit(1);
+            }
+            src = src.replace(re, `$1"${id}"`);
+          };
+
+          setContractId("testnet", testnetId);
+          setContractId("mainnet", mainnetId);
+
+          fs.writeFileSync(path, src);
+          console.log(`Overlaid contract IDs: testnet=${testnetId} mainnet=${mainnetId || "(not deployed)"}`);
+          EOF
 
       # ── Merge hand-maintained package metadata ───────────────────────────────
       # The generator writes its own package.json; we overlay our curated
@@ -121,9 +186,69 @@ jobs:
         working-directory: bindings/watcher-registry
         run: npm run build
 
+      # Runs the bindings test suite against the generated client and the
+      # overlaid networks map — the testnet contractId assertion fails here if
+      # a placeholder somehow slipped through.
+      - name: Test bindings package
+        working-directory: bindings/watcher-registry
+        run: npm test
+
       # ── Publish to npm ───────────────────────────────────────────────────────
       - name: Publish to npm
         working-directory: bindings/watcher-registry
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # ── Post-publish smoke test ─────────────────────────────────────────────
+      # Install the just-published package from the public registry (retrying
+      # while npm propagates) and instantiate the client against the real
+      # deployed testnet address, exercising a read call end to end.
+      - name: Smoke-test the published package
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TESTNET_ID: ${{ steps.contract.outputs.testnet_id }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          npm init -y >/dev/null
+
+          echo "Waiting for @tx-wat/watcher-registry@${version} to appear on npm..."
+          for attempt in $(seq 1 10); do
+            if npm install "@tx-wat/watcher-registry@${version}" "@stellar/stellar-sdk@^12"; then
+              installed=1
+              break
+            fi
+            echo "  attempt ${attempt} failed, retrying in 15s..."
+            sleep 15
+          done
+          if [ -z "${installed:-}" ]; then
+            echo "Published package never became installable." >&2
+            exit 1
+          fi
+
+          cat > smoke.mjs <<'JS'
+          import { Client, networks } from "@tx-wat/watcher-registry";
+
+          const contractId = process.env.TESTNET_ID;
+          if (networks.testnet.contractId !== contractId) {
+            throw new Error(
+              `networks.testnet.contractId (${networks.testnet.contractId}) does not match the deployed address (${contractId})`,
+            );
+          }
+
+          const client = new Client({
+            contractId,
+            networkPassphrase: networks.testnet.networkPassphrase,
+            rpcUrl: networks.testnet.rpcUrl,
+          });
+
+          const { result } = await client.get_watchers();
+          if (!Array.isArray(result)) {
+            throw new Error(`get_watchers() did not return a list: ${JSON.stringify(result)}`);
+          }
+          console.log(`Smoke test OK — get_watchers() returned ${result.length} watcher(s).`);
+          JS
+
+          TESTNET_ID="$TESTNET_ID" node smoke.mjs

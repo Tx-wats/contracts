@@ -34,8 +34,13 @@ describe("WatcherRegistry bindings", () => {
     );
   });
 
-  it("testnet contract ID matches Stellar address format", () => {
-    expect(networks.testnet.contractId).toMatch(/^C[A-Z0-9]{55}$/);
+  it("testnet contract ID is a valid strkey contract address", () => {
+    // Strkey contract addresses: 'C' + 55 base32 chars (no 0, 1, 8, 9).
+    expect(networks.testnet.contractId).toMatch(/^C[A-Z2-7]{55}$/);
+  });
+
+  it("mainnet contract ID is empty until mainnet is deployed (issue #90)", () => {
+    expect(networks.mainnet.contractId).toBe("");
   });
 
   it("can instantiate Client with testnet config", () => {
