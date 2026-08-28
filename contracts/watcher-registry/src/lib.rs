@@ -224,6 +224,53 @@ impl WatcherRegistry {
         Ok(())
     }
 
+    /// Register multiple authorized watcher nodes in a single call (any admin may call this).
+    ///
+    /// Equivalent to calling [`register_watcher`] once per address, but rewrites
+    /// the watcher list once for the whole batch instead of once per address.
+    /// Already-registered addresses are skipped (idempotent), matching
+    /// [`register_watcher`]'s semantics. Emits one `("watcher", "register")`
+    /// event per newly-added watcher.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    pub fn register_watchers(
+        env: Env,
+        admin: Address,
+        watchers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        let mut current = Self::load_watchers(&env);
+        for i in 0..watchers.len() {
+            let watcher = watchers.get(i).unwrap();
+
+            let mut already_present = false;
+            for j in 0..current.len() {
+                if current.get(j).unwrap() == watcher {
+                    already_present = true;
+                    break;
+                }
+            }
+            if already_present {
+                continue;
+            }
+
+            current.push_back(watcher.clone());
+            Self::increment_watcher_count(&env);
+            env.events().publish(
+                (symbol_short!("watcher"), symbol_short!("register")),
+                watcher,
+            );
+        }
+        env.storage().instance().set(&DataKey::Watchers, &current);
+
+        Ok(())
+    }
+
     /// Remove (deauthorize) a watcher (any admin may call this).
     ///
     /// If the watcher address is not currently registered this is a no-op —
@@ -1167,6 +1214,69 @@ mod tests {
 
         // At least two events emitted (remove + replace)
         assert!(env.events().all().len() >= 2);
+    }
+
+    // ── register_watchers (batch) tests ──────────────────────────────────────
+
+    // 31. Happy path — register_watchers registers all new addresses
+    #[test]
+    fn test_register_watchers_happy_path() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+
+        client.register_watchers(&admin, &vec![&env, w1.clone(), w2.clone(), w3.clone()]);
+
+        assert_eq!(client.get_watchers().len(), 3);
+        assert!(client.is_watcher_authorized(&w1));
+        assert!(client.is_watcher_authorized(&w2));
+        assert!(client.is_watcher_authorized(&w3));
+        assert_eq!(client.get_watcher_count(), 3);
+    }
+
+    // 32. register_watchers skips addresses already registered (idempotent)
+    #[test]
+    fn test_register_watchers_idempotent() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watchers(&admin, &vec![&env, w1.clone(), w2.clone()]);
+
+        assert_eq!(client.get_watchers().len(), 2);
+        assert_eq!(client.get_watcher_count(), 2);
+    }
+
+    // 33. register_watchers rejects non-admin callers
+    #[test]
+    fn test_register_watchers_unauthorized() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let w1 = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_register_watchers(&attacker, &vec![&env, w1])
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 34. register_watchers emits one event per newly-added watcher
+    #[test]
+    fn test_register_watchers_emits_one_event_per_watcher() {
+        use soroban_sdk::testutils::Events as _;
+
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_watchers(&admin, &vec![&env, w1, w2]);
+
+        assert_eq!(env.events().all().len(), 2);
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
