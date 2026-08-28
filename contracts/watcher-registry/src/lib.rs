@@ -27,7 +27,14 @@ pub enum ContractError {
     LastAdmin = 4,
     /// Returned when the specified watcher is not currently registered.
     WatcherNotFound = 5,
+    /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
+    BelowMinWatchers = 6,
 }
+
+/// Minimum number of registered watchers that must remain after
+/// `remove_watcher` or `clear_all_watchers`. Prevents an admin (or a
+/// compromised admin key) from halting the monitoring system entirely.
+pub const MIN_WATCHERS: u32 = 1;
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -250,7 +257,8 @@ impl WatcherRegistry {
     /// Remove (deauthorize) a watcher (any admin may call this).
     ///
     /// If the watcher address is not currently registered this is a no-op —
-    /// the call succeeds and no event is emitted.
+    /// the call succeeds and no event is emitted. Refuses to drop the
+    /// watcher count below [`MIN_WATCHERS`].
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -262,6 +270,7 @@ impl WatcherRegistry {
     /// Dependent systems (e.g. `AlertRegistry` watcher-gating) should listen
     /// for this event to revoke trust immediately.
     /// # Errors
+    /// Returns [`ContractError::BelowMinWatchers`] if removing this watcher would drop the count below [`MIN_WATCHERS`].
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Panics
@@ -281,6 +290,11 @@ impl WatcherRegistry {
                 updated.push_back(w);
             }
         }
+
+        if removed && updated.len() < MIN_WATCHERS {
+            return Err(ContractError::BelowMinWatchers);
+        }
+
         env.storage().instance().set(&DataKey::Watchers, &updated);
 
         // Only emit the event and decrement the counter when the watcher was
@@ -399,12 +413,16 @@ impl WatcherRegistry {
     ///
     /// This is a bulk deauthorization operation.  Each removed watcher emits
     /// a `("watcher", "remove")` event so dependent systems can revoke trust
-    /// for every affected address.
+    /// for every affected address. Refused outright when [`MIN_WATCHERS`] is
+    /// greater than zero and the registry is non-empty, since clearing would
+    /// necessarily drop the count below that threshold; use [`remove_watcher`]
+    /// for selective removal instead.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
     /// existing admin.
     /// # Errors
+    /// Returns [`ContractError::BelowMinWatchers`] if the registry is non-empty and [`MIN_WATCHERS`] is greater than zero.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Panics
@@ -414,6 +432,10 @@ impl WatcherRegistry {
         Self::assert_admin(&env, &admin)?;
 
         let watchers = Self::load_watchers(&env);
+        if !watchers.is_empty() && MIN_WATCHERS > 0 {
+            return Err(ContractError::BelowMinWatchers);
+        }
+
         for i in 0..watchers.len() {
             let w = watchers.get(i).unwrap();
             env.events()
@@ -739,10 +761,20 @@ mod tests {
         assert_eq!(client.try_register_watcher(&admin, &w3).unwrap(), Ok(()));
         assert_eq!(client.get_watchers().len(), 3);
 
+        // Down to MIN_WATCHERS (1) removals succeed...
         assert_eq!(client.try_remove_watcher(&admin, &w1).unwrap(), Ok(()));
         assert_eq!(client.try_remove_watcher(&admin, &w2).unwrap(), Ok(()));
-        assert_eq!(client.try_remove_watcher(&admin, &w3).unwrap(), Ok(()));
-        assert_eq!(client.get_watchers().len(), 0);
+        assert_eq!(client.get_watchers().len(), 1);
+
+        // ...but removing the last remaining watcher is rejected.
+        assert_eq!(
+            client
+                .try_remove_watcher(&admin, &w3)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert_eq!(client.get_watchers().len(), 1);
     }
 
     // 10. get_admin returns correct admin
@@ -789,11 +821,15 @@ mod tests {
         assert_eq!(client.try_register_watcher(&admin, &w3).unwrap(), Ok(()));
         assert_eq!(client.get_watchers().len(), 3);
 
-        assert_eq!(client.try_clear_all_watchers(&admin).unwrap(), Ok(()));
-        assert_eq!(client.get_watchers().len(), 0);
-        assert!(!client.is_authorized(&w1));
-        assert!(!client.is_authorized(&w2));
-        assert!(!client.is_authorized(&w3));
+        // With MIN_WATCHERS enforced, clearing a non-empty registry is rejected.
+        assert_eq!(
+            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert_eq!(client.get_watchers().len(), 3);
+        assert!(client.is_authorized(&w1));
+        assert!(client.is_authorized(&w2));
+        assert!(client.is_authorized(&w3));
     }
 
     // 13. clear_all_watchers rejects non-admin
@@ -909,6 +945,54 @@ mod tests {
         let admins = client.get_admins();
         assert_eq!(admins.len(), 2);
         assert!(vec_contains(&admins, &second_admin));
+    }
+
+    // MIN_WATCHERS — remove_watcher refuses to drop below the threshold
+    #[test]
+    fn test_remove_watcher_below_min_watchers_rejected() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+
+        assert_eq!(
+            client.try_register_watcher(&admin, &watcher).unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            client
+                .try_remove_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert!(client.is_watcher_authorized(&watcher));
+    }
+
+    // MIN_WATCHERS — removing down to exactly the threshold is allowed
+    #[test]
+    fn test_remove_watcher_down_to_min_watchers_allowed() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+
+        assert_eq!(client.try_remove_watcher(&admin, &w1).unwrap(), Ok(()));
+        assert_eq!(client.get_watchers().len(), 1);
+    }
+
+    // MIN_WATCHERS — clear_all_watchers rejected while any watcher remains
+    #[test]
+    fn test_clear_all_watchers_below_min_watchers_rejected() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+
+        client.register_watcher(&admin, &watcher);
+
+        assert_eq!(
+            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            ContractError::BelowMinWatchers
+        );
     }
 
     // 13. add_admin — second admin can perform privileged operations
