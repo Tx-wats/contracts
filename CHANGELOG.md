@@ -124,6 +124,27 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - `docs/ecosystem-submission.md` — step-by-step guide for submitting to the Stellar Developer Tools ecosystem listing and the `stellar/soroban-examples` repository
 - `contracts/watcher-registry/README.md` and `contracts/alert-registry/README.md` — per-contract READMEs required for the soroban-examples submission
 
+### Documentation
+
+- **`docs/watcher-registry.md` synced with the contract.** The stale single-admin
+  `"ADMIN"` / `"WATCHERS"` storage table is replaced with the real `DataKey::Admins`
+  (multi-admin `Vec<Address>`), `DataKey::Watchers`, and the previously undocumented
+  `symbol_short!("W_CNT")` u32 counter. Added the missing `add_admin`, `remove_admin`,
+  `replace_watcher`, `clear_all_watchers`, and `get_admins` function entries, each with
+  its emitted-event topic/data shape, and corrected the `Result`-returning signatures
+  that the doc still described as panicking (#63, #64, #68).
+- **`docs/storage.md` WatcherRegistry keys** updated to `Admins` / `Watchers` / `W_CNT`
+  to match, including the storage-tier summary row (#63).
+- **`docs/events.md` intro banner** rewrote the stale "only `register_alert` and
+  `remove_alert` emit; everything else is planned" note; the WatcherRegistry
+  `admin.init` status and the `admin.add` / `admin.remove` / `watcher.replace` entries
+  were already corrected in a prior fix. Audited every remaining status line against
+  the contract source (#67).
+- **Role policy documented.** `WatcherRegistry` now states in its rustdoc and in
+  `docs/watcher-registry.md` that an address may hold both the admin and watcher roles,
+  and that contract addresses are accepted for either role. Covered by
+  `test_address_can_be_admin_and_watcher` and `test_contract_address_can_hold_roles` (#69).
+
 ## [0.1.0] - 2025-05-28
 
 ### Added
