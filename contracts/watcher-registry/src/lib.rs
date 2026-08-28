@@ -31,6 +31,15 @@ pub enum ContractError {
     MaxWatchersReached = 6,
     /// Returned when adding an admin would exceed [`MAX_ADMINS`].
     MaxAdminsReached = 7,
+    /// Returned when a sensitive action is called directly while a timelock
+    /// delay is configured — it must go through propose/execute instead.
+    TimelockRequired = 8,
+    /// Returned when proposing an action while another one is already queued.
+    ActionAlreadyPending = 9,
+    /// Returned when executing or cancelling with nothing queued.
+    NoPendingAction = 10,
+    /// Returned when executing a queued action before its delay has elapsed.
+    TimelockNotExpired = 11,
 }
 
 // ── Capacity limits ──────────────────────────────────────────────────────────
@@ -56,6 +65,39 @@ pub enum DataKey {
     Admins,
     /// Stores the `Vec<Address>` of authorized watcher nodes.
     Watchers,
+    /// Stores the timelock delay in ledgers (`u32`). Absent or `0` means the
+    /// timelock is disabled and sensitive actions execute immediately.
+    TimelockDelay,
+    /// Stores the single queued [`PendingAction`], if any.
+    PendingAction,
+}
+
+// ── Timelock types ───────────────────────────────────────────────────────────
+
+/// A sensitive admin action that can be queued behind the timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdminAction {
+    /// Add the given address to the admin set.
+    AddAdmin(Address),
+    /// Replace the entire admin set with the given address.
+    TransferAdmin(Address),
+    /// Deauthorize every registered watcher.
+    ClearAllWatchers,
+    /// Change the timelock delay (in ledgers).
+    SetTimelockDelay(u32),
+}
+
+/// A queued [`AdminAction`] and the ledger at which it becomes executable.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAction {
+    /// The action to run once the delay has elapsed.
+    pub action: AdminAction,
+    /// The admin that queued the action.
+    pub proposer: Address,
+    /// Ledger sequence at or after which the action may be executed.
+    pub ready_at: u32,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -69,6 +111,17 @@ pub enum DataKey {
 /// sole admin while keeping the authorization model simple and auditable.
 ///
 /// All admin mutations emit Soroban events so changes are visible on-chain.
+///
+/// # Timelock
+/// Deployments that want protection against a single compromised admin key can
+/// configure a delay with [`WatcherRegistry::set_timelock_delay`]. While a
+/// delay is set, the sensitive actions (`add_admin`, `transfer_admin`,
+/// `clear_all_watchers`, and lowering the delay itself) can no longer be called
+/// directly: they must be queued with
+/// [`WatcherRegistry::propose_admin_action`] and run with
+/// [`WatcherRegistry::execute_admin_action`] once the delay has elapsed, giving
+/// the other admins a window to [`WatcherRegistry::cancel_admin_action`].
+/// The delay defaults to `0`, which keeps the direct entrypoints available.
 #[contract]
 pub struct WatcherRegistry;
 
@@ -101,6 +154,9 @@ impl WatcherRegistry {
     /// Idempotent — adding an address that is already an admin is a no-op.
     /// The admin set is capped at [`MAX_ADMINS`] entries.
     ///
+    /// Sensitive: when a timelock delay is configured this must be queued via
+    /// [`Self::propose_admin_action`] instead of called directly.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be an
     /// existing admin.
@@ -108,30 +164,15 @@ impl WatcherRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::MaxAdminsReached`] if the admin set already holds [`MAX_ADMINS`] entries.
+    /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+        Self::assert_timelock_disabled(&env)?;
 
-        let mut admins = Self::load_admins(&env);
-        for i in 0..admins.len() {
-            if admins.get(i).unwrap() == new_admin {
-                return Ok(()); // already an admin, idempotent
-            }
-        }
-        if admins.len() >= MAX_ADMINS {
-            return Err(ContractError::MaxAdminsReached);
-        }
-        admins.push_back(new_admin.clone());
-        env.storage().instance().set(&DataKey::Admins, &admins);
-
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("add")),
-            (caller, new_admin),
-        );
-
-        Ok(())
+        Self::do_add_admin(&env, &caller, new_admin)
     }
 
     /// Remove an admin from the admin set (any existing admin may call this).
@@ -186,12 +227,16 @@ impl WatcherRegistry {
     ///
     /// Emits an `("admin", "transfer")` event recording both the old and new admin.
     ///
+    /// Sensitive: when a timelock delay is configured this must be queued via
+    /// [`Self::propose_admin_action`] instead of called directly.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
     /// existing admin.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
     pub fn transfer_admin(
         env: Env,
         admin: Address,
@@ -199,15 +244,9 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_timelock_disabled(&env)?;
 
-        let new_admins: Vec<Address> = vec![&env, new_admin.clone()];
-        env.storage().instance().set(&DataKey::Admins, &new_admins);
-
-        // Emit an auditable on-chain event recording the full admin transfer.
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("transfer")),
-            (admin, new_admin),
-        );
+        Self::do_transfer_admin(&env, &admin, new_admin);
 
         Ok(())
     }
@@ -406,30 +445,24 @@ impl WatcherRegistry {
     /// a `("watcher", "remove")` event so dependent systems can revoke trust
     /// for every affected address.
     ///
+    /// Sensitive: when a timelock delay is configured this must be queued via
+    /// [`Self::propose_admin_action`] instead of called directly.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
     /// existing admin.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn clear_all_watchers(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_timelock_disabled(&env)?;
 
-        let watchers = Self::load_watchers(&env);
-        for i in 0..watchers.len() {
-            let w = watchers.get(i).unwrap();
-            env.events()
-                .publish((symbol_short!("watcher"), symbol_short!("remove")), w);
-        }
-
-        let empty: Vec<Address> = vec![&env];
-        env.storage().instance().set(&DataKey::Watchers, &empty);
-
-        // Reset the count to zero
-        env.storage().instance().set(&symbol_short!("W_CNT"), &0u32);
+        Self::do_clear_all_watchers(&env);
 
         Ok(())
     }
@@ -476,7 +509,261 @@ impl WatcherRegistry {
             .unwrap_or(0u32)
     }
 
+    // ── Timelock ─────────────────────────────────────────────────────────────
+
+    /// Set the timelock delay, in ledgers, applied to sensitive admin actions
+    /// (`add_admin`, `transfer_admin`, `clear_all_watchers`).
+    ///
+    /// A delay of `0` (the default) keeps those entrypoints callable directly.
+    /// Once a non-zero delay is configured they return
+    /// [`ContractError::TimelockRequired`] and must go through
+    /// [`Self::propose_admin_action`] / [`Self::execute_admin_action`] instead.
+    ///
+    /// The delay can only be **raised** through this entrypoint. Lowering or
+    /// disabling it is itself a sensitive action and must be proposed as
+    /// [`AdminAction::SetTimelockDelay`], so a compromised admin key cannot
+    /// simply switch the protection off.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TimelockRequired`] if `delay_ledgers` is below the current delay.
+    pub fn set_timelock_delay(
+        env: Env,
+        caller: Address,
+        delay_ledgers: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+
+        if delay_ledgers < Self::timelock_delay(&env) {
+            return Err(ContractError::TimelockRequired);
+        }
+
+        Self::do_set_timelock_delay(&env, &caller, delay_ledgers);
+
+        Ok(())
+    }
+
+    /// Get the configured timelock delay in ledgers (`0` when disabled).
+    #[must_use]
+    pub fn get_timelock_delay(env: Env) -> u32 {
+        Self::timelock_delay(&env)
+    }
+
+    /// Get the currently queued admin action, if any.
+    #[must_use]
+    pub fn get_pending_action(env: Env) -> Option<PendingAction> {
+        env.storage().instance().get(&DataKey::PendingAction)
+    }
+
+    /// Queue a sensitive admin action for later execution.
+    ///
+    /// Only one action may be queued at a time; cancel the current one first.
+    /// Returns the ledger sequence at which the action becomes executable.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::ActionAlreadyPending`] if another action is already queued.
+    pub fn propose_admin_action(
+        env: Env,
+        caller: Address,
+        action: AdminAction,
+    ) -> Result<u32, ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+
+        if env.storage().instance().has(&DataKey::PendingAction) {
+            return Err(ContractError::ActionAlreadyPending);
+        }
+
+        let ready_at = env
+            .ledger()
+            .sequence()
+            .saturating_add(Self::timelock_delay(&env));
+        let pending = PendingAction {
+            action,
+            proposer: caller.clone(),
+            ready_at,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAction, &pending);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("propose")),
+            (caller, ready_at),
+        );
+
+        Ok(ready_at)
+    }
+
+    /// Cancel the queued admin action (any admin may call this).
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::NoPendingAction`] if no action is queued.
+    pub fn cancel_admin_action(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+
+        if !env.storage().instance().has(&DataKey::PendingAction) {
+            return Err(ContractError::NoPendingAction);
+        }
+        env.storage().instance().remove(&DataKey::PendingAction);
+
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("cancel")), caller);
+
+        Ok(())
+    }
+
+    /// Execute the queued admin action once its delay has elapsed.
+    ///
+    /// Any admin may execute — the delay, not the executor, is the protection:
+    /// it gives the other admins a window in which to spot and cancel an
+    /// action queued by a compromised key.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::NoPendingAction`] if no action is queued.
+    /// Returns [`ContractError::TimelockNotExpired`] if the delay has not yet elapsed.
+    /// Returns [`ContractError::MaxAdminsReached`] if the queued action would exceed [`MAX_ADMINS`].
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    pub fn execute_admin_action(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+
+        let pending: PendingAction = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAction)
+            .ok_or(ContractError::NoPendingAction)?;
+
+        if env.ledger().sequence() < pending.ready_at {
+            return Err(ContractError::TimelockNotExpired);
+        }
+
+        // Clear the queue before running the action so a failed action cannot
+        // be replayed and a successful one cannot be executed twice.
+        env.storage().instance().remove(&DataKey::PendingAction);
+
+        match pending.action {
+            AdminAction::AddAdmin(new_admin) => Self::do_add_admin(&env, &caller, new_admin)?,
+            AdminAction::TransferAdmin(new_admin) => {
+                Self::do_transfer_admin(&env, &caller, new_admin);
+            }
+            AdminAction::ClearAllWatchers => Self::do_clear_all_watchers(&env),
+            AdminAction::SetTimelockDelay(delay) => {
+                Self::do_set_timelock_delay(&env, &caller, delay);
+            }
+        }
+
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("execute")), caller);
+
+        Ok(())
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
+
+    /// Read the configured timelock delay, defaulting to `0` (disabled).
+    fn timelock_delay(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TimelockDelay)
+            .unwrap_or(0u32)
+    }
+
+    /// Return `Err(TimelockRequired)` when a delay is configured, so sensitive
+    /// entrypoints reject direct calls and force the propose/execute flow.
+    fn assert_timelock_disabled(env: &Env) -> Result<(), ContractError> {
+        if Self::timelock_delay(env) > 0 {
+            return Err(ContractError::TimelockRequired);
+        }
+        Ok(())
+    }
+
+    fn do_set_timelock_delay(env: &Env, caller: &Address, delay_ledgers: u32) {
+        env.storage()
+            .instance()
+            .set(&DataKey::TimelockDelay, &delay_ledgers);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("timelock")),
+            (caller.clone(), delay_ledgers),
+        );
+    }
+
+    /// Add `new_admin` to the admin set, idempotently and within [`MAX_ADMINS`].
+    fn do_add_admin(
+        env: &Env,
+        caller: &Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        let mut admins = Self::load_admins(env);
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == new_admin {
+                return Ok(()); // already an admin, idempotent
+            }
+        }
+        if admins.len() >= MAX_ADMINS {
+            return Err(ContractError::MaxAdminsReached);
+        }
+        admins.push_back(new_admin.clone());
+        env.storage().instance().set(&DataKey::Admins, &admins);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("add")),
+            (caller.clone(), new_admin),
+        );
+
+        Ok(())
+    }
+
+    /// Replace the entire admin set with `new_admin`.
+    fn do_transfer_admin(env: &Env, caller: &Address, new_admin: Address) {
+        let new_admins: Vec<Address> = vec![env, new_admin.clone()];
+        env.storage().instance().set(&DataKey::Admins, &new_admins);
+
+        // Emit an auditable on-chain event recording the full admin transfer.
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("transfer")),
+            (caller.clone(), new_admin),
+        );
+    }
+
+    /// Deauthorize every registered watcher, emitting one removal event each.
+    fn do_clear_all_watchers(env: &Env) {
+        let watchers = Self::load_watchers(env);
+        for i in 0..watchers.len() {
+            let w = watchers.get(i).unwrap();
+            env.events()
+                .publish((symbol_short!("watcher"), symbol_short!("remove")), w);
+        }
+
+        let empty: Vec<Address> = vec![env];
+        env.storage().instance().set(&DataKey::Watchers, &empty);
+
+        // Reset the count to zero
+        env.storage().instance().set(&symbol_short!("W_CNT"), &0u32);
+    }
 
     fn increment_watcher_count(env: &Env) {
         let count: u32 = env
@@ -1202,6 +1489,215 @@ mod tests {
             ContractError::MaxAdminsReached
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
+    }
+
+    // ── Timelock tests ────────────────────────────────────────────────────────
+
+    const TEST_DELAY: u32 = 100;
+
+    fn advance_ledgers(env: &Env, n: u32) {
+        use soroban_sdk::testutils::Ledger as _;
+        env.ledger().with_mut(|li| li.sequence_number += n);
+    }
+
+    // 34. Timelock is disabled by default — sensitive actions run directly.
+    #[test]
+    fn test_timelock_disabled_by_default() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_timelock_delay(), 0);
+        assert_eq!(client.try_add_admin(&admin, &new_admin).unwrap(), Ok(()));
+    }
+
+    // 35. With a delay set, direct sensitive calls are rejected.
+    #[test]
+    fn test_sensitive_actions_rejected_while_timelocked() {
+        let (env, admin, client) = setup();
+        let other = Address::generate(&env);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        assert_eq!(client.get_timelock_delay(), TEST_DELAY);
+
+        assert_eq!(
+            client.try_add_admin(&admin, &other).unwrap_err().unwrap(),
+            ContractError::TimelockRequired
+        );
+        assert_eq!(
+            client
+                .try_transfer_admin(&admin, &other)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TimelockRequired
+        );
+        assert_eq!(
+            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            ContractError::TimelockRequired
+        );
+
+        // Non-sensitive admin operations are unaffected.
+        assert_eq!(client.try_register_watcher(&admin, &other).unwrap(), Ok(()));
+    }
+
+    // 36. Propose then execute after the delay applies the action.
+    #[test]
+    fn test_execute_after_delay_adds_admin() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        let ready_at =
+            client.propose_admin_action(&admin, &AdminAction::AddAdmin(new_admin.clone()));
+        assert_eq!(ready_at, env.ledger().sequence() + TEST_DELAY);
+
+        advance_ledgers(&env, TEST_DELAY);
+        assert_eq!(client.try_execute_admin_action(&admin).unwrap(), Ok(()));
+
+        assert_eq!(client.get_admins().len(), 2);
+        assert!(client.get_pending_action().is_none());
+    }
+
+    // 37. Executing before the delay elapses is rejected.
+    #[test]
+    fn test_execute_before_delay_rejected() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::TransferAdmin(new_admin));
+
+        advance_ledgers(&env, TEST_DELAY - 1);
+        assert_eq!(
+            client
+                .try_execute_admin_action(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TimelockNotExpired
+        );
+        assert!(client.get_pending_action().is_some());
+    }
+
+    // 38. A co-admin can cancel a queued action before it becomes executable.
+    #[test]
+    fn test_cancel_pending_action() {
+        let (env, admin, client) = setup();
+        let co_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.add_admin(&admin, &co_admin);
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::TransferAdmin(attacker));
+
+        assert_eq!(client.try_cancel_admin_action(&co_admin).unwrap(), Ok(()));
+        assert!(client.get_pending_action().is_none());
+
+        advance_ledgers(&env, TEST_DELAY);
+        assert_eq!(
+            client
+                .try_execute_admin_action(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingAction
+        );
+        // The admin set is untouched.
+        assert_eq!(client.get_admins().len(), 2);
+    }
+
+    // 39. Only one action may be queued at a time.
+    #[test]
+    fn test_propose_while_pending_rejected() {
+        let (env, admin, client) = setup();
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::AddAdmin(first));
+
+        assert_eq!(
+            client
+                .try_propose_admin_action(&admin, &AdminAction::AddAdmin(second))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::ActionAlreadyPending
+        );
+    }
+
+    // 40. Non-admins cannot propose, cancel or execute.
+    #[test]
+    fn test_timelock_flow_rejects_non_admin() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::ClearAllWatchers);
+
+        assert_eq!(
+            client
+                .try_propose_admin_action(&attacker, &AdminAction::ClearAllWatchers)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+        assert_eq!(
+            client
+                .try_cancel_admin_action(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+        assert_eq!(
+            client
+                .try_execute_admin_action(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 41. The delay can be raised directly but only lowered through the timelock.
+    #[test]
+    fn test_delay_can_only_be_lowered_through_timelock() {
+        let (env, admin, client) = setup();
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        // Raising is allowed directly.
+        assert_eq!(
+            client.try_set_timelock_delay(&admin, &(TEST_DELAY * 2)).unwrap(),
+            Ok(())
+        );
+        // Lowering (including disabling) is not.
+        assert_eq!(
+            client
+                .try_set_timelock_delay(&admin, &0)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TimelockRequired
+        );
+
+        client.propose_admin_action(&admin, &AdminAction::SetTimelockDelay(0));
+        advance_ledgers(&env, TEST_DELAY * 2);
+        client.execute_admin_action(&admin);
+
+        assert_eq!(client.get_timelock_delay(), 0);
+    }
+
+    // 42. clear_all_watchers still works when executed through the timelock.
+    #[test]
+    fn test_execute_clear_all_watchers() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::ClearAllWatchers);
+        advance_ledgers(&env, TEST_DELAY);
+        client.execute_admin_action(&admin);
+
+        assert_eq!(client.get_watchers().len(), 0);
+        assert_eq!(client.get_watcher_count(), 0);
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
