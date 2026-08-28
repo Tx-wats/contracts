@@ -207,6 +207,10 @@ Emitted when an existing watcher address is atomically replaced with a new watch
 | Topic 1 | `Symbol("replace")` |
 | Data | `(old_watcher: Address, new_watcher: Address)` |
 
+> A self-replace (`old_watcher == new_watcher`) is a no-op: the address stays
+> authorized throughout, so neither `watcher.replace` nor `watcher.remove` is
+> emitted.
+
 **Status:** ✅ implemented (`replace_watcher`)
 
 ---

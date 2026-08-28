@@ -289,6 +289,8 @@ impl WatcherRegistry {
     /// # Events
     /// Emits `("watcher", "remove")` for `old_watcher` and
     /// `("watcher", "replace")` with data `(old_watcher, new_watcher)`.
+    /// A self-replace (`old_watcher == new_watcher`) is a no-op and emits
+    /// nothing, since the address stays authorized the entire time.
     /// # Errors
     /// Returns [`ContractError::WatcherNotFound`] if the address is not a registered watcher.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
@@ -318,6 +320,13 @@ impl WatcherRegistry {
 
         if !found {
             return Err(ContractError::WatcherNotFound);
+        }
+
+        // A self-replace leaves old_watcher authorized the whole time. Emitting
+        // watcher.remove here would tell listeners to revoke a still-valid
+        // watcher, so short-circuit before any storage write or event.
+        if old_watcher == new_watcher {
+            return Ok(());
         }
 
         // Add new_watcher only if not already present
@@ -1109,6 +1118,24 @@ mod tests {
 
         // At least two events emitted (remove + replace)
         assert!(env.events().all().len() >= 2);
+    }
+
+    // 31. self-replace (old == new) is a no-op — no spurious watcher.remove
+    #[test]
+    fn test_replace_watcher_self_replace_emits_no_events() {
+        let (env, admin, client) = setup();
+        let w = Address::generate(&env);
+
+        client.register_watcher(&admin, &w);
+        client.replace_watcher(&admin, &w, &w);
+
+        assert_eq!(
+            env.events().all().len(),
+            0,
+            "self-replace must not emit any watcher event"
+        );
+        assert!(client.is_watcher_authorized(&w));
+        assert_eq!(client.get_watcher_count(), 1);
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
