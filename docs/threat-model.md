@@ -28,6 +28,7 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 
 - **Unauthorized watcher registration.** Only the current admin can call `register_watcher` or `remove_watcher`. Any unsigned or incorrectly signed call is rejected at the protocol level.
 - **Admin hijacking via direct call.** `transfer_admin` requires the current admin's auth signature, preventing an attacker from reassigning admin without controlling the current admin key.
+- **A single admin unilaterally stripping co-admins.** In a multi-admin set, `transfer_admin` only ever replaces the *caller's own* slot in the admin set — it cannot touch other admins' entries. An admin wanting to remove another admin must use `remove_admin`, which is a separate, individually-authorized call per target and still refuses to remove the last remaining admin. This means no single admin (even a compromised one) can use `transfer_admin` to seize sole control of a multi-admin registry.
 - **Replay attacks.** Stellar's sequence number mechanism prevents replaying previously valid transactions.
 
 ---
@@ -49,8 +50,8 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 **Outcome:** Rejected by `require_auth()`. No state change.
 
 ### 2. Admin key is compromised
-**Vector:** Attacker obtains the admin private key and calls `register_watcher` or `transfer_admin`.  
-**Outcome:** Attacker gains full control of the registry. **Mitigation outside contract scope** — use hardware wallets, multi-sig accounts, or key rotation procedures.
+**Vector:** Attacker obtains an admin private key and calls `register_watcher`, `add_admin`, or `transfer_admin`.  
+**Outcome:** In a single-admin registry, the attacker gains full control. In a multi-admin registry, `transfer_admin` only replaces the *compromised admin's own* slot — the attacker cannot use it to strip other admins, though they can still add new admins via `add_admin` or perform any other privileged action available to a single admin. **Mitigation outside contract scope** — use hardware wallets, multi-sig accounts, or key rotation procedures; other admins can call `remove_admin` to revoke the compromised key's access.
 
 ### 3. Authorized watcher goes rogue
 **Vector:** A legitimately registered watcher node starts sending false or malicious alerts.  
@@ -68,6 +69,7 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 |---|---|
 | Only admin can modify the registry | ✅ |
 | Admin transfer requires current admin auth | ✅ |
+| `transfer_admin` cannot strip other admins in a multi-admin set | ✅ |
 | Replay protection | ✅ (Stellar protocol) |
 | Admin key compromise protection | ❌ |
 | Off-chain watcher behavior enforcement | ❌ |

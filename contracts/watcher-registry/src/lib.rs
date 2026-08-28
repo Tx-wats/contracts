@@ -155,11 +155,19 @@ impl WatcherRegistry {
         Ok(())
     }
 
-    /// Transfer the sole admin role to a new address (any existing admin may call this).
+    /// Transfer the caller's own admin slot to a new address (any existing
+    /// admin may call this, and only affects that admin's own membership).
     ///
-    /// This replaces the **entire** admin set with a single new admin. Use
-    /// [`add_admin`] + [`remove_admin`] if you want to rotate one member of a
-    /// multi-admin set without losing the others.
+    /// This replaces **only the caller's own entry** in the admin set with
+    /// `new_admin` — every other admin's membership is left untouched. In a
+    /// multi-admin set this means no single admin can unilaterally strip the
+    /// others; each admin can only hand off their own slot. Use [`add_admin`]
+    /// + [`remove_admin`] if you need finer-grained control over another
+    /// admin's membership (which itself requires that admin's own consent to
+    /// remove, aside from the last-admin guard).
+    ///
+    /// If `new_admin` is already an admin, the caller's slot is simply
+    /// dropped rather than duplicated.
     ///
     /// Emits an `("admin", "transfer")` event recording both the old and new admin.
     ///
@@ -177,10 +185,25 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
 
-        let new_admins: Vec<Address> = vec![&env, new_admin.clone()];
-        env.storage().instance().set(&DataKey::Admins, &new_admins);
+        let admins = Self::load_admins(&env);
+        let mut updated: Vec<Address> = vec![&env];
+        let mut new_already_present = false;
+        for i in 0..admins.len() {
+            let a = admins.get(i).unwrap();
+            if a == admin {
+                continue;
+            }
+            if a == new_admin {
+                new_already_present = true;
+            }
+            updated.push_back(a);
+        }
+        if !new_already_present {
+            updated.push_back(new_admin.clone());
+        }
+        env.storage().instance().set(&DataKey::Admins, &updated);
 
-        // Emit an auditable on-chain event recording the full admin transfer.
+        // Emit an auditable on-chain event recording the admin slot transfer.
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("transfer")),
             (admin, new_admin),
@@ -512,6 +535,15 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env};
 
+    fn vec_contains(items: &Vec<Address>, target: &Address) -> bool {
+        for i in 0..items.len() {
+            if items.get(i).unwrap() == *target {
+                return true;
+            }
+        }
+        false
+    }
+
     fn setup() -> (Env, Address, WatcherRegistryClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
@@ -817,6 +849,67 @@ mod tests {
     }
 
     // ── Multi-admin tests ─────────────────────────────────────────────────────
+
+    // transfer_admin only replaces the caller's own slot, preserving co-admins.
+    #[test]
+    fn test_transfer_admin_preserves_co_admins() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.try_add_admin(&admin, &second_admin).unwrap(), Ok(()));
+        assert_eq!(client.get_admins().len(), 2);
+
+        // admin transfers its own slot to new_admin.
+        assert_eq!(
+            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            Ok(())
+        );
+
+        let admins = client.get_admins();
+        assert_eq!(admins.len(), 2);
+        assert!(vec_contains(&admins, &new_admin));
+        assert!(vec_contains(&admins, &second_admin));
+        assert!(!vec_contains(&admins, &admin));
+
+        // the old admin slot no longer has privileges...
+        assert_eq!(
+            client
+                .try_add_admin(&admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+        // ...but the co-admin that was never touched still does.
+        assert_eq!(
+            client
+                .try_add_admin(&second_admin, &Address::generate(&env))
+                .unwrap(),
+            Ok(())
+        );
+    }
+
+    // transfer_admin cannot be used by one admin to strip every other admin.
+    #[test]
+    fn test_transfer_admin_cannot_strip_other_admins() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+        let attacker_target = Address::generate(&env);
+
+        assert_eq!(client.try_add_admin(&admin, &second_admin).unwrap(), Ok(()));
+
+        // admin transfers its own slot to a brand new address — at no point
+        // does second_admin lose its slot, since transfer_admin only ever
+        // touches the caller's own entry.
+        assert_eq!(
+            client.try_transfer_admin(&admin, &attacker_target).unwrap(),
+            Ok(())
+        );
+
+        let admins = client.get_admins();
+        assert_eq!(admins.len(), 2);
+        assert!(vec_contains(&admins, &second_admin));
+    }
 
     // 13. add_admin — second admin can perform privileged operations
     #[test]
