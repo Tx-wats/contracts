@@ -72,6 +72,8 @@ pub enum ContractError {
     DuplicateAlertId = 11,
     /// Returned by `confirm_webhook` when no webhook rotation is in progress.
     NoPendingWebhook = 12,
+    /// Returned when a state-mutating call is made while the contract is paused.
+    Paused = 13,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -178,6 +180,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("ADMIN"), &new_admin);
@@ -201,6 +204,52 @@ impl AlertRegistry {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
 
+    /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
+    ///
+    /// Intended as an emergency circuit-breaker if an admin key is suspected
+    /// compromised — mutations can be frozen while the incident is investigated.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PAUSED"), &true);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("pause")), admin);
+        Ok(())
+    }
+
+    /// Resume normal operation after a [`Self::pause`].
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PAUSED"), &false);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("unpause")), admin);
+        Ok(())
+    }
+
+    /// Return `true` if the contract is currently paused.
+    #[must_use]
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("PAUSED"))
+            .unwrap_or(false)
+    }
+
     /// Set a per-owner active alert limit (admin only). A value of `0` means no limit.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
@@ -212,6 +261,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("LIMIT"), &limit);
@@ -245,6 +295,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
@@ -303,6 +354,7 @@ impl AlertRegistry {
             return Err(ContractError::InvalidWebhookHash);
         }
         owner.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if label.len() > 128 {
             return Err(ContractError::LabelTooLong);
@@ -365,6 +417,7 @@ impl AlertRegistry {
         active: bool,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -423,6 +476,7 @@ impl AlertRegistry {
         webhook_hash: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if webhook_hash.len() != 64 {
             return Err(ContractError::InvalidWebhookHash);
@@ -484,6 +538,7 @@ impl AlertRegistry {
         webhook_hash: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if webhook_hash.len() != 64 {
             return Err(ContractError::InvalidWebhookHash);
@@ -530,6 +585,7 @@ impl AlertRegistry {
     /// Emits `(Symbol("alert"), Symbol("wh_conf"))` with data `(id: u64, caller: Address)`.
     pub fn confirm_webhook(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -577,6 +633,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
     pub fn renew_alert_ttl(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let config: AlertConfig = env
             .storage()
@@ -629,6 +686,7 @@ impl AlertRegistry {
         label: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if label.len() > 128 {
             return Err(ContractError::LabelTooLong);
@@ -676,6 +734,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     pub fn remove_alert(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let config: AlertConfig = env
             .storage()
@@ -703,6 +762,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let config: AlertConfig = env
             .storage()
@@ -736,6 +796,8 @@ impl AlertRegistry {
     /// Emits `(Symbol("alert"), Symbol("bump"))` with data
     /// `(id: u64, ttl: u32)` so off-chain indexers can track renewal activity.
     pub fn bump_alert(env: Env, config_id: u64, ttl: u32) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env)?;
+
         // Clamp the requested TTL to the protocol maximum.
         let effective_ttl = ttl.min(MAX_TTL);
 
@@ -890,6 +952,9 @@ impl AlertRegistry {
     /// Panics if the contract's stored state is malformed or missing.
     pub fn deactivate_all_alerts(env: Env, caller: Address) -> u32 {
         caller.require_auth();
+        if Self::is_paused(env.clone()) {
+            return 0;
+        }
         let ids = Self::owner_index(&env, &caller);
         let mut count: u32 = 0;
         for i in 0..ids.len() {
@@ -942,6 +1007,7 @@ impl AlertRegistry {
         new_target: Address,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -1070,6 +1136,18 @@ impl AlertRegistry {
         } else {
             Err(ContractError::Unauthorized)
         }
+    }
+
+    fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PAUSED"))
+            .unwrap_or(false);
+        if paused {
+            return Err(ContractError::Paused);
+        }
+        Ok(())
     }
 
     fn assert_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {

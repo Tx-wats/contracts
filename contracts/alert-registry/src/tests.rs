@@ -235,6 +235,84 @@ fn test_admin_transfer_admin() {
     client.remove_alert_by_admin(&new_admin, &id);
 }
 
+// ── Pause / circuit-breaker tests ────────────────────────────────────────
+
+#[test]
+fn test_pause_blocks_mutations() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    let result = client.try_register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+}
+
+#[test]
+fn test_unpause_restores_mutations() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.pause(&admin);
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert!(client.get_alert(&id).is_some());
+}
+
+#[test]
+fn test_pause_allows_reads() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.pause(&admin);
+
+    assert!(client.get_alert(&id).is_some());
+    assert_eq!(client.get_alert_count(), 1);
+}
+
+#[test]
+fn test_pause_unauthorized() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let attacker = Address::generate(&env);
+
+    let result = client.try_pause(&attacker);
+    assert_eq!(result.unwrap_err().unwrap(), ContractError::Unauthorized);
+}
+
 // 5. Unauthorized remove rejected
 #[test]
 fn test_remove_unauthorized() {

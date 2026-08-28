@@ -27,8 +27,10 @@ pub enum ContractError {
     LastAdmin = 4,
     /// Returned when the specified watcher is not currently registered.
     WatcherNotFound = 5,
+    /// Returned when a state-mutating call is made while the contract is paused.
+    Paused = 6,
     /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
-    BelowMinWatchers = 6,
+    BelowMinWatchers = 7,
 }
 
 /// Minimum number of registered watchers that must remain after
@@ -45,6 +47,8 @@ pub enum DataKey {
     Admins,
     /// Stores the `Vec<Address>` of authorized watcher nodes.
     Watchers,
+    /// Stores the `bool` paused flag.
+    Paused,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -100,6 +104,7 @@ impl WatcherRegistry {
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+        Self::assert_not_paused(&env)?;
 
         let mut admins = Self::load_admins(&env);
         for i in 0..admins.len() {
@@ -139,6 +144,7 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+        Self::assert_not_paused(&env)?;
 
         let admins = Self::load_admins(&env);
         if admins.len() <= 1 {
@@ -191,6 +197,7 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let admins = Self::load_admins(&env);
         let mut updated: Vec<Address> = vec![&env];
@@ -234,6 +241,7 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let mut watchers = Self::load_watchers(&env);
         for i in 0..watchers.len() {
@@ -278,6 +286,7 @@ impl WatcherRegistry {
     pub fn remove_watcher(env: Env, admin: Address, watcher: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let watchers = Self::load_watchers(&env);
         let mut updated: Vec<Address> = vec![&env];
@@ -340,6 +349,7 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let watchers = Self::load_watchers(&env);
         let mut found = false;
@@ -430,6 +440,7 @@ impl WatcherRegistry {
     pub fn clear_all_watchers(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let watchers = Self::load_watchers(&env);
         if !watchers.is_empty() && MIN_WATCHERS > 0 {
@@ -483,6 +494,50 @@ impl WatcherRegistry {
         Ok(admins.get(0).unwrap())
     }
 
+    /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
+    ///
+    /// Intended as an emergency circuit-breaker if an admin key is suspected
+    /// compromised — mutations can be frozen while the incident is investigated.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("pause")), caller);
+        Ok(())
+    }
+
+    /// Resume normal operation after a [`Self::pause`].
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("unpause")), caller);
+        Ok(())
+    }
+
+    /// Return `true` if the contract is currently paused.
+    #[must_use]
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     /// Get the number of registered watchers as a cheap u32 read, avoiding
     /// the cost of fetching and deserializing the full watcher list.
     #[must_use]
@@ -533,6 +588,15 @@ impl WatcherRegistry {
             .instance()
             .get(&DataKey::Admins)
             .unwrap_or_else(|| vec![env])
+    }
+
+    /// Return `Ok(())` if the contract is not paused, `Err(Paused)` otherwise.
+    fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            return Err(ContractError::Paused);
+        }
+        Ok(())
     }
 
     /// Return `Ok(())` if `caller` is in the admin set, `Err(Unauthorized)` otherwise.
@@ -992,6 +1056,60 @@ mod tests {
         assert_eq!(
             client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
             ContractError::BelowMinWatchers
+        );
+    }
+
+    // ── Pause / circuit-breaker tests ────────────────────────────────────────
+
+    // pause blocks state-mutating calls, unpause restores them
+    #[test]
+    fn test_pause_blocks_mutations() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+
+        assert_eq!(client.try_pause(&admin).unwrap(), Ok(()));
+        assert!(client.is_paused());
+
+        assert_eq!(
+            client
+                .try_register_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+
+        assert_eq!(client.try_unpause(&admin).unwrap(), Ok(()));
+        assert!(!client.is_paused());
+
+        assert_eq!(
+            client.try_register_watcher(&admin, &watcher).unwrap(),
+            Ok(())
+        );
+    }
+
+    // pause does not block read-only calls
+    #[test]
+    fn test_pause_allows_reads() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        client.pause(&admin);
+
+        assert!(client.is_watcher_authorized(&watcher));
+        assert_eq!(client.get_watchers().len(), 1);
+        assert_eq!(client.get_admins().len(), 1);
+    }
+
+    // only an admin can pause/unpause
+    #[test]
+    fn test_pause_unauthorized() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+
+        assert_eq!(
+            client.try_pause(&attacker).unwrap_err().unwrap(),
+            ContractError::Unauthorized
         );
     }
 

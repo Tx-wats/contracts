@@ -36,11 +36,17 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 
 ## What the Contract Does NOT Protect Against
 
-- **Compromised admin key.** If the admin keypair is stolen, an attacker can register arbitrary watchers or transfer admin to themselves. No multi-sig or time-lock is enforced at the contract level.
+- **Compromised admin key.** If the admin keypair is stolen, an attacker can register arbitrary watchers or transfer their own admin slot to themselves under a new key. No multi-sig or time-lock is enforced at the contract level. As a stopgap, any admin can call `pause` to freeze all state-mutating entrypoints while the incident is investigated — see [Pause / circuit-breaker](#pause--circuit-breaker) below.
 - **Malicious behavior by authorized watchers.** Once a watcher is registered, the contract has no visibility into what that node does off-chain (e.g., sending false alerts, ignoring events).
 - **Front-running.** Because Stellar transactions are public before finalization, an observer could attempt to front-run an admin action, though the practical impact is low given the permissioned nature of the registry.
 - **Social engineering of the admin.** The contract cannot prevent an admin from being tricked into registering a malicious watcher address.
 - **Partial denial of service down to the minimum.** A malicious admin (or compromised key) can still remove watchers down to `MIN_WATCHERS`, degrading monitoring coverage even though the system cannot be fully halted via `remove_watcher`/`clear_all_watchers`.
+
+---
+
+## Pause / circuit-breaker
+
+Both `WatcherRegistry` and `AlertRegistry` expose an admin-gated `pause` / `unpause` pair and a `paused` instance flag. While paused, every state-mutating entrypoint — including admin-management calls like `add_admin`/`remove_admin`/`transfer_admin` — returns `ContractError::Paused`; only `pause`/`unpause` themselves and read-only queries remain callable. This is intended purely as an emergency freeze — e.g. to stop further damage the moment a compromise is suspected — not as a routine operational control. Resolving the underlying compromise (rotating or removing the affected admin) still requires unpausing first.
 
 ---
 
@@ -52,7 +58,7 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 
 ### 2. Admin key is compromised
 **Vector:** Attacker obtains an admin private key and calls `register_watcher`, `add_admin`, or `transfer_admin`.  
-**Outcome:** In a single-admin registry, the attacker gains full control. In a multi-admin registry, `transfer_admin` only replaces the *compromised admin's own* slot — the attacker cannot use it to strip other admins, though they can still add new admins via `add_admin` or perform any other privileged action available to a single admin. **Mitigation outside contract scope** — use hardware wallets, multi-sig accounts, or key rotation procedures; other admins can call `remove_admin` to revoke the compromised key's access.
+**Outcome:** In a single-admin registry, the attacker gains full control. In a multi-admin registry, `transfer_admin` only replaces the *compromised admin's own* slot — the attacker cannot use it to strip other admins, though they can still add new admins via `add_admin` or perform any other privileged action available to a single admin. **Mitigation:** Any other admin can call `pause` immediately to freeze all mutations (including further `add_admin`/`transfer_admin` calls) while the compromised key is rotated out via `remove_admin`; hardware wallets, multi-sig accounts, or key rotation procedures remain the first line of defense outside the contract.
 
 ### 3. Authorized watcher goes rogue
 **Vector:** A legitimately registered watcher node starts sending false or malicious alerts.  
@@ -61,6 +67,10 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 ### 4. Admin removes all watchers (accidental or malicious)
 **Vector:** Admin calls `remove_watcher` repeatedly, or `clear_all_watchers`, attempting to deauthorize every registered address.  
 **Outcome:** Both entrypoints refuse to drop the watcher count below `MIN_WATCHERS` (`1` by default) — `clear_all_watchers` is rejected outright while any watcher remains, and the final `remove_watcher` call below the floor returns `ContractError::BelowMinWatchers`. The last watcher cannot be removed through these calls, so monitoring can be degraded but not fully halted this way.
+
+### 5. Incident response while a compromise is suspected
+**Vector:** An admin observes suspicious registry activity and wants to stop further damage before finishing the investigation.  
+**Outcome:** Any admin can call `pause`, which immediately rejects all state-mutating calls (on both `WatcherRegistry` and `AlertRegistry`) with `ContractError::Paused` while leaving all reads available. Once the compromised admin is identified and removed, an admin calls `unpause` to resume normal operation.
 
 ---
 
@@ -72,7 +82,8 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 | Admin transfer requires current admin auth | ✅ |
 | `transfer_admin` cannot strip other admins in a multi-admin set | ✅ |
 | Minimum watcher count enforced on removal | ✅ (`MIN_WATCHERS`) |
+| Emergency pause / circuit-breaker on mutations | ✅ |
 | Replay protection | ✅ (Stellar protocol) |
-| Admin key compromise protection | ❌ |
+| Admin key compromise protection | ❌ (mitigated via `pause` + `remove_admin`, not prevented) |
 | Off-chain watcher behavior enforcement | ❌ |
 | Multi-sig / time-lock on admin actions | ❌ |
