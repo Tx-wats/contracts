@@ -27,7 +27,25 @@ pub enum ContractError {
     LastAdmin = 4,
     /// Returned when the specified watcher is not currently registered.
     WatcherNotFound = 5,
+    /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
+    MaxWatchersReached = 6,
+    /// Returned when adding an admin would exceed [`MAX_ADMINS`].
+    MaxAdminsReached = 7,
 }
+
+// ── Capacity limits ──────────────────────────────────────────────────────────
+
+/// Maximum number of watchers the registry will hold.
+///
+/// Every mutation loads, scans and rewrites the whole `Vec<Address>` under a
+/// single instance-storage key, so the set must stay small enough for those
+/// O(n) operations to fit comfortably in a transaction's resource budget.
+pub const MAX_WATCHERS: u32 = 100;
+
+/// Maximum number of admins the registry will hold. Bounded for the same
+/// reason as [`MAX_WATCHERS`], and kept much smaller since the admin set is
+/// an operational, not a workload, structure.
+pub const MAX_ADMINS: u32 = 10;
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -81,6 +99,7 @@ impl WatcherRegistry {
     /// Add a new admin to the admin set (any existing admin may call this).
     ///
     /// Idempotent — adding an address that is already an admin is a no-op.
+    /// The admin set is capped at [`MAX_ADMINS`] entries.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be an
@@ -88,6 +107,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::MaxAdminsReached`] if the admin set already holds [`MAX_ADMINS`] entries.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), ContractError> {
@@ -99,6 +119,9 @@ impl WatcherRegistry {
             if admins.get(i).unwrap() == new_admin {
                 return Ok(()); // already an admin, idempotent
             }
+        }
+        if admins.len() >= MAX_ADMINS {
+            return Err(ContractError::MaxAdminsReached);
         }
         admins.push_back(new_admin.clone());
         env.storage().instance().set(&DataKey::Admins, &admins);
@@ -192,7 +215,9 @@ impl WatcherRegistry {
     /// Register an authorized watcher node (any admin may call this).
     ///
     /// Idempotent — registering an already-authorized watcher is a no-op.
+    /// The watcher set is capped at [`MAX_WATCHERS`] entries.
     /// # Errors
+    /// Returns [`ContractError::MaxWatchersReached`] if the registry already holds [`MAX_WATCHERS`] watchers.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Panics
@@ -210,6 +235,9 @@ impl WatcherRegistry {
             if watchers.get(i).unwrap() == watcher {
                 return Ok(()); // already registered, idempotent
             }
+        }
+        if watchers.len() >= MAX_WATCHERS {
+            return Err(ContractError::MaxWatchersReached);
         }
         watchers.push_back(watcher.clone());
         env.storage().instance().set(&DataKey::Watchers, &watchers);
@@ -1109,6 +1137,71 @@ mod tests {
 
         // At least two events emitted (remove + replace)
         assert!(env.events().all().len() >= 2);
+    }
+
+    // ── Capacity-limit tests ──────────────────────────────────────────────────
+
+    // 31. Registering up to MAX_WATCHERS succeeds; the next registration is rejected.
+    #[test]
+    fn test_register_watcher_capped_at_max() {
+        let (env, admin, client) = setup();
+
+        for _ in 0..MAX_WATCHERS {
+            let w = Address::generate(&env);
+            assert_eq!(client.try_register_watcher(&admin, &w).unwrap(), Ok(()));
+        }
+        assert_eq!(client.get_watcher_count(), MAX_WATCHERS);
+
+        let overflow = Address::generate(&env);
+        assert_eq!(
+            client
+                .try_register_watcher(&admin, &overflow)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::MaxWatchersReached
+        );
+        assert_eq!(client.get_watchers().len(), MAX_WATCHERS);
+    }
+
+    // 32. A full registry still accepts re-registering an existing watcher (no growth).
+    #[test]
+    fn test_register_idempotent_when_full() {
+        let (env, admin, client) = setup();
+
+        let mut first = Address::generate(&env);
+        for i in 0..MAX_WATCHERS {
+            let w = Address::generate(&env);
+            if i == 0 {
+                first = w.clone();
+            }
+            client.register_watcher(&admin, &w);
+        }
+
+        assert_eq!(client.try_register_watcher(&admin, &first).unwrap(), Ok(()));
+        assert_eq!(client.get_watchers().len(), MAX_WATCHERS);
+    }
+
+    // 33. Adding admins beyond MAX_ADMINS is rejected.
+    #[test]
+    fn test_add_admin_capped_at_max() {
+        let (env, admin, client) = setup();
+
+        // setup() already installed one admin.
+        for _ in 1..MAX_ADMINS {
+            let a = Address::generate(&env);
+            assert_eq!(client.try_add_admin(&admin, &a).unwrap(), Ok(()));
+        }
+        assert_eq!(client.get_admins().len(), MAX_ADMINS);
+
+        let overflow = Address::generate(&env);
+        assert_eq!(
+            client
+                .try_add_admin(&admin, &overflow)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::MaxAdminsReached
+        );
+        assert_eq!(client.get_admins().len(), MAX_ADMINS);
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────

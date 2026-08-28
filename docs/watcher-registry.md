@@ -26,7 +26,7 @@ Initializes the registry with an admin address. Can only be called once.
 
 ### `register_watcher`
 
-Adds an address to the authorized watcher set. Idempotent — registering an already-registered watcher is a no-op.
+Adds an address to the authorized watcher set. Idempotent — registering an already-registered watcher is a no-op. Returns `MaxWatchersReached` once the registry holds `MAX_WATCHERS` (100) watchers — see [Capacity limits](#capacity-limits).
 
 **Requires auth:** `admin`
 
@@ -139,6 +139,24 @@ All state is stored in **instance storage**:
 |---|---|---|
 | `"ADMIN"` | `Address` | Current admin address |
 | `"WATCHERS"` | `Vec<Address>` | List of authorized watcher addresses |
+
+---
+
+## Capacity limits
+
+Both sets live under a single instance-storage key, and every mutation loads,
+scans and rewrites the whole `Vec<Address>`. To keep those O(n) operations
+within a transaction's resource budget the sets are bounded:
+
+| Constant | Value | Enforced by |
+|---|---|---|
+| `MAX_WATCHERS` | 100 | `register_watcher` → `MaxWatchersReached` |
+| `MAX_ADMINS` | 10 | `add_admin` → `MaxAdminsReached` |
+
+Registering an address that is already present is still a no-op at the cap, so
+idempotent re-registration never fails. `replace_watcher` also stays available
+at the cap, since it removes one address for each one it adds.
+
 ---
 
 ## Re-entrancy and cross-contract safety
