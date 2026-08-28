@@ -8,7 +8,7 @@
 #![allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
-    symbol_short, vec, Address, Env, String, Vec,
+    symbol_short, vec, Address, BytesN, Env, String, Vec,
 };
 
 contractmeta!(key = "Name", val = "AlertRegistry");
@@ -188,6 +188,33 @@ impl AlertRegistry {
             (symbol_short!("admin"), symbol_short!("transfer")),
             (admin, new_admin),
         );
+        Ok(())
+    }
+
+    /// Replace this contract's WASM with `new_wasm_hash` (admin only).
+    ///
+    /// The new WASM must already be installed on-chain. Storage is untouched by
+    /// the upgrade, so the new build **must** keep the existing [`DataKey`]
+    /// layout and `NextId` counter — the host cannot verify this, and a build
+    /// that changes them will read the existing entries as garbage. See
+    /// `docs/upgrade-guide.md`.
+    ///
+    /// Requires the admin role to have been initialized: an uninitialized
+    /// registry has no one authorized to upgrade it.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not the admin.
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
         Ok(())
     }
 

@@ -235,6 +235,35 @@ fn test_admin_transfer_admin() {
     client.remove_alert_by_admin(&new_admin, &id);
 }
 
+#[test]
+fn test_upgrade_unauthorized() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let attacker = Address::generate(&env);
+    let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+    assert_eq!(
+        client
+            .try_upgrade(&attacker, &wasm_hash)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+}
+
+#[test]
+fn test_upgrade_requires_initialized_admin() {
+    let (env, client) = setup();
+    let caller = Address::generate(&env);
+    let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+    assert_eq!(
+        client.try_upgrade(&caller, &wasm_hash).unwrap_err().unwrap(),
+        ContractError::NotInitialized
+    );
+}
+
 // 5. Unauthorized remove rejected
 #[test]
 fn test_remove_unauthorized() {

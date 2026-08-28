@@ -8,7 +8,7 @@
 #![allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec, Address,
-    Env, Vec,
+    BytesN, Env, Vec,
 };
 
 contractmeta!(key = "Name", val = "WatcherRegistry");
@@ -97,6 +97,8 @@ pub enum AdminAction {
     ClearAllWatchers,
     /// Change the timelock delay (in ledgers).
     SetTimelockDelay(u32),
+    /// Replace the contract's WASM with the given hash.
+    Upgrade(BytesN<32>),
 }
 
 /// A queued [`AdminAction`] and the ledger at which it becomes executable.
@@ -127,8 +129,8 @@ pub struct PendingAction {
 /// Deployments that want protection against a single compromised admin key can
 /// configure a delay with [`WatcherRegistry::set_timelock_delay`]. While a
 /// delay is set, the sensitive actions (`add_admin`, `transfer_admin`,
-/// `clear_all_watchers`, and lowering the delay itself) can no longer be called
-/// directly: they must be queued with
+/// `clear_all_watchers`, `upgrade`, and lowering the delay itself) can no
+/// longer be called directly: they must be queued with
 /// [`WatcherRegistry::propose_admin_action`] and run with
 /// [`WatcherRegistry::execute_admin_action`] once the delay has elapsed, giving
 /// the other admins a window to [`WatcherRegistry::cancel_admin_action`].
@@ -520,6 +522,39 @@ impl WatcherRegistry {
             .unwrap_or(0u32)
     }
 
+    /// Replace this contract's WASM with `new_wasm_hash` (any admin may call this).
+    ///
+    /// The new WASM must already be installed on-chain. Storage is untouched by
+    /// the upgrade, so the new build **must** keep the existing [`DataKey`]
+    /// layout and the `W_CNT` counter — the host cannot verify this, and a
+    /// build that changes them will read the existing entries as garbage. See
+    /// `docs/upgrade-guide.md`.
+    ///
+    /// Sensitive: when a timelock delay is configured this must be queued as
+    /// [`AdminAction::Upgrade`] via [`Self::propose_admin_action`] instead of
+    /// called directly — otherwise an upgrade would be a way around the delay.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        Self::assert_timelock_disabled(&env)?;
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        Ok(())
+    }
+
     /// Extend the TTL of the contract's instance entry, which holds all
     /// registry state.
     ///
@@ -537,7 +572,7 @@ impl WatcherRegistry {
     // ── Timelock ─────────────────────────────────────────────────────────────
 
     /// Set the timelock delay, in ledgers, applied to sensitive admin actions
-    /// (`add_admin`, `transfer_admin`, `clear_all_watchers`).
+    /// (`add_admin`, `transfer_admin`, `clear_all_watchers`, `upgrade`).
     ///
     /// A delay of `0` (the default) keeps those entrypoints callable directly.
     /// Once a non-zero delay is configured they return
@@ -697,6 +732,9 @@ impl WatcherRegistry {
             AdminAction::ClearAllWatchers => Self::do_clear_all_watchers(&env),
             AdminAction::SetTimelockDelay(delay) => {
                 Self::do_set_timelock_delay(&env, &caller, delay);
+            }
+            AdminAction::Upgrade(new_wasm_hash) => {
+                env.deployer().update_current_contract_wasm(new_wasm_hash);
             }
         }
 
@@ -1514,6 +1552,42 @@ mod tests {
             ContractError::MaxAdminsReached
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
+    }
+
+    // ── Upgrade tests ─────────────────────────────────────────────────────────
+
+    // 45. upgrade rejects a caller that is not an admin.
+    #[test]
+    fn test_upgrade_unauthorized() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        assert_eq!(
+            client
+                .try_upgrade(&attacker, &wasm_hash)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 46. upgrade cannot bypass a configured timelock.
+    #[test]
+    fn test_upgrade_requires_timelock_when_configured() {
+        let (env, admin, client) = setup();
+        let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+
+        assert_eq!(
+            client.try_upgrade(&admin, &wasm_hash).unwrap_err().unwrap(),
+            ContractError::TimelockRequired
+        );
+
+        // It is queueable instead.
+        client.propose_admin_action(&admin, &AdminAction::Upgrade(wasm_hash));
+        assert!(client.get_pending_action().is_some());
     }
 
     // ── Instance TTL tests ────────────────────────────────────────────────────

@@ -317,6 +317,7 @@ See [DEPLOYMENTS.md](DEPLOYMENTS.md).
 
 - [Alert Registry function reference](docs/alert-registry.md)
 - [Watcher Registry function reference](docs/watcher-registry.md)
+- [Upgrade guide](docs/upgrade-guide.md)
 - [Compatibility Matrix](docs/compatibility.md)
 - [Ecosystem submission guide](docs/ecosystem-submission.md)
 
