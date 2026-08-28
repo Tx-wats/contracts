@@ -42,6 +42,17 @@ pub enum ContractError {
     TimelockNotExpired = 11,
 }
 
+// ── TTL constants ────────────────────────────────────────────────────────────
+
+/// Threshold below which [`WatcherRegistry::bump_instance_ttl`] extends the
+/// instance entry. Approximately 24 hours at the nominal 5-second ledger close
+/// time.
+pub const INSTANCE_BUMP_THRESHOLD: u32 = 17_280;
+
+/// TTL the instance entry is extended to. Approximately 31 days, the
+/// protocol maximum. See `docs/ttl.md`.
+pub const INSTANCE_BUMP_AMOUNT: u32 = 535_680;
+
 // ── Capacity limits ──────────────────────────────────────────────────────────
 
 /// Maximum number of watchers the registry will hold.
@@ -507,6 +518,20 @@ impl WatcherRegistry {
             .instance()
             .get(&symbol_short!("W_CNT"))
             .unwrap_or(0u32)
+    }
+
+    /// Extend the TTL of the contract's instance entry, which holds all
+    /// registry state.
+    ///
+    /// Callable by anyone and requires no auth — it only refreshes the entry's
+    /// lifetime and never reads or changes registry state. A low-traffic
+    /// deployment (watchers registered once and rarely touched) should have a
+    /// keeper call this periodically so the instance is never archived; see
+    /// `docs/ttl.md`.
+    pub fn bump_instance_ttl(env: Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     // ── Timelock ─────────────────────────────────────────────────────────────
@@ -1489,6 +1514,50 @@ mod tests {
             ContractError::MaxAdminsReached
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
+    }
+
+    // ── Instance TTL tests ────────────────────────────────────────────────────
+
+    // 43. bump_instance_ttl extends the instance entry's TTL.
+    #[test]
+    fn test_bump_instance_ttl_extends_instance() {
+        use soroban_sdk::testutils::storage::Instance as _;
+        use soroban_sdk::testutils::Ledger as _;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(WatcherRegistry, ());
+        let client = WatcherRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Let the instance TTL decay before bumping.
+        env.ledger().with_mut(|li| li.sequence_number += 1_000);
+        let before = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+
+        client.bump_instance_ttl();
+
+        let after = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+        assert!(after > before, "instance TTL should be extended");
+        assert!(after >= INSTANCE_BUMP_AMOUNT);
+    }
+
+    // 44. bump_instance_ttl requires no auth and leaves registry state alone.
+    #[test]
+    fn test_bump_instance_ttl_needs_no_auth() {
+        let env = Env::default();
+        let contract_id = env.register(WatcherRegistry, ());
+        let client = WatcherRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.register_watcher(&admin, &admin);
+
+        env.set_auths(&[]);
+        client.bump_instance_ttl();
+
+        assert_eq!(client.get_watchers().len(), 1);
+        assert_eq!(client.get_admins().len(), 1);
     }
 
     // ── Timelock tests ────────────────────────────────────────────────────────
