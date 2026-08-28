@@ -131,6 +131,18 @@ Returns the current admin address.
 
 ---
 
+## Consumers
+
+### `AlertRegistry`
+
+`AlertRegistry` can be configured to gate its own read queries on this registry. When an admin calls `AlertRegistry::set_watcher_registry` with this contract's address, `AlertRegistry`'s `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants perform a cross-contract call to `is_watcher_authorized` before returning data, rejecting callers that are not registered watchers with `ContractError::NotAWatcher`.
+
+Gating is optional and off by default — if no watcher registry address is configured on `AlertRegistry`, these reads are unrestricted. See `docs/alert-registry.md`'s [`set_watcher_registry`](./alert-registry.md#set_watcher_registry) for the consumer-side configuration.
+
+Because gating is a live cross-contract read, removing a watcher here (via `remove_watcher`, `replace_watcher`, or `clear_all_watchers`) takes effect immediately for any `AlertRegistry` deployment that has gating enabled — there is no caching or delay on the consumer side.
+
+---
+
 ## Storage
 
 All state is stored in **instance storage**:
