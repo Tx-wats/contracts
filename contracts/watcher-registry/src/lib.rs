@@ -424,10 +424,17 @@ impl WatcherRegistry {
         Ok(Self::load_admins(&env))
     }
 
-    /// Get the primary admin address (first in the admin set).
+    /// Get an arbitrary admin address from the admin set (currently index 0).
+    ///
+    /// There is no concept of a stable "primary admin" — all admins are
+    /// equally privileged (see the admin model doc on [`WatcherRegistry`]).
+    /// The address returned here is an implementation detail of the
+    /// underlying `Vec` and is **not guaranteed to stay the same** across
+    /// calls: [`remove_admin`] shifts remaining entries, so the address at
+    /// index 0 can change identity without warning.
     ///
     /// Kept for backwards compatibility. Prefer [`get_admins`] when you need
-    /// the full admin set.
+    /// the full admin set, or [`is_admin`] to check a specific address.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     /// # Errors
@@ -831,6 +838,22 @@ mod tests {
                 .unwrap(),
             ContractError::Unauthorized
         );
+    }
+
+    // 11b. get_admin's returned identity shifts after remove_admin — it is
+    // an arbitrary admin (index 0), not a stable "primary admin".
+    #[test]
+    fn test_get_admin_identity_shifts_after_remove_admin() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+
+        client.add_admin(&admin, &second_admin);
+        assert_eq!(client.get_admin(), admin);
+
+        // Removing the original index-0 admin shifts the remaining entry
+        // into index 0, so get_admin() now returns a different address.
+        client.remove_admin(&admin, &admin);
+        assert_eq!(client.get_admin(), second_admin);
     }
 
     // ── Multi-admin tests ─────────────────────────────────────────────────────
