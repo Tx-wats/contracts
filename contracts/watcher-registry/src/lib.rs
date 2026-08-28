@@ -438,6 +438,23 @@ impl WatcherRegistry {
         Ok(admins.get(0).unwrap())
     }
 
+    /// Check if an address is a current admin.
+    ///
+    /// Unlike [`get_admins`], this does not require the caller to fetch and
+    /// scan the entire admin set client-side.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    #[must_use]
+    pub fn is_admin(env: Env, address: Address) -> bool {
+        let admins = Self::load_admins(&env);
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == address {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Get the number of registered watchers as a cheap u32 read, avoiding
     /// the cost of fetching and deserializing the full watcher list.
     #[must_use]
@@ -883,6 +900,24 @@ mod tests {
                 .unwrap(),
             ContractError::LastAdmin
         );
+    }
+
+    // 16b. is_admin returns true for current admins, false otherwise
+    #[test]
+    fn test_is_admin() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        assert!(client.is_admin(&admin));
+        assert!(!client.is_admin(&second_admin));
+
+        client.add_admin(&admin, &second_admin);
+        assert!(client.is_admin(&second_admin));
+        assert!(!client.is_admin(&stranger));
+
+        client.remove_admin(&admin, &second_admin);
+        assert!(!client.is_admin(&second_admin));
     }
 
     // 17. get_admins returns all admins
