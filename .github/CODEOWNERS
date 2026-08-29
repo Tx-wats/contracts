@@ -1,0 +1,25 @@
+# Code Owners for Tx-wats/contracts
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default fallback owners for the entire repository
+* @Tx-wats @Valreb001
+
+# GitHub Actions workflows and configuration
+/.github/ @Tx-wats @Valreb001
+/.github/workflows/ @Tx-wats @Valreb001
+
+# Smart contracts
+/contracts/ @Tx-wats @Valreb001
+/contracts/alert-registry/ @Tx-wats @Valreb001
+/contracts/watcher-registry/ @Tx-wats @Valreb001
+
+# TypeScript bindings
+/bindings/ @Tx-wats @Valreb001
+/bindings/alert-registry/ @Tx-wats @Valreb001
+/bindings/watcher-registry/ @Tx-wats @Valreb001
+
+# Scripts and tooling
+/scripts/ @Tx-wats @Valreb001
+
+# Documentation
+/docs/ @Tx-wats @Valreb001

@@ -252,6 +252,110 @@ fn test_watcher_gating_get_alerts_by_owner() {
     );
 }
 
+/// When watcher-gating is enabled, every gated query function rejects a
+/// non-watcher caller with `NotAWatcher`. This exercises all four gated
+/// entry points, not just `get_alerts_for_contract`.
+#[test]
+fn test_gated_mode_rejects_non_watcher() {
+    let (env, alert_client, watcher_client) = setup();
+
+    let admin = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    watcher_client.initialize(&admin);
+    // stranger is NOT registered as a watcher
+
+    alert_client.initialize(&admin);
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        alert_client
+            .try_get_alerts_for_contract(&stranger, &target)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+    assert_eq!(
+        alert_client
+            .try_get_alerts_by_owner(&stranger, &owner)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+    assert_eq!(
+        alert_client
+            .try_get_contract_alerts_paginated(&stranger, &target, &0u32, &10u32)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+    assert_eq!(
+        alert_client
+            .try_get_alerts_by_owner_paginated(&stranger, &owner, &0u32, &10u32)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
+/// When watcher-gating is enabled, a registered watcher is accepted by every
+/// gated query function.
+#[test]
+fn test_gated_mode_accepts_registered_watcher() {
+    let (env, alert_client, watcher_client) = setup();
+
+    let admin = Address::generate(&env);
+    let watcher = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    watcher_client.initialize(&admin);
+    watcher_client.register_watcher(&admin, &watcher);
+
+    alert_client.initialize(&admin);
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        alert_client
+            .get_alerts_for_contract(&watcher, &target)
+            .len(),
+        1
+    );
+    assert_eq!(alert_client.get_alerts_by_owner(&watcher, &owner).len(), 1);
+    assert_eq!(
+        alert_client
+            .get_contract_alerts_paginated(&watcher, &target, &0u32, &10u32)
+            .len(),
+        1
+    );
+    assert_eq!(
+        alert_client
+            .get_alerts_by_owner_paginated(&watcher, &owner, &0u32, &10u32)
+            .len(),
+        1
+    );
+}
+
 // ── Feature A: watcher.remove event ──────────────────────────────────────────
 
 /// Removing a watcher emits a `("watcher", "remove")` event with the correct
