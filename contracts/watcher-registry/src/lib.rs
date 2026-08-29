@@ -486,6 +486,24 @@ impl WatcherRegistry {
         Self::load_watchers(&env)
     }
 
+    /// Get a page of authorized watcher addresses.
+    ///
+    /// `offset` and `limit` are saturating — an `offset` beyond the end of
+    /// the list returns an empty page rather than erroring.
+    #[must_use]
+    pub fn get_watchers_paginated(env: Env, offset: u32, limit: u32) -> Vec<Address> {
+        let watchers = Self::load_watchers(&env);
+        let count = watchers.len();
+        let first = offset.min(count);
+        let last = offset.saturating_add(limit).min(count);
+
+        let mut out: Vec<Address> = vec![&env];
+        for i in first..last {
+            out.push_back(watchers.get(i).unwrap());
+        }
+        out
+    }
+
     /// Get all current admin addresses.
     ///
     /// Returns `Err(NotInitialized)` if the contract has not been initialized.
@@ -1308,6 +1326,47 @@ mod tests {
 
         // At least two events emitted (remove + replace)
         assert!(env.events().all().len() >= 2);
+    }
+
+    // ── get_watchers_paginated tests ─────────────────────────────────────────
+
+    // 31. get_watchers_paginated — basic pagination
+    #[test]
+    fn test_get_watchers_paginated() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+        client.register_watcher(&admin, &w3);
+
+        let page1 = client.get_watchers_paginated(&0u32, &2u32);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), w1);
+        assert_eq!(page1.get(1).unwrap(), w2);
+
+        let page2 = client.get_watchers_paginated(&2u32, &2u32);
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2.get(0).unwrap(), w3);
+    }
+
+    // 32. get_watchers_paginated — offset beyond the list returns empty, not an error
+    #[test]
+    fn test_get_watchers_paginated_offset_beyond_end() {
+        let (env, admin, client) = setup();
+        client.register_watcher(&admin, &Address::generate(&env));
+
+        let page = client.get_watchers_paginated(&10u32, &5u32);
+        assert_eq!(page.len(), 0);
+    }
+
+    // 33. get_watchers_paginated — empty list
+    #[test]
+    fn test_get_watchers_paginated_empty() {
+        let (_env, _admin, client) = setup();
+        assert_eq!(client.get_watchers_paginated(&0u32, &10u32).len(), 0);
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────

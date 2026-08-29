@@ -100,6 +100,21 @@ This function provides an efficient way to get the count of authorized watchers 
 
 ---
 
+### `get_watchers_paginated`
+
+Returns a page of authorized watcher addresses. `offset` and `limit` are saturating — an `offset` beyond the end of the list returns an empty page rather than erroring.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `offset` | `u32` | Index of the first watcher to return |
+| `limit` | `u32` | Maximum number of watchers to return |
+
+**Returns:** `Vec<Address>` — may be empty.
+
+---
+
 ### `propose_admin_transfer`
 
 Proposes transferring the admin role to a new address. Does **not** take effect until `new_admin` calls `accept_admin_transfer` with their own signature — this two-step flow prevents a typo'd or unowned `new_admin` from permanently locking the contract. Replaces any previously pending proposal.
