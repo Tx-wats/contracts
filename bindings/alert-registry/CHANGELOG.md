@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `getAlertIdsByOwner({ owner })` for fetching just the owner's alert IDs without the full configs.
 - Type declarations and client methods for two-phase webhook rotation:
   - `proposeWebhook({ caller, id, new_webhook_hash })`
   - `confirmWebhook({ caller, id })`

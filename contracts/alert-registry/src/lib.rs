@@ -825,6 +825,22 @@ impl AlertRegistry {
         Ok(Self::configs_for_ids(&env, &ids))
     }
 
+    /// Retrieve the raw list of alert IDs owned by a given address.
+    ///
+    /// Thin wrapper over the underlying `OwnerIndex` entry. Use this instead
+    /// of [`Self::get_alerts_by_owner`] when only the IDs are needed (e.g. an
+    /// existence check or a count) so callers don't pay the cost of
+    /// deserializing every full [`AlertConfig`].
+    ///
+    /// Unlike [`Self::get_alerts_by_owner`], this is not subject to
+    /// watcher-gating, since it exposes no alert content.
+    ///
+    /// Returns an empty vec if `owner` has no registered alerts.
+    #[must_use]
+    pub fn get_alert_ids_by_owner(env: Env, owner: Address) -> Vec<u64> {
+        Self::owner_index(&env, &owner)
+    }
+
     /// Get a page of alert configs for a target contract (offset + limit).
     ///
     /// If a `WatcherRegistry` is configured, `querier` must be a registered
@@ -1685,6 +1701,40 @@ mod tests {
 
         assert_eq!(client.get_alerts_for_contract(&querier, &target).len(), 2);
         assert_eq!(client.get_alerts_by_owner(&querier, &owner).len(), 2);
+    }
+
+    // 8b. get_alert_ids_by_owner — thin ID-only wrapper over the owner index (#35)
+    #[test]
+    fn test_get_alert_ids_by_owner() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let other = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+
+        let id1 = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "A1"),
+            &hash64(&env),
+            &vec![&env],
+        );
+        let id2 = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "A2"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        let ids = client.get_alert_ids_by_owner(&owner);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.get(0).unwrap(), id1);
+        assert_eq!(ids.get(1).unwrap(), id2);
+
+        // Unrelated owner still sees an empty list.
+        assert_eq!(client.get_alert_ids_by_owner(&other).len(), 0);
     }
 
     // 9. get_alert_count reflects registered alerts (monotonic — does not decrease)

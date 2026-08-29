@@ -314,6 +314,22 @@ If a `WatcherRegistry` is configured, `querier` must be a registered watcher or 
 
 ---
 
+### `get_alert_ids_by_owner`
+
+Returns the raw list of alert IDs owned by a given address — a thin wrapper over the underlying `OwnerIndex` entry. Use this instead of `get_alerts_by_owner` when only the IDs are needed (e.g. an existence check or count), avoiding the cost of deserializing every full `AlertConfig`.
+
+Unlike `get_alerts_by_owner`, this is **not** subject to watcher-gating, since it exposes no alert content.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `owner` | `Address` | Owner address to query |
+
+**Returns:** `Vec<u64>` — may be empty.
+
+---
+
 ### `update_label`
 
 Updates only the label of an existing alert, leaving `rules` and `webhook_hash` unchanged. Use this to rename an alert without touching its configuration.
