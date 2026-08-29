@@ -20,6 +20,18 @@ Contract that stores alert configurations on-chain, keyed by contract address.
 | `active` | `bool` | Whether the alert is active |
 | `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
+### `AlertInput`
+
+Input record for [`batch_register_alert`](#batch_register_alert). Mirrors the arguments of `register_alert`.
+
+| Field | Type | Description |
+|---|---|---|
+| `owner` | `Address` | Address that will own and control this alert |
+| `target_contract` | `Address` | Contract address to watch |
+| `label` | `String` | Human-readable name for the alert |
+| `webhook_hash` | `String` | SHA-256 hex digest of the destination webhook URL |
+| `rules` | `Vec<String>` | Serialized rule descriptors |
+
 ---
 
 ## Webhook Hash Scheme
@@ -178,7 +190,9 @@ Transfers admin authority to a new address. Requires current admin auth.
 
 Returns the current admin address.
 
-**Returns:** `Address`
+**Returns:** `Result<Address, ContractError>`
+
+**Errors:** `NotInitialized` if `initialize` has not been called.
 
 ---
 
@@ -223,6 +237,27 @@ Removes any alert config by ID. Requires admin auth.
 **Returns:** nothing
 
 ---
+
+### `deactivate_alert_by_admin`
+
+Deactivates any alert by ID without deleting its record. Unlike `remove_alert_by_admin`, the alert config and its owner/contract indexes are left intact — only the `active` flag is cleared — so an admin can moderate a single problematic alert (spam, abuse report) while preserving its history. Admin only.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+| `config_id` | `u64` | ID of the alert to deactivate |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the admin.
+
+**Events:** Emits `(Symbol("alert"), Symbol("admin_off"))` with data `(id: u64, admin: Address)`.
+
+---
 ### `remove_alert`
 
 Permanently removes an alert config. Only the original owner may call this.
@@ -239,6 +274,65 @@ Permanently removes an alert config. Only the original owner may call this.
 **Returns:** nothing
 
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
+
+---
+
+### `transfer_alert_ownership`
+
+Transfers ownership of an alert to a new address. Updates the `owner` field of the alert config and migrates the alert ID from the old owner's `OwnerIndex` to the new owner's. Only the current owner may call this.
+
+**Requires auth:** `caller` (must match `owner` of the config)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the current alert owner |
+| `config_id` | `u64` | ID of the alert to transfer |
+| `new_owner` | `Address` | Address to become the new owner |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
+
+**Events:** Emits `(Symbol("alert"), Symbol("transfer"))` with data `(id: u64, old_owner: Address, new_owner: Address)`.
+
+---
+
+### `batch_register_alert`
+
+Registers multiple alert configs in a single call. Each input is validated and authorized exactly as `register_alert` would, and each successful registration emits the same `alert.register` event. Since Soroban invocations are atomic, if any input fails validation or authorization the entire batch — including any alerts already registered earlier in the same call — is rolled back.
+
+**Requires auth:** the `owner` of each input in `inputs`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `inputs` | `Vec<AlertInput>` | Alert records to register |
+
+**Returns:** `Vec<u64>` — the new alerts' IDs, in the same order as `inputs`
+
+**Errors:** Returns the same errors as `register_alert` for the failing item.
+
+---
+
+### `batch_remove_alert`
+
+Removes multiple alert configs owned by `caller` in a single call. Each ID is validated and authorized exactly as `remove_alert` would, and each successful removal emits the same `alert.remove` event. Since Soroban invocations are atomic, if any ID does not exist or is not owned by `caller`, the entire batch is rolled back.
+
+**Requires auth:** `caller`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must own every alert in `config_ids` |
+| `config_ids` | `Vec<u64>` | IDs of the alerts to remove |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::AlertNotFound` if any ID does not exist; `ContractError::Unauthorized` if caller does not own every alert in `config_ids`.
 
 ---
 
@@ -321,6 +415,22 @@ If a `WatcherRegistry` is configured, `querier` must be a registered watcher or 
 | `owner` | `Address` | Owner address to query |
 
 **Returns:** `Result<Vec<AlertConfig>, ContractError>` — `Ok(vec)` on success, may be empty.
+
+---
+
+### `get_alert_ids_by_owner`
+
+Returns the raw list of alert IDs owned by a given address — a thin wrapper over the underlying `OwnerIndex` entry. Use this instead of `get_alerts_by_owner` when only the IDs are needed (e.g. an existence check or count), avoiding the cost of deserializing every full `AlertConfig`.
+
+Unlike `get_alerts_by_owner`, this is **not** subject to watcher-gating, since it exposes no alert content.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `owner` | `Address` | Owner address to query |
+
+**Returns:** `Vec<u64>` — may be empty.
 
 ---
 
@@ -482,7 +592,9 @@ Returns the total number of alerts ever registered.
 
 ### `set_watcher_registry`
 
-Configures the `WatcherRegistry` contract address used for optional watcher-gating on read queries. Once set, `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants will cross-call `WatcherRegistry::is_watcher_authorized` before returning data. Admin only.
+Configures the `WatcherRegistry` contract address used for optional watcher-gating on read queries. Once set, `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants will cross-call `WatcherRegistry::is_watcher_authorized` before returning data. Any address configured here — including a zero/default `Address` — is treated as a real registry and will be cross-called; use `clear_watcher_registry` to disable gating. Admin only.
+
+`watcher_registry` is probed with a read-only `is_watcher_authorized` call before being persisted. A misconfigured address (not a contract, or a contract that doesn't implement the `WatcherRegistry` interface) is rejected here with `InvalidWatcherRegistry` instead of surfacing later as a panic the next time a gated query runs.
 
 **Requires auth:** `admin`
 
@@ -494,6 +606,26 @@ Configures the `WatcherRegistry` contract address used for optional watcher-gati
 | `watcher_registry` | `Address` | Address of the deployed `WatcherRegistry` contract |
 
 **Returns:** nothing
+
+**Errors:** `InvalidWatcherRegistry` if `watcher_registry` does not respond to the `WatcherRegistry` interface.
+
+---
+
+### `clear_watcher_registry`
+
+Clears the configured `WatcherRegistry` contract address, disabling watcher-gating on the read queries. After this call, `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants no longer cross-call `WatcherRegistry` and behave as if gating had never been configured. Call `set_watcher_registry` again to re-enable gating. Admin only.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::NotInitialized` if the contract has not been initialized; `ContractError::Unauthorized` if caller is not the admin.
 
 ---
 
@@ -523,7 +655,15 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `AlertNotFound` | 2 | No alert exists for the given ID |
 | `AlreadyInitialized` | 3 | `initialize` was called more than once |
 | `NotInitialized` | 4 | Admin function called before `initialize` |
-| `NoPendingWebhook` | 5 | `confirm_webhook` called but no rotation is in progress |
+| `NotAWatcher` | 5 | Watcher-gating is enabled and `querier` is not a registered watcher |
+| `InvalidWebhookHash` | 6 | Webhook hash is not exactly 64 characters |
+| `LabelTooLong` | 7 | `label` exceeds 128 bytes |
+| `TooManyRules` | 8 | `rules` exceeds the 50-rule maximum |
+| `InvalidRuleDescriptor` | 9 | A rule is not a recognised descriptor (`rule:transfer`, `rule:mint`) |
+| `OwnerAlertLimitExceeded` | 10 | Owner is at the configured per-owner active alert limit |
+| `DuplicateAlertId` | 11 | Internal invariant violation — an ID was already present in an index |
+| `NoPendingWebhook` | 12 | `confirm_webhook` called but no rotation is in progress |
+| `InvalidWatcherRegistry` | 13 | `set_watcher_registry` given an address that doesn't implement the `WatcherRegistry` interface |
 
 ---
 

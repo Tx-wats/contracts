@@ -7,7 +7,7 @@ on:
     branches: ["**"]
 
 env:
-  WASM_SIZE_LIMIT_KB: 100
+  WASM_SIZE_LIMIT_KB: 60
 
 jobs:
   wasm-size:
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
       # read rust-toolchain.toml. Parse the pin so that file stays the one source
@@ -32,15 +32,25 @@ jobs:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: wasm32-unknown-unknown
 
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --features opt
+
       - name: Build WASM binaries
         run: cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
+
+      # Optimize contracts to match the deploy path (deploy.sh)
+      - name: Optimize WASM binaries
+        run: |
+          for w in alert_registry watcher_registry; do
+            stellar contract optimize --wasm "target/wasm32-unknown-unknown/release/$w.wasm"
+          done
 
       - name: Check binary sizes
         run: |
           LIMIT=$(( ${{ env.WASM_SIZE_LIMIT_KB }} * 1024 ))
           FAILED=0
 
-          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+          for wasm in target/wasm32-unknown-unknown/release/*.optimized.wasm; do
             SIZE=$(stat -c%s "$wasm")
             SIZE_KB=$(( SIZE / 1024 ))
             echo "$wasm: ${SIZE_KB}KB"

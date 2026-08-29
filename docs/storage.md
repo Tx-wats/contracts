@@ -15,6 +15,7 @@ Source: `contracts/alert-registry/src/lib.rs`
 | `DataKey::Alert(id: u64)` | Persistent | `AlertConfig` | A single alert configuration, keyed by its numeric ID |
 | `DataKey::AlertActive(id: u64)` | Persistent | `bool` | The `active` flag stored separately so it can be read without deserializing the full `AlertConfig` (see `get_alert_active`) |
 | `DataKey::OwnerIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs owned by a given address |
+| `DataKey::OwnerActiveCount(addr: Address)` | Persistent | `u32` | Running count of currently live (non-removed) alerts owned by `addr`, maintained incrementally alongside `OwnerIndex` so `get_active_alert_count` is O(1) instead of rescanning the index |
 | `DataKey::ContractIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs watching a given contract address |
 | `symbol_short!("NEXT_ID")` | Instance | `u64` | Monotonic counter used to generate unique alert IDs |
 | `symbol_short!("ADMIN")` | Instance | `Address` | Optional admin address that may remove alerts and set owner limits |
@@ -37,17 +38,17 @@ Source: `contracts/alert-registry/src/lib.rs`
 
 ### TTL Behavior
 
-All four persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `ContractIndex`) are extended by **100 ledgers** (≈ 8 minutes at 5 s/ledger) on every write that touches them.
+All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex`) are extended by **100 ledgers** (≈ 8 minutes at 5 s/ledger) on every write that touches them.
 
 | Function | Keys Extended |
 |---|---|
-| `register_alert` | `Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
+| `register_alert` | `Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `OwnerActiveCount(owner)`, `ContractIndex(target)` |
 | `update_alert` | `Alert(id)`, `AlertActive(id)` |
 | `update_webhook` | `Alert(id)` |
 | `propose_webhook` | `Alert(id)` |
 | `confirm_webhook` | `Alert(id)` |
 | `renew_alert_ttl` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` — data unchanged |
-| `remove_alert` | Entries deleted — no TTL extension |
+| `remove_alert` | `Alert(id)`, `AlertActive(id)` deleted; `OwnerIndex(owner)`, `OwnerActiveCount(owner)`, `ContractIndex(target)` updated and TTL-extended |
 
 Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owner`, paginated variants, `get_alert_count`) do **not** extend any TTL.
 
@@ -65,8 +66,9 @@ Source: `contracts/watcher-registry/src/lib.rs`
 
 | Key | Tier | Value Type | Description |
 |---|---|---|---|
-| `symbol_short!("ADMIN")` | Instance | `Address` | Current admin address |
-| `symbol_short!("WATCHERS")` | Instance | `Vec<Address>` | List of authorized watcher node addresses |
+| `DataKey::Admins` | Instance | `Vec<Address>` | The current admin set (multi-admin; any one admin can perform privileged operations) |
+| `DataKey::Watchers` | Instance | `Vec<Address>` | List of authorized watcher node addresses |
+| `symbol_short!("W_CNT")` | Instance | `u32` | Cached count of registered watchers, kept in sync by `register_watcher` / `remove_watcher` / `replace_watcher` / `clear_all_watchers` so `get_watcher_count` never deserializes the full `Watchers` vec |
 
 ### TTL Behavior
 
@@ -80,6 +82,6 @@ There are no persistent storage entries in WatcherRegistry.
 
 | Contract | Tier | Keys | TTL Managed By |
 |---|---|---|---|
-| AlertRegistry | Persistent | `Alert`, `OwnerIndex`, `ContractIndex` | Contract (`extend_ttl`, 100 ledgers) |
+| AlertRegistry | Persistent | `Alert`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex` | Contract (`extend_ttl`, 100 ledgers) |
 | AlertRegistry | Instance | `NEXT_ID` | Network |
-| WatcherRegistry | Instance | `ADMIN`, `WATCHERS` | Network |
+| WatcherRegistry | Instance | `Admins`, `Watchers`, `W_CNT` | Network |

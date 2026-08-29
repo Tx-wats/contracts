@@ -15,7 +15,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
       # read rust-toolchain.toml. Parse the pin so that file stays the one source
@@ -50,9 +50,19 @@ jobs:
             --wasm target/wasm32-unknown-unknown/release/watcher_registry.wasm \
             --output abi/watcher-registry.json
 
-      - name: Upload ABIs to release
-        uses: softprops/action-gh-release@v2
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          mkdir -p sbom
+          cargo cyclonedx --format json --all
+          find . -name "*.cdx.json" -exec cp {} sbom/ \;
+
+      - name: Upload ABIs and SBOMs to release
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             abi/alert-registry.json
             abi/watcher-registry.json
+            sbom/*.cdx.json

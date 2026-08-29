@@ -1,11 +1,13 @@
 # Event Reference
 
-This document specifies the planned on-chain events emitted by both contracts.
+This document specifies the on-chain events emitted by both contracts.
 Events follow the Soroban two-topic convention: `(category, action)`.
 
-> **Status:** `register_alert` and `remove_alert` already emit events.
-> All other entries below are **planned** — they define the topic and data
-> shapes that implementors MUST follow when wiring up the remaining events.
+> **Status:** each entry below carries its own status line. Most events are now
+> implemented; the remaining `🔲 planned` entries define the topic and data
+> shapes that implementors MUST follow when the corresponding function is wired
+> up to emit. The per-entry status line is authoritative — this table is
+> audited against the contract source (see issue #110 for the automated check).
 
 ---
 
@@ -195,6 +197,12 @@ Emitted when a watcher address is de-authorised.
 > actually present in the registry — removing an unregistered address is a
 > silent no-op.
 
+> **Emitted alongside `watcher.replace`.** `replace_watcher` emits *both* a
+> `watcher.remove` for `old_watcher` and a `watcher.replace` carrying the same
+> `old_watcher`. A listener that reacts to both event types will see the old
+> watcher's revocation twice — see
+> [`watcher.replace`](#watcherreplace) for how to de-duplicate.
+
 ---
 
 ### `watcher.replace`
@@ -207,7 +215,56 @@ Emitted when an existing watcher address is atomically replaced with a new watch
 | Topic 1 | `Symbol("replace")` |
 | Data | `(old_watcher: Address, new_watcher: Address)` |
 
+> A self-replace (`old_watcher == new_watcher`) is a no-op: the address stays
+> authorized throughout, so neither `watcher.replace` nor `watcher.remove` is
+> emitted.
+
 **Status:** ✅ implemented (`replace_watcher`)
+
+#### Dual-event behaviour
+
+A single `replace_watcher` call emits **two** events, in this order:
+
+1. `watcher.remove` with data `old_watcher`
+2. `watcher.replace` with data `(old_watcher, new_watcher)`
+
+Both events revoke trust for the **same** `old_watcher`. An indexer that
+tracks revocations from the `watcher.remove` topic *and* separately reacts to
+`watcher.replace` will therefore process the old watcher's revocation twice
+for one on-chain action. De-duplicate on `(ledger sequence, contract id,
+revoked address)` — every event from the same transaction shares a ledger
+sequence, so the two signals collapse to one.
+
+```ts
+// Pseudocode: fold both event types into a single revocation set.
+const revoked = new Set<string>();
+
+function key(ledgerSeq: number, contractId: string, addr: string): string {
+  return `${ledgerSeq}:${contractId}:${addr}`;
+}
+
+for (const ev of events) {
+  const [topic0, topic1] = ev.topics;
+  if (topic0 !== "watcher") continue;
+
+  if (topic1 === "remove") {
+    const addr = ev.data as string; // old/removed watcher
+    revoked.add(key(ev.ledgerSeq, ev.contractId, addr));
+  } else if (topic1 === "replace") {
+    const [oldWatcher, newWatcher] = ev.data as [string, string];
+    // `oldWatcher` may already be in `revoked` from the paired
+    // `watcher.remove` above — Set membership makes this idempotent.
+    revoked.add(key(ev.ledgerSeq, ev.contractId, oldWatcher));
+    authorize(newWatcher); // grant trust to the replacement
+  }
+}
+// `revoked` now holds one entry per revoked watcher, not two.
+```
+
+If you only need revocations, subscribing to `watcher.remove` alone is
+sufficient — `replace_watcher` always emits it. Subscribe to
+`watcher.replace` as well only when you also need the `new_watcher` half of
+the rotation.
 
 ---
 
@@ -264,6 +321,68 @@ Emitted when the watcher registry admin role is transferred.
 | Data | `(old_admin: Address, new_admin: Address)` |
 
 **Status:** ✅ implemented (`transfer_admin`)
+
+---
+
+### `admin.timelock`
+
+Emitted when the timelock delay applied to sensitive admin actions is changed.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("timelock")` |
+| Data | `(caller: Address, delay_ledgers: u32)` |
+
+**Status:** ✅ implemented (`set_timelock_delay`, `execute_admin_action`)
+
+---
+
+### `admin.propose`
+
+Emitted when a sensitive admin action is queued behind the timelock.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("propose")` |
+| Data | `(proposer: Address, ready_at: u32)` |
+
+**Status:** ✅ implemented (`propose_admin_action`)
+
+> `ready_at` is the ledger sequence at or after which the action may be
+> executed. Co-admins should watch this event and cancel anything they did not
+> expect before that ledger is reached.
+
+---
+
+### `admin.cancel`
+
+Emitted when a queued admin action is cancelled before execution.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("cancel")` |
+| Data | `(caller: Address)` |
+
+**Status:** ✅ implemented (`cancel_admin_action`)
+
+---
+
+### `admin.execute`
+
+Emitted when a queued admin action is executed after its delay has elapsed.
+The action's own event (`admin.add`, `admin.transfer`, `watcher.remove`, …) is
+emitted alongside it.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("execute")` |
+| Data | `(caller: Address)` |
+
+**Status:** ✅ implemented (`execute_admin_action`)
 
 ---
 

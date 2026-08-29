@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `getAlertIdsByOwner({ owner })` for fetching just the owner's alert IDs without the full configs.
 - Type declarations and client methods for two-phase webhook rotation:
   - `proposeWebhook({ caller, id, new_webhook_hash })`
   - `confirmWebhook({ caller, id })`
@@ -23,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `getAlertsModifiedSince` now takes `offset` and `limit` in addition to `since`; a single call's scan cost is bounded by `limit` rather than the full registry size.
 - **Breaking:** `getAlert({ querier, id })` and `getAlertActive({ querier, id })` now take a `querier` address and return a `Result`, matching the existing gating on `getAlertsForContract` / `getAlertsByOwner`. When a `WatcherRegistry` is configured, a non-watcher `querier` is rejected with `NotAWatcher`.
 - **Breaking:** `getActiveAlertsForContract({ querier, target_contract })` now takes a `querier` address and returns a `Result` for the same reason — previously it was the only contract-scoped query left ungated.
+- `getAdmin()` now surfaces `NotInitialized` as a typed contract error instead of an untyped panic, matching `WatcherRegistry`'s `getAdmin()` convention.
+- `setWatcherRegistry({ admin, watcher_registry })` now probes the target contract and rejects a misconfigured address with `InvalidWatcherRegistry` at call time instead of leaving gating silently broken until the next read query.
 
 ## [0.1.0] - 2025-05-28
 
