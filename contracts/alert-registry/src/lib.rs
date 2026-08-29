@@ -80,6 +80,10 @@ pub enum ContractError {
     /// Returned by `register_alert` when the global alert-count ceiling
     /// (set via `set_global_alert_limit`) has been reached.
     GlobalAlertLimitExceeded = 13,
+    /// Returned by `register_alert` when the target contract is at the
+    /// configured per-contract alert limit (set via
+    /// `set_per_contract_alert_limit`).
+    ContractAlertLimitExceeded = 14,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -234,6 +238,44 @@ impl AlertRegistry {
             .unwrap_or(0u32)
     }
 
+    /// Set a per-contract active alert limit (admin only). A value of `0` means no limit.
+    ///
+    /// Symmetric to [`set_per_owner_alert_limit`]: that limit bounds how many
+    /// alerts a single owner may register, while this one bounds how many
+    /// alerts (contributed by any number of distinct owners) may target a
+    /// single `target_contract`, closing the gap where a target contract
+    /// could otherwise accumulate unbounded alerts.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("limit"))` with data `(Symbol("contract"), limit: u32)`.
+    pub fn set_per_contract_alert_limit(
+        env: Env,
+        admin: Address,
+        limit: u32,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("CLIMIT"), &limit);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("limit")),
+            (symbol_short!("contract"), limit),
+        );
+        Ok(())
+    }
+
+    /// Get the configured per-contract active alert limit, or `0` if none is set.
+    pub fn get_per_contract_alert_limit(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("CLIMIT"))
+            .unwrap_or(0u32)
+    }
+
     /// Set a global ceiling on the total number of alerts ever registered
     /// (admin only). A value of `0` means no limit.
     ///
@@ -329,6 +371,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::InvalidWebhookHash`] if `webhook_hash` is not exactly 64 characters.
     /// Returns [`ContractError::LabelTooLong`] if `label` exceeds 128 bytes.
     /// Returns [`ContractError::OwnerAlertLimitExceeded`] if the owner is at the configured per-owner alert limit.
+    /// Returns [`ContractError::ContractAlertLimitExceeded`] if the target contract is at the configured per-contract alert limit.
     /// Returns [`ContractError::GlobalAlertLimitExceeded`] if the registry is at the configured global alert-count ceiling.
     /// Returns [`ContractError::TooManyRules`] if `rules` exceeds the 50-rule maximum.
     /// Returns [`ContractError::InvalidRuleDescriptor`] if a rule is not a recognised descriptor.
@@ -352,6 +395,7 @@ impl AlertRegistry {
         Self::validate_rules(&env, &rules)?;
         Self::assert_global_alert_limit(&env)?;
         Self::assert_per_owner_limit(&env, &owner)?;
+        Self::assert_per_contract_limit(&env, &target_contract)?;
 
         let id = Self::next_id(&env);
         let now = env.ledger().timestamp();
@@ -1098,6 +1142,25 @@ impl AlertRegistry {
         count
     }
 
+    /// Get the number of currently active (non-removed) alerts targeting `target_contract`,
+    /// aggregated across every contributing owner.
+    ///
+    /// Symmetric to [`get_active_alert_count`], but keyed by target contract
+    /// instead of owner.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
+        let ids = Self::contract_index(&env, &target_contract);
+        let mut count: u32 = 0;
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            if env.storage().persistent().has(&DataKey::Alert(id)) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     /// If a `WatcherRegistry` contract address is stored in instance storage,
@@ -1145,6 +1208,19 @@ impl AlertRegistry {
         let limit = Self::get_per_owner_alert_limit(env.clone());
         if limit > 0 && Self::get_active_alert_count(env.clone(), owner.clone()) >= limit {
             return Err(ContractError::OwnerAlertLimitExceeded);
+        }
+        Ok(())
+    }
+
+    /// Reject registration once the number of currently active alerts
+    /// targeting `target_contract` (across all contributing owners) reaches
+    /// the configured per-contract limit. A limit of `0` means no limit.
+    fn assert_per_contract_limit(env: &Env, target_contract: &Address) -> Result<(), ContractError> {
+        let limit = Self::get_per_contract_alert_limit(env.clone());
+        if limit > 0
+            && Self::get_active_contract_alert_count(env.clone(), target_contract.clone()) >= limit
+        {
+            return Err(ContractError::ContractAlertLimitExceeded);
         }
         Ok(())
     }
@@ -1710,6 +1786,167 @@ mod tests {
                 .unwrap(),
             ContractError::Unauthorized
         );
+    }
+
+    // ── Feature: per-contract alert-count ceiling (#40) ────────────────────
+
+    #[test]
+    fn test_per_contract_alert_limit_defaults_to_zero_unlimited() {
+        let (_env, client) = setup();
+        assert_eq!(client.get_per_contract_alert_limit(), 0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #14)")]
+    fn test_per_contract_alert_limit_enforced_across_owners() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_per_contract_alert_limit(&admin, &2u32);
+
+        let target = Address::generate(&env);
+        // Two different owners contribute to the same target contract.
+        client.register_alert(
+            &Address::generate(&env),
+            &target,
+            &str(&env, "Alert1"),
+            &hash64c(&env, '1'),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        client.register_alert(
+            &Address::generate(&env),
+            &target,
+            &str(&env, "Alert2"),
+            &hash64c(&env, '2'),
+            &vec![&env, str(&env, "rule:mint")],
+        );
+
+        // Third registration against the same target, from yet another
+        // owner, exceeds the per-contract ceiling.
+        client.register_alert(
+            &Address::generate(&env),
+            &target,
+            &str(&env, "Alert3"),
+            &hash64c(&env, '3'),
+            &vec![&env, str(&env, "rule:mint")],
+        );
+    }
+
+    #[test]
+    fn test_per_contract_alert_limit_independent_per_contract() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_per_contract_alert_limit(&admin, &1u32);
+
+        let target_a = Address::generate(&env);
+        let target_b = Address::generate(&env);
+
+        // One alert against target_a fills its ceiling...
+        client.register_alert(
+            &Address::generate(&env),
+            &target_a,
+            &str(&env, "Alert1"),
+            &hash64c(&env, '1'),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+
+        // ...but target_b's own ceiling is untouched.
+        client.register_alert(
+            &Address::generate(&env),
+            &target_b,
+            &str(&env, "Alert2"),
+            &hash64c(&env, '2'),
+            &vec![&env, str(&env, "rule:mint")],
+        );
+
+        assert_eq!(client.get_active_contract_alert_count(&target_a), 1u32);
+        assert_eq!(client.get_active_contract_alert_count(&target_b), 1u32);
+    }
+
+    #[test]
+    fn test_per_contract_alert_limit_freed_by_removal() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_per_contract_alert_limit(&admin, &1u32);
+
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert1"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+
+        // Unlike the global ceiling, the per-contract limit tracks currently
+        // active alerts, so removing one reopens room for the target.
+        client.remove_alert(&owner, &id);
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert2"),
+            &hash64c(&env, '2'),
+            &vec![&env, str(&env, "rule:mint")],
+        );
+        assert_eq!(client.get_active_contract_alert_count(&target), 1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_set_per_contract_alert_limit_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        env.set_auths(&[]);
+        client.set_per_contract_alert_limit(&admin, &5u32);
+    }
+
+    #[test]
+    fn test_set_per_contract_alert_limit_non_admin_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client
+                .try_set_per_contract_alert_limit(&attacker, &5u32)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    #[test]
+    fn test_set_per_contract_alert_limit_emits_admin_limit_event() {
+        use soroban_sdk::{symbol_short, testutils::Events as _};
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.set_per_contract_alert_limit(&admin, &7u32);
+
+        let events = env.events().all();
+        let limit_event = events
+            .iter()
+            .find(|(_, topics, _)| {
+                topics.len() == 2
+                    && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                    && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("limit")
+            })
+            .expect("admin.limit event must be emitted");
+
+        let (_, _, data) = limit_event;
+        let (kind, emitted_limit): (Symbol, u32) = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(kind, symbol_short!("contract"));
+        assert_eq!(emitted_limit, 7u32);
     }
 
     #[test]
