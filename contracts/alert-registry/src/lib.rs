@@ -884,9 +884,20 @@ impl AlertRegistry {
     /// Equivalent to [`get_alerts_for_contract`] but filters out any entries
     /// where `active == false`. Returns an empty vec if no active alerts exist
     /// for `target_contract`.
-    pub fn get_active_alerts_for_contract(env: Env, target_contract: Address) -> Vec<AlertConfig> {
+    ///
+    /// If a `WatcherRegistry` is configured, `querier` must be a registered
+    /// watcher or the call returns [`ContractError::NotAWatcher`].
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_active_alerts_for_contract(
+        env: Env,
+        querier: Address,
+        target_contract: Address,
+    ) -> Result<Vec<AlertConfig>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
         let ids = Self::contract_index(&env, &target_contract);
-        Self::active_configs_for_ids(&env, &ids)
+        Ok(Self::active_configs_for_ids(&env, &ids))
     }
 
     /// Retrieve all alert configs owned by a given address.
@@ -949,17 +960,40 @@ impl AlertRegistry {
     /// Retrieve a single alert config by its ID.
     ///
     /// Returns `None` if the alert does not exist or has expired.
-    pub fn get_alert(env: Env, config_id: u64) -> Option<AlertConfig> {
-        env.storage().persistent().get(&DataKey::Alert(config_id))
+    ///
+    /// If a `WatcherRegistry` is configured, `querier` must be a registered
+    /// watcher or the call returns [`ContractError::NotAWatcher`].
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_alert(
+        env: Env,
+        querier: Address,
+        config_id: u64,
+    ) -> Result<Option<AlertConfig>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
+        Ok(env.storage().persistent().get(&DataKey::Alert(config_id)))
     }
 
     /// Read the `active` flag of an alert without deserializing the full config.
     ///
     /// Returns `None` if the alert does not exist or has expired.
-    pub fn get_alert_active(env: Env, config_id: u64) -> Option<bool> {
-        env.storage()
+    ///
+    /// If a `WatcherRegistry` is configured, `querier` must be a registered
+    /// watcher or the call returns [`ContractError::NotAWatcher`].
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_alert_active(
+        env: Env,
+        querier: Address,
+        config_id: u64,
+    ) -> Result<Option<bool>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
+        Ok(env
+            .storage()
             .persistent()
-            .get(&DataKey::AlertActive(config_id))
+            .get(&DataKey::AlertActive(config_id)))
     }
 
     /// Deactivate all alerts owned by `caller` in a single call.
@@ -1523,7 +1557,7 @@ mod tests {
             &vec![&env, str(&env, "rule:transfer")],
         );
 
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg.label, str(&env, "My Alert"));
         assert_eq!(cfg.owner, owner);
         assert!(cfg.active);
@@ -1551,7 +1585,7 @@ mod tests {
             Ok(())
         );
 
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert!(!cfg.active);
         assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:mint"));
     }
@@ -1572,7 +1606,7 @@ mod tests {
         );
 
         assert_eq!(client.try_remove_alert(&owner, &id).unwrap(), Ok(()));
-        assert!(client.get_alert(&id).is_none());
+        assert!(client.get_alert(&owner, &id).is_none());
     }
 
     // 4. Unauthorized update rejected
@@ -1651,7 +1685,7 @@ mod tests {
         );
 
         client.remove_alert_by_admin(&admin, &id);
-        assert!(client.get_alert(&id).is_none());
+        assert!(client.get_alert(&owner, &id).is_none());
     }
 
     #[test]
@@ -2061,8 +2095,8 @@ mod tests {
     // 6. Edge case — get nonexistent alert returns None
     #[test]
     fn test_get_nonexistent_alert() {
-        let (_env, client) = setup();
-        assert!(client.get_alert(&999u64).is_none());
+        let (env, client) = setup();
+        assert!(client.get_alert(&Address::generate(&env), &999u64).is_none());
     }
 
     // 7. Edge case — get alerts for contract with no alerts returns empty vec
@@ -2281,6 +2315,69 @@ mod tests {
         );
     }
 
+    // 14b. Watcher registry configured — get_alert, get_alert_active, and
+    // get_active_alerts_for_contract reject a non-watcher the same way the
+    // other gated query functions do (#42).
+    #[test]
+    #[cfg(feature = "testutils")]
+    fn test_watcher_registry_get_alert_family_rejects_non_watcher() {
+        let (env, alert_client, watcher_client) = setup_with_watcher_registry();
+
+        let admin = Address::generate(&env);
+        let watcher = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        watcher_client.initialize(&admin);
+        watcher_client.register_watcher(&admin, &watcher);
+
+        alert_client.initialize(&admin);
+        let watcher_contract_id = watcher_client.address.clone();
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+        let id = alert_client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        // Registered watcher can use all three.
+        assert!(alert_client.get_alert(&watcher, &id).is_some());
+        assert_eq!(alert_client.get_alert_active(&watcher, &id), Some(true));
+        assert_eq!(
+            alert_client
+                .get_active_alerts_for_contract(&watcher, &target)
+                .len(),
+            1
+        );
+
+        // A stranger is rejected on all three.
+        assert_eq!(
+            alert_client
+                .try_get_alert(&stranger, &id)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAWatcher
+        );
+        assert_eq!(
+            alert_client
+                .try_get_alert_active(&stranger, &id)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAWatcher
+        );
+        assert_eq!(
+            alert_client
+                .try_get_active_alerts_for_contract(&stranger, &target)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAWatcher
+        );
+    }
+
     // 15. get_watcher_registry returns None before configuration
     #[test]
     fn test_get_watcher_registry_none_before_set() {
@@ -2365,7 +2462,7 @@ mod tests {
             &vec![&env, str(&env, "rule:transfer")],
         );
 
-        let before = client.get_alert(&id).unwrap();
+        let before = client.get_alert(&owner, &id).unwrap();
         assert_eq!(
             before.created_at, before.updated_at,
             "created_at and updated_at should be equal right after registration"
@@ -2378,7 +2475,7 @@ mod tests {
 
         client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &true);
 
-        let after = client.get_alert(&id).unwrap();
+        let after = client.get_alert(&owner, &id).unwrap();
         assert!(
             after.updated_at > after.created_at,
             "updated_at ({}) must be strictly greater than created_at ({})",
@@ -2419,7 +2516,7 @@ mod tests {
             &rules,
         );
 
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg.rules.len(), 50, "all 50 rules should be persisted");
 
         // Spot-check a few entries to confirm data integrity.
@@ -2453,7 +2550,7 @@ mod tests {
             Ok(())
         );
 
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg.label, str(&env, "Renamed"));
         // rules and webhook_hash must be untouched
         assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:transfer"));
@@ -2573,7 +2670,7 @@ mod tests {
         let all = client.get_alerts_for_contract(&owner, &target);
         assert_eq!(all.len(), 2);
 
-        let active = client.get_active_alerts_for_contract(&target);
+        let active = client.get_active_alerts_for_contract(&owner, &target);
         assert_eq!(active.len(), 1);
         assert_eq!(active.get(0).unwrap().label, str(&env, "Active"));
         let _ = id1;
@@ -2596,7 +2693,7 @@ mod tests {
 
         client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:transfer")], &false);
 
-        let active = client.get_active_alerts_for_contract(&target);
+        let active = client.get_active_alerts_for_contract(&owner, &target);
         assert_eq!(active.len(), 0);
     }
 
@@ -2605,7 +2702,12 @@ mod tests {
     fn test_get_active_alerts_for_contract_empty() {
         let (env, client) = setup();
         let target = Address::generate(&env);
-        assert_eq!(client.get_active_alerts_for_contract(&target).len(), 0);
+        assert_eq!(
+            client
+                .get_active_alerts_for_contract(&Address::generate(&env), &target)
+                .len(),
+            0
+        );
     }
 
     // 26. get_active_alerts_for_contract — all active alerts are returned
@@ -2630,7 +2732,7 @@ mod tests {
             &vec![&env, str(&env, "rule:mint")],
         );
 
-        let active = client.get_active_alerts_for_contract(&target);
+        let active = client.get_active_alerts_for_contract(&owner, &target);
         assert_eq!(active.len(), 2);
     }
 
@@ -3207,7 +3309,7 @@ mod tests {
         client.update_target_contract(&owner, &id, &new_target);
 
         // alert config reflects new target
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg.target_contract, new_target);
 
         // indexes updated correctly
@@ -3296,8 +3398,10 @@ mod tests {
     // 18. get_alert_active returns None for nonexistent ID
     #[test]
     fn test_get_alert_active_nonexistent() {
-        let (_env, client) = setup();
-        assert!(client.get_alert_active(&999u64).is_none());
+        let (env, client) = setup();
+        assert!(client
+            .get_alert_active(&Address::generate(&env), &999u64)
+            .is_none());
     }
 
     // 19. get_alert_active returns true after registration
@@ -3315,7 +3419,7 @@ mod tests {
             &vec![&env],
         );
 
-        assert_eq!(client.get_alert_active(&id), Some(true));
+        assert_eq!(client.get_alert_active(&owner, &id), Some(true));
     }
 
     // 20. get_alert_active reflects update_alert changes
@@ -3333,13 +3437,13 @@ mod tests {
             &vec![&env],
         );
 
-        assert_eq!(client.get_alert_active(&id), Some(true));
+        assert_eq!(client.get_alert_active(&owner, &id), Some(true));
 
         client.update_alert(&owner, &id, &vec![&env], &false);
-        assert_eq!(client.get_alert_active(&id), Some(false));
+        assert_eq!(client.get_alert_active(&owner, &id), Some(false));
 
         client.update_alert(&owner, &id, &vec![&env], &true);
-        assert_eq!(client.get_alert_active(&id), Some(true));
+        assert_eq!(client.get_alert_active(&owner, &id), Some(true));
     }
 
     // 21. get_alert_active returns None after removal
@@ -3357,9 +3461,9 @@ mod tests {
             &vec![&env],
         );
 
-        assert_eq!(client.get_alert_active(&id), Some(true));
+        assert_eq!(client.get_alert_active(&owner, &id), Some(true));
         client.remove_alert(&owner, &id);
-        assert!(client.get_alert_active(&id).is_none());
+        assert!(client.get_alert_active(&owner, &id).is_none());
     }
 
     // 22. deactivate_all_alerts returns 0 when owner has no alerts
@@ -3400,16 +3504,16 @@ mod tests {
             &vec![&env, str(&env, "rule:transfer")],
         );
 
-        assert_eq!(client.get_alert_active(&id1), Some(true));
-        assert_eq!(client.get_alert_active(&id2), Some(true));
-        assert_eq!(client.get_alert_active(&id3), Some(true));
+        assert_eq!(client.get_alert_active(&owner, &id1), Some(true));
+        assert_eq!(client.get_alert_active(&owner, &id2), Some(true));
+        assert_eq!(client.get_alert_active(&owner, &id3), Some(true));
 
         let count = client.deactivate_all_alerts(&owner);
         assert_eq!(count, 3);
 
-        assert_eq!(client.get_alert_active(&id1), Some(false));
-        assert_eq!(client.get_alert_active(&id2), Some(false));
-        assert_eq!(client.get_alert_active(&id3), Some(false));
+        assert_eq!(client.get_alert_active(&owner, &id1), Some(false));
+        assert_eq!(client.get_alert_active(&owner, &id2), Some(false));
+        assert_eq!(client.get_alert_active(&owner, &id3), Some(false));
     }
 
     // 24. deactivate_all_alerts only affects the calling owner's alerts
@@ -3438,8 +3542,8 @@ mod tests {
         let count = client.deactivate_all_alerts(&owner1);
         assert_eq!(count, 1);
 
-        assert_eq!(client.get_alert_active(&id1), Some(false));
-        assert_eq!(client.get_alert_active(&id2), Some(true));
+        assert_eq!(client.get_alert_active(&Address::generate(&env), &id1), Some(false));
+        assert_eq!(client.get_alert_active(&Address::generate(&env), &id2), Some(true));
     }
 
     // 25. deactivate_all_alerts skips removed alerts and deactivates remaining
@@ -3470,9 +3574,9 @@ mod tests {
         assert_eq!(count, 1);
 
         // id1 is gone
-        assert!(client.get_alert(&id1).is_none());
+        assert!(client.get_alert(&owner, &id1).is_none());
         // id2 is now inactive
-        assert_eq!(client.get_alert_active(&id2), Some(false));
+        assert_eq!(client.get_alert_active(&owner, &id2), Some(false));
     }
 
     // 18. get_alerts_by_owner_paginated — basic pagination
@@ -3558,7 +3662,7 @@ mod tests {
                 .unwrap(),
             Ok(())
         );
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert!(!cfg.active);
 
         // reactivate
@@ -3568,7 +3672,7 @@ mod tests {
                 .unwrap(),
             Ok(())
         );
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert!(cfg.active);
     }
 
@@ -3582,7 +3686,7 @@ mod tests {
         let id =
             client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
 
-        let original_updated_at = client.get_alert(&id).unwrap().updated_at;
+        let original_updated_at = client.get_alert(&owner, &id).unwrap().updated_at;
         env.ledger().set_timestamp(original_updated_at + 100);
 
         client
@@ -3590,7 +3694,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert!(cfg.updated_at > original_updated_at);
     }
 
@@ -3785,9 +3889,9 @@ mod tests {
             &vec![&env, str(&env, "rule:transfer")],
         );
 
-        let before = client.get_alert(&id).unwrap();
+        let before = client.get_alert(&owner, &id).unwrap();
         client.bump_alert(&id, &17_280u32);
-        let after = client.get_alert(&id).unwrap();
+        let after = client.get_alert(&owner, &id).unwrap();
 
         // All fields must be identical after a bump
         assert_eq!(after.label, before.label);

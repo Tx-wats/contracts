@@ -56,7 +56,7 @@ fn test_regression_update_alert_discarding_rule_validation_errors() {
     );
 
     // Verify rules were not modified
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:transfer"));
 }
 
@@ -79,8 +79,8 @@ fn test_regression_missing_remove_alert_body() {
         &vec![&env, str(&env, "rule:transfer")],
     );
 
-    assert!(client.get_alert(&id).is_some());
-    assert_eq!(client.get_alert_active(&id), Some(true));
+    assert!(client.get_alert(&owner, &id).is_some());
+    assert_eq!(client.get_alert_active(&owner, &id), Some(true));
     assert_eq!(client.get_alerts_by_owner(&owner, &owner).len(), 1);
     assert_eq!(client.get_alerts_for_contract(&owner, &target).len(), 1);
 
@@ -96,8 +96,8 @@ fn test_regression_missing_remove_alert_body() {
     );
 
     // Must be completely cleaned up
-    assert!(client.get_alert(&id).is_none());
-    assert_eq!(client.get_alert_active(&id), None);
+    assert!(client.get_alert(&owner, &id).is_none());
+    assert_eq!(client.get_alert_active(&owner, &id), None);
     assert_eq!(client.get_alerts_by_owner(&owner, &owner).len(), 0);
     assert_eq!(client.get_alerts_for_contract(&owner, &target).len(), 0);
 }
@@ -159,7 +159,10 @@ fn test_regression_update_webhook_accepted_invalid_length_hashes() {
         client.try_update_webhook(&owner, &id, &valid_hash).unwrap(),
         Ok(())
     );
-    assert_eq!(client.get_alert(&id).unwrap().webhook_hash, valid_hash);
+    assert_eq!(
+        client.get_alert(&owner, &id).unwrap().webhook_hash,
+        valid_hash
+    );
 }
 
 /// Regression test for historical bug:
@@ -246,8 +249,8 @@ fn test_regression_remove_alert_by_admin_missing() {
         client.try_remove_alert_by_admin(&admin, &id).unwrap(),
         Ok(())
     );
-    assert!(client.get_alert(&id).is_none());
-    assert_eq!(client.get_alert_active(&id), None);
+    assert!(client.get_alert(&owner, &id).is_none());
+    assert_eq!(client.get_alert_active(&owner, &id), None);
     assert_eq!(client.get_alerts_by_owner(&admin, &owner).len(), 0);
     assert_eq!(client.get_alerts_for_contract(&admin, &target).len(), 0);
 }
@@ -271,17 +274,17 @@ fn test_regression_update_alert_keeps_alert_active_in_sync() {
     );
 
     // Initial state: active = true
-    assert_eq!(client.get_alert_active(&id), Some(true));
+    assert_eq!(client.get_alert_active(&owner, &id), Some(true));
 
     // Deactivate
     client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:transfer")], &false);
-    assert_eq!(client.get_alert_active(&id), Some(false));
-    assert!(!client.get_alert(&id).unwrap().active);
+    assert_eq!(client.get_alert_active(&owner, &id), Some(false));
+    assert!(!client.get_alert(&owner, &id).unwrap().active);
 
     // Reactivate
     client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:transfer")], &true);
-    assert_eq!(client.get_alert_active(&id), Some(true));
-    assert!(client.get_alert(&id).unwrap().active);
+    assert_eq!(client.get_alert_active(&owner, &id), Some(true));
+    assert!(client.get_alert(&owner, &id).unwrap().active);
 }
 
 /// Regression test for historical bug:
@@ -303,7 +306,7 @@ fn test_regression_renew_alert_ttl_preserves_updated_at() {
         &vec![&env, str(&env, "rule:transfer")],
     );
 
-    let cfg_initial = client.get_alert(&id).unwrap();
+    let cfg_initial = client.get_alert(&owner, &id).unwrap();
     assert_eq!(cfg_initial.created_at, 1000);
     assert_eq!(cfg_initial.updated_at, 1000);
 
@@ -312,7 +315,7 @@ fn test_regression_renew_alert_ttl_preserves_updated_at() {
 
     assert_eq!(client.try_renew_alert_ttl(&owner, &id).unwrap(), Ok(()));
 
-    let cfg_after_renew = client.get_alert(&id).unwrap();
+    let cfg_after_renew = client.get_alert(&owner, &id).unwrap();
     assert_eq!(
         cfg_after_renew.updated_at, 1000,
         "renew_alert_ttl must NOT modify updated_at"
