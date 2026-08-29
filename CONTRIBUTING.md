@@ -145,6 +145,52 @@ fn main() {
 - **`docs/` directory:** Reserved strictly for durable, evergreen reference material (e.g., architecture guides, storage layouts, event catalogs, protocol specifications, API references).
 - **PR summaries & changelog notes:** Do not commit temporary per-PR summaries or change descriptions directly into `docs/`. PR details belong in GitHub pull request descriptions, and notable changes should be added to `CHANGELOG.md`.
 
+## Cutting a Release
+
+Releases follow a specific two-phase trigger sequence due to how GitHub Actions workflows are structured:
+
+1. **Git Tag (`vX.Y.Z`)** triggers `.github/workflows/deploy-testnet.yml`, which compiles the contracts, deploys them to Stellar testnet, updates `DEPLOYMENTS.md`, and opens a pull request with the new addresses.
+2. **GitHub Release (`published`)** triggers `.github/workflows/publish-abis.yml` and `.github/workflows/publish-bindings.yml`, which generate the JSON ABIs, upload them to the release assets, and generate/publish the TypeScript npm bindings.
+
+Because these triggers are decoupled, releases must follow the sequence below in exact order.
+
+### Release Sequence
+
+1. **Prepare Release**
+   - Ensure all target PRs are merged to `main`.
+   - Update `CHANGELOG.md` by moving items from `[Unreleased]` to a new version header `[X.Y.Z] - YYYY-MM-DD`.
+   - Commit and push changes to `main`.
+
+2. **Create and Push Git Tag**
+   ```bash
+   git checkout main
+   git pull origin main
+   git tag -a vX.Y.Z -m "Release vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+3. **Verify Testnet Deployment & Merge Addresses**
+   - Monitor the **Deploy to Testnet** workflow on GitHub Actions.
+   - Once completed, review and merge the automated PR (`deploy/update-deployments-vX.Y.Z`) into `main`.
+
+4. **Publish GitHub Release**
+   - In GitHub, navigate to **Releases** → **Draft a new release**.
+   - Select the existing tag `vX.Y.Z`.
+   - Set the title to `vX.Y.Z` and paste the release notes from `CHANGELOG.md`.
+   - Click **Publish release**.
+
+5. **Verify Automated Publishing**
+   - Monitor the **Publish Contract ABIs** and **Publish TypeScript Bindings** workflows triggered by the published release.
+
+### Release Verification Checklist
+
+- [ ] `vX.Y.Z` tag created and pushed to remote repository.
+- [ ] `Deploy to Testnet` workflow completed successfully.
+- [ ] Automated `deploy/update-deployments-vX.Y.Z` PR reviewed and merged to `main`.
+- [ ] GitHub Release `vX.Y.Z` created and published using the tag.
+- [ ] `Publish Contract ABIs` workflow passed and attached ABI JSON files (`alert-registry.json`, `watcher-registry.json`) to the release.
+- [ ] `Publish TypeScript Bindings` workflow passed and published the latest package to npm.
+
 ## Sister Repos
  
 - **Core engine:** https://github.com/Tx-wat/stellar-txwatch-core
