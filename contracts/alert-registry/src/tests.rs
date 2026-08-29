@@ -937,3 +937,301 @@ fn test_is_watcher_gating_enabled_default_false() {
     assert!(!client.is_watcher_gating_enabled());
     assert!(client.get_watcher_registry().is_none());
 }
+
+// ── Mutation Testing Validation Tests (Killing Potential Mutants) ───────────
+
+#[test]
+fn test_per_owner_limit_exact_boundary() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &2u32);
+    assert_eq!(client.get_per_owner_alert_limit(), 2u32);
+
+    let id0 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A0"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    let id1 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A1"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+
+    // 3rd alert exceeds limit
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, "A2"),
+                &hash64(&env),
+                &vec![&env, str(&env, "rule:transfer")],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::OwnerAlertLimitExceeded
+    );
+
+    // Remove alert 0
+    client.remove_alert(&owner, &id0);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    // Now 3rd alert can be registered
+    let id2 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A2"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+
+    let _ = (id1, id2);
+}
+
+#[test]
+fn test_validate_rule_mint_and_invalid_descriptors() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // mint rule is valid
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Mint Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:mint")],
+    );
+    let cfg = client.get_alert(&id).unwrap();
+    assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:mint"));
+
+    // invalid rules rejected
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, "Bad Alert"),
+                &hash64(&env),
+                &vec![&env, str(&env, "rule:burn")],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidRuleDescriptor
+    );
+
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, "Empty Rule"),
+                &hash64(&env),
+                &vec![&env, str(&env, "")],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidRuleDescriptor
+    );
+}
+
+#[test]
+fn test_update_target_contract_moves_indices() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target_a = Address::generate(&env);
+    let target_b = Address::generate(&env);
+    let querier = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target_a,
+        &str(&env, "Target Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(client.get_alerts_for_contract(&querier, &target_a).len(), 1);
+    assert_eq!(client.get_alerts_for_contract(&querier, &target_b).len(), 0);
+
+    client.update_target_contract(&owner, &id, &target_b);
+
+    assert_eq!(client.get_alerts_for_contract(&querier, &target_a).len(), 0);
+    assert_eq!(client.get_alerts_for_contract(&querier, &target_b).len(), 1);
+    assert_eq!(client.get_active_alerts_for_contract(&target_a).len(), 0);
+    assert_eq!(client.get_active_alerts_for_contract(&target_b).len(), 1);
+}
+
+#[test]
+fn test_get_alert_active_states_and_counts() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    assert_eq!(client.get_alert_active(&999), None);
+    assert_eq!(client.get_alert_count(), 0);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Active Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(client.get_alert_active(&id), Some(true));
+    assert_eq!(client.get_alert_count(), 1);
+
+    client.update_alert(&owner, &id, &vec![&env], &false);
+    assert_eq!(client.get_alert_active(&id), Some(false));
+
+    client.remove_alert(&owner, &id);
+    assert_eq!(client.get_alert_active(&id), None);
+    assert_eq!(client.get_alert_count(), 1); // count is total allocated
+}
+
+#[test]
+fn test_deactivate_all_alerts_precise_behavior() {
+    let (env, client) = setup();
+    let owner1 = Address::generate(&env);
+    let owner2 = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id0 = client.register_alert(
+        &owner1,
+        &target,
+        &str(&env, "A0"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    let id1 = client.register_alert(
+        &owner1,
+        &target,
+        &str(&env, "A1"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    let id2 = client.register_alert(
+        &owner1,
+        &target,
+        &str(&env, "A2"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    let id3 = client.register_alert(
+        &owner2,
+        &target,
+        &str(&env, "B0"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(client.get_active_alert_count(&owner1), 3);
+    assert_eq!(client.get_active_alert_count(&owner2), 1);
+
+    let count = client.deactivate_all_alerts(&owner1);
+    assert_eq!(count, 3);
+    assert_eq!(client.get_alert_active(&id0), Some(false));
+    assert_eq!(client.get_alert_active(&id1), Some(false));
+    assert_eq!(client.get_alert_active(&id2), Some(false));
+    assert_eq!(client.get_alert_active(&id3), Some(true));
+
+    // Second deactivate is a no-op
+    let count2 = client.deactivate_all_alerts(&owner1);
+    assert_eq!(count2, 0);
+}
+
+#[test]
+fn test_get_alerts_modified_since_precision() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    env.ledger().set_timestamp(1000);
+    let id0 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A0"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    env.ledger().set_timestamp(2000);
+    let id1 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A1"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    env.ledger().set_timestamp(3000);
+    client.update_webhook(&owner, &id0, &hash64c(&env, 'z'));
+
+    let res_0 = client.get_alerts_modified_since(&0);
+    assert_eq!(res_0.len(), 2);
+
+    let res_1000 = client.get_alerts_modified_since(&1000);
+    assert_eq!(res_1000.len(), 2);
+
+    let res_2000 = client.get_alerts_modified_since(&2000);
+    assert_eq!(res_2000.len(), 2);
+
+    let res_2001 = client.get_alerts_modified_since(&2001);
+    assert_eq!(res_2001.len(), 1);
+    assert_eq!(res_2001.get(0).unwrap().label, str(&env, "A0"));
+
+    let res_3000 = client.get_alerts_modified_since(&3000);
+    assert_eq!(res_3000.len(), 1);
+    assert_eq!(res_3000.get(0).unwrap().label, str(&env, "A0"));
+
+    let res_3001 = client.get_alerts_modified_since(&3001);
+    assert_eq!(res_3001.len(), 0);
+
+    let _ = id1;
+}
+
+#[test]
+fn test_configs_paginated_boundaries() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let querier = Address::generate(&env);
+
+    for i in 0..5 {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+        let _ = i;
+    }
+
+    let p1 = client.get_alerts_by_owner_paginated(&querier, &owner, &0, &2);
+    assert_eq!(p1.len(), 2);
+
+    let p2 = client.get_alerts_by_owner_paginated(&querier, &owner, &2, &2);
+    assert_eq!(p2.len(), 2);
+
+    let p3 = client.get_alerts_by_owner_paginated(&querier, &owner, &4, &2);
+    assert_eq!(p3.len(), 1);
+
+    let p4 = client.get_alerts_by_owner_paginated(&querier, &owner, &5, &2);
+    assert_eq!(p4.len(), 0);
+
+    let p5 = client.get_alerts_by_owner_paginated(&querier, &owner, &10, &2);
+    assert_eq!(p5.len(), 0);
+}

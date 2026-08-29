@@ -54,6 +54,11 @@ The workspace did not compile and the test suite had never run. Both are now gre
 
 ### Added
 
+- **`get_alerts_by_owner_paginated` and `get_contract_alerts_paginated`** — paginated
+  retrieval of alert configs by owner address and contract-indexed lookups using a shared
+  `configs_paginated` helper (#39).
+- **`test_remove_watcher_not_registered`** — test verifying that calling `remove_watcher`
+  on a never-registered address completes without error and leaves the watcher list unchanged (#59).
 - **Two-phase webhook rotation** — `propose_webhook` stages a new hash in the new
   `AlertConfig::pending_webhook_hash` field without disturbing the live webhook;
   `confirm_webhook` promotes it and clears the pending slot, returning the new
@@ -65,6 +70,9 @@ The workspace did not compile and the test suite had never run. Both are now gre
   `get_alerts_modified_since` incremental syncs.
 
 ### Removed
+
+- `docs/pr-get-alerts-by-owner-paginated.md` and `docs/pr-remove-watcher-not-registered.md` —
+  removed stray per-PR change summaries in favor of durable reference documentation (#106).
 
 - `contracts/alert-registry/src/{contract,storage,types}.rs` — 857 lines of a
   second, divergent `AlertRegistry` implementation that was never declared as a
@@ -123,6 +131,27 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - `.github/workflows/publish-bindings.yml` — CI workflow that generates and publishes TypeScript bindings to npm on every GitHub release
 - `docs/ecosystem-submission.md` — step-by-step guide for submitting to the Stellar Developer Tools ecosystem listing and the `stellar/soroban-examples` repository
 - `contracts/watcher-registry/README.md` and `contracts/alert-registry/README.md` — per-contract READMEs required for the soroban-examples submission
+
+### Documentation
+
+- **`docs/watcher-registry.md` synced with the contract.** The stale single-admin
+  `"ADMIN"` / `"WATCHERS"` storage table is replaced with the real `DataKey::Admins`
+  (multi-admin `Vec<Address>`), `DataKey::Watchers`, and the previously undocumented
+  `symbol_short!("W_CNT")` u32 counter. Added the missing `add_admin`, `remove_admin`,
+  `replace_watcher`, `clear_all_watchers`, and `get_admins` function entries, each with
+  its emitted-event topic/data shape, and corrected the `Result`-returning signatures
+  that the doc still described as panicking (#63, #64, #68).
+- **`docs/storage.md` WatcherRegistry keys** updated to `Admins` / `Watchers` / `W_CNT`
+  to match, including the storage-tier summary row (#63).
+- **`docs/events.md` intro banner** rewrote the stale "only `register_alert` and
+  `remove_alert` emit; everything else is planned" note; the WatcherRegistry
+  `admin.init` status and the `admin.add` / `admin.remove` / `watcher.replace` entries
+  were already corrected in a prior fix. Audited every remaining status line against
+  the contract source (#67).
+- **Role policy documented.** `WatcherRegistry` now states in its rustdoc and in
+  `docs/watcher-registry.md` that an address may hold both the admin and watcher roles,
+  and that contract addresses are accepted for either role. Covered by
+  `test_address_can_be_admin_and_watcher` and `test_contract_address_can_hold_roles` (#69).
 
 ## [0.1.0] - 2025-05-28
 
