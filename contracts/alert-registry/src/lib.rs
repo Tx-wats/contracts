@@ -1,11 +1,5 @@
 #![no_std]
-#![warn(clippy::pedantic)]
-// Soroban's generated contract interface dictates these shapes, so the
-// corresponding pedantic lints fire on correct code and are scoped off here
-// rather than silenced case by case:
-//   - contract entry points must take `Env` and `Address` by value
-//   - `#[contractimpl]` re-exports getters, so `#[must_use]` is not ours to add
-#![allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
     symbol_short, vec, Address, Env, String, Vec,
