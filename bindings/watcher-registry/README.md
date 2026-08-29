@@ -23,13 +23,14 @@ import {
   Client,
   networks,
 } from "@tx-wat/watcher-registry";
-import { Keypair, Networks } from "@stellar/stellar-sdk";
+import { Keypair } from "@stellar/stellar-sdk";
 
-// Connect to testnet
+// Connect to testnet. `networks.testnet` carries the real deployed contract ID,
+// network passphrase, and RPC URL (overlaid from DEPLOYMENTS.md at publish time).
 const client = new Client({
   contractId: networks.testnet.contractId,
-  networkPassphrase: Networks.TESTNET,
-  rpcUrl: "https://soroban-testnet.stellar.org",
+  networkPassphrase: networks.testnet.networkPassphrase,
+  rpcUrl: networks.testnet.rpcUrl,
 });
 
 // Check if a watcher is authorized (read-only, no signing needed)
@@ -76,8 +77,8 @@ class. The method signatures mirror the Soroban contract interface exactly.
 
 | Network | Contract ID |
 |---|---|
-| Testnet | See [DEPLOYMENTS.md](https://github.com/Tx-wat/stellar-txwatch-contracts/blob/main/DEPLOYMENTS.md) |
-| Mainnet | See [DEPLOYMENTS.md](https://github.com/Tx-wat/stellar-txwatch-contracts/blob/main/DEPLOYMENTS.md) |
+| Testnet | `networks.testnet.contractId` — see [DEPLOYMENTS.md](https://github.com/Tx-wat/stellar-txwatch-contracts/blob/main/DEPLOYMENTS.md) |
+| Mainnet | Not yet deployed (`networks.mainnet.contractId` is `""`) — tracked in [#90](https://github.com/Tx-wat/stellar-txwatch-contracts/issues/90) |
 
 ## Generating bindings locally
 

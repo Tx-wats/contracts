@@ -1,14 +1,10 @@
 #![no_std]
-#![warn(clippy::pedantic)]
-// Soroban's generated contract interface dictates these shapes, so the
-// corresponding pedantic lints fire on correct code and are scoped off here
-// rather than silenced case by case:
-//   - contract entry points must take `Env` and `Address` by value
-//   - `#[contractimpl]` re-exports getters, so `#[must_use]` is not ours to add
-#![allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec,
     Address, Env, String, Vec,
+    contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
+    symbol_short, vec, Address, BytesN, Env, String, Vec,
 };
 
 contractmeta!(key = "Name", val = "AlertRegistry");
@@ -21,6 +17,8 @@ contractmeta!(key = "Version", val = "0.1.0");
 mod contract_tests;
 
 #[cfg(test)]
+#[path = "regression_tests.rs"]
+mod regression_tests;
 mod proptests;
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
@@ -85,6 +83,8 @@ pub enum ContractError {
     /// time), so gating would otherwise fail later inside
     /// `assert_watcher_if_configured` at query time.
     InvalidWatcherRegistry = 13,
+    /// Returned when a state-mutating call is made while the contract is paused.
+    Paused = 13,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -191,6 +191,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("ADMIN"), &new_admin);
@@ -204,6 +205,33 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Replace this contract's WASM with `new_wasm_hash` (admin only).
+    ///
+    /// The new WASM must already be installed on-chain. Storage is untouched by
+    /// the upgrade, so the new build **must** keep the existing [`DataKey`]
+    /// layout and `NextId` counter — the host cannot verify this, and a build
+    /// that changes them will read the existing entries as garbage. See
+    /// `docs/upgrade-guide.md`.
+    ///
+    /// Requires the admin role to have been initialized: an uninitialized
+    /// registry has no one authorized to upgrade it.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not the admin.
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        Ok(())
+    }
+
     /// Get the current admin address.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
@@ -212,6 +240,52 @@ impl AlertRegistry {
             .instance()
             .get(&symbol_short!("ADMIN"))
             .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
+    ///
+    /// Intended as an emergency circuit-breaker if an admin key is suspected
+    /// compromised — mutations can be frozen while the incident is investigated.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PAUSED"), &true);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("pause")), admin);
+        Ok(())
+    }
+
+    /// Resume normal operation after a [`Self::pause`].
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PAUSED"), &false);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("unpause")), admin);
+        Ok(())
+    }
+
+    /// Return `true` if the contract is currently paused.
+    #[must_use]
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("PAUSED"))
+            .unwrap_or(false)
     }
 
     /// Set a per-owner active alert limit (admin only). A value of `0` means no limit.
@@ -225,6 +299,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("LIMIT"), &limit);
@@ -273,6 +348,7 @@ impl AlertRegistry {
             return Err(ContractError::InvalidWatcherRegistry);
         }
 
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
@@ -331,6 +407,7 @@ impl AlertRegistry {
             return Err(ContractError::InvalidWebhookHash);
         }
         owner.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if label.len() > 128 {
             return Err(ContractError::LabelTooLong);
@@ -393,6 +470,7 @@ impl AlertRegistry {
         active: bool,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -451,6 +529,7 @@ impl AlertRegistry {
         webhook_hash: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if webhook_hash.len() != 64 {
             return Err(ContractError::InvalidWebhookHash);
@@ -512,6 +591,7 @@ impl AlertRegistry {
         webhook_hash: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if webhook_hash.len() != 64 {
             return Err(ContractError::InvalidWebhookHash);
@@ -558,6 +638,7 @@ impl AlertRegistry {
     /// Emits `(Symbol("alert"), Symbol("wh_conf"))` with data `(id: u64, caller: Address)`.
     pub fn confirm_webhook(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -605,6 +686,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
     pub fn renew_alert_ttl(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let config: AlertConfig = env
             .storage()
@@ -657,6 +739,7 @@ impl AlertRegistry {
         label: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         if label.len() > 128 {
             return Err(ContractError::LabelTooLong);
@@ -704,6 +787,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     pub fn remove_alert(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let config: AlertConfig = env
             .storage()
@@ -731,6 +815,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let config: AlertConfig = env
             .storage()
@@ -764,6 +849,8 @@ impl AlertRegistry {
     /// Emits `(Symbol("alert"), Symbol("bump"))` with data
     /// `(id: u64, ttl: u32)` so off-chain indexers can track renewal activity.
     pub fn bump_alert(env: Env, config_id: u64, ttl: u32) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env)?;
+
         // Clamp the requested TTL to the protocol maximum.
         let effective_ttl = ttl.min(MAX_TTL);
 
@@ -934,6 +1021,9 @@ impl AlertRegistry {
     /// Panics if the contract's stored state is malformed or missing.
     pub fn deactivate_all_alerts(env: Env, caller: Address) -> u32 {
         caller.require_auth();
+        if Self::is_paused(env.clone()) {
+            return 0;
+        }
         let ids = Self::owner_index(&env, &caller);
         let mut count: u32 = 0;
         for i in 0..ids.len() {
@@ -986,6 +1076,7 @@ impl AlertRegistry {
         new_target: Address,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -1112,6 +1203,18 @@ impl AlertRegistry {
         }
     }
 
+    fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PAUSED"))
+            .unwrap_or(false);
+        if paused {
+            return Err(ContractError::Paused);
+        }
+        Ok(())
+    }
+
     fn assert_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
         if !env.storage().instance().has(&symbol_short!("ADMIN")) {
             return Err(ContractError::NotInitialized);
@@ -1132,25 +1235,6 @@ impl AlertRegistry {
         let limit = Self::get_per_owner_alert_limit(env.clone());
         if limit > 0 && Self::get_active_alert_count(env.clone(), owner.clone()) >= limit {
             return Err(ContractError::OwnerAlertLimitExceeded);
-        }
-        Ok(())
-    }
-
-    fn validate_rules(env: &Env, rules: &Vec<String>) -> Result<(), ContractError> {
-        if rules.len() > 50 {
-            return Err(ContractError::TooManyRules);
-        }
-        for i in 0..rules.len() {
-            Self::validate_rule(env, &rules.get(i).unwrap())?;
-        }
-        Ok(())
-    }
-
-    fn validate_rule(env: &Env, rule: &String) -> Result<(), ContractError> {
-        let transfer = String::from_str(env, "rule:transfer");
-        let mint = String::from_str(env, "rule:mint");
-        if *rule != transfer && *rule != mint {
-            return Err(ContractError::InvalidRuleDescriptor);
         }
         Ok(())
     }
@@ -1360,6 +1444,44 @@ impl AlertRegistry {
             }
         }
         out
+    }
+}
+
+impl AlertRegistry {
+    /// Validates a single rule descriptor string.
+    ///
+    /// Accepts only `"rule:transfer"` and `"rule:mint"`.
+    /// Returns [`ContractError::InvalidRuleDescriptor`] on any other string.
+    ///
+    /// Exposed for testing, integration, and fuzz testing.
+    /// # Errors
+    /// Returns [`ContractError::InvalidRuleDescriptor`] if `rule` is not recognized.
+    pub fn validate_rule(env: &Env, rule: &String) -> Result<(), ContractError> {
+        let transfer = String::from_str(env, "rule:transfer");
+        let mint = String::from_str(env, "rule:mint");
+        if *rule != transfer && *rule != mint {
+            return Err(ContractError::InvalidRuleDescriptor);
+        }
+        Ok(())
+    }
+
+    /// Validates a vector of rule descriptors.
+    ///
+    /// Ensures at most 50 rules are supplied and each rule matches a recognized prefix.
+    /// Exposed for testing, integration, and fuzz testing.
+    /// # Errors
+    /// Returns [`ContractError::TooManyRules`] if rules length exceeds 50.
+    /// Returns [`ContractError::InvalidRuleDescriptor`] if any rule descriptor is invalid.
+    /// # Panics
+    /// Panics if indexing into `rules` fails unexpectedly.
+    pub fn validate_rules(env: &Env, rules: &Vec<String>) -> Result<(), ContractError> {
+        if rules.len() > 50 {
+            return Err(ContractError::TooManyRules);
+        }
+        for i in 0..rules.len() {
+            Self::validate_rule(env, &rules.get(i).unwrap())?;
+        }
+        Ok(())
     }
 }
 

@@ -76,7 +76,11 @@ let hex_digest = format!("{:x}", Sha256::digest(b"https://example.com/my-webhook
 
 Off-chain watcher nodes store the original webhook URL locally and verify against the on-chain hash before firing a delivery. A mismatch indicates tampering or an out-of-date local config.
 
-To rotate a webhook URL, use `update_webhook` with the new SHA-256 hex digest and update your local watcher config to match.
+### Webhook Rotation
+
+To rotate a webhook URL, two methods are available:
+- **Two-phase rotation (recommended)**: Use `propose_webhook` followed by `confirm_webhook` to safely stage and test the new endpoint before activating it without downtime. See [ADR 0001: Two-Phase Webhook Rotation](adr/0001-two-phase-webhook-rotation.md) for the security rationale and threat analysis.
+- **Direct rotation**: Use `update_webhook` with the new SHA-256 hex digest for immediate cutover.
 
 ---
 
@@ -376,7 +380,7 @@ Updates the webhook hash for an existing alert. Use this to rotate webhook URLs 
 
 ### `propose_webhook`
 
-Step 1 of the two-step webhook rotation flow. Stores the new hash in `pending_webhook_hash` without replacing the live `webhook_hash`. The old webhook remains active until the owner calls `confirm_webhook`, eliminating the window where the old webhook is deactivated before the new one is confirmed.
+Step 1 of the two-step webhook rotation flow (see [ADR 0001](adr/0001-two-phase-webhook-rotation.md)). Stores the new hash in `pending_webhook_hash` without replacing the live `webhook_hash`. The old webhook remains active until the owner calls `confirm_webhook`, eliminating the window where the old webhook is deactivated before the new one is confirmed.
 
 Calling `propose_webhook` again before confirming overwrites the previous pending hash, allowing the owner to correct a mistake.
 
