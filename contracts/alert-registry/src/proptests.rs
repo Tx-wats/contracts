@@ -845,7 +845,7 @@ proptest! {
         }
 
         let since = base_time + since_offset;
-        let modified = client.get_alerts_modified_since(&since);
+        let modified = client.get_alerts_modified_since(&since, &0u32, &u32::MAX);
 
         let expected_count = timestamps.iter().filter(|&&t| t >= since).count();
         assert_eq!(modified.len() as usize, expected_count);

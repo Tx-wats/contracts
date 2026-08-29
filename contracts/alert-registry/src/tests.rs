@@ -1179,24 +1179,24 @@ fn test_get_alerts_modified_since_precision() {
     env.ledger().set_timestamp(3000);
     client.update_webhook(&owner, &id0, &hash64c(&env, 'z'));
 
-    let res_0 = client.get_alerts_modified_since(&0);
+    let res_0 = client.get_alerts_modified_since(&0, &0u32, &u32::MAX);
     assert_eq!(res_0.len(), 2);
 
-    let res_1000 = client.get_alerts_modified_since(&1000);
+    let res_1000 = client.get_alerts_modified_since(&1000, &0u32, &u32::MAX);
     assert_eq!(res_1000.len(), 2);
 
-    let res_2000 = client.get_alerts_modified_since(&2000);
+    let res_2000 = client.get_alerts_modified_since(&2000, &0u32, &u32::MAX);
     assert_eq!(res_2000.len(), 2);
 
-    let res_2001 = client.get_alerts_modified_since(&2001);
+    let res_2001 = client.get_alerts_modified_since(&2001, &0u32, &u32::MAX);
     assert_eq!(res_2001.len(), 1);
     assert_eq!(res_2001.get(0).unwrap().label, str(&env, "A0"));
 
-    let res_3000 = client.get_alerts_modified_since(&3000);
+    let res_3000 = client.get_alerts_modified_since(&3000, &0u32, &u32::MAX);
     assert_eq!(res_3000.len(), 1);
     assert_eq!(res_3000.get(0).unwrap().label, str(&env, "A0"));
 
-    let res_3001 = client.get_alerts_modified_since(&3001);
+    let res_3001 = client.get_alerts_modified_since(&3001, &0u32, &u32::MAX);
     assert_eq!(res_3001.len(), 0);
 
     let _ = id1;

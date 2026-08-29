@@ -77,6 +77,9 @@ pub enum ContractError {
     DuplicateAlertId = 11,
     /// Returned by `confirm_webhook` when no webhook rotation is in progress.
     NoPendingWebhook = 12,
+    /// Returned by `register_alert` when the global alert-count ceiling
+    /// (set via `set_global_alert_limit`) has been reached.
+    GlobalAlertLimitExceeded = 13,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -231,6 +234,38 @@ impl AlertRegistry {
             .unwrap_or(0u32)
     }
 
+    /// Set a global ceiling on the total number of alerts ever registered
+    /// (admin only). A value of `0` means no limit.
+    ///
+    /// This bounds the cost of registry-wide scans such as
+    /// [`get_alerts_modified_since`], which iterate ID ranges derived from
+    /// the total alert count: without a ceiling, an attacker could inflate
+    /// that count via repeated [`register_alert`] calls to degrade the read
+    /// path for every caller.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn set_global_alert_limit(
+        env: Env,
+        admin: Address,
+        limit: u32,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("GLIMIT"), &limit);
+        Ok(())
+    }
+
+    /// Get the configured global alert-count ceiling, or `0` if none is set.
+    pub fn get_global_alert_limit(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("GLIMIT"))
+            .unwrap_or(0u32)
+    }
+
     /// Configure the `WatcherRegistry` contract address used for optional
     /// watcher-gating on read queries (admin only).
     ///
@@ -294,6 +329,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::InvalidWebhookHash`] if `webhook_hash` is not exactly 64 characters.
     /// Returns [`ContractError::LabelTooLong`] if `label` exceeds 128 bytes.
     /// Returns [`ContractError::OwnerAlertLimitExceeded`] if the owner is at the configured per-owner alert limit.
+    /// Returns [`ContractError::GlobalAlertLimitExceeded`] if the registry is at the configured global alert-count ceiling.
     /// Returns [`ContractError::TooManyRules`] if `rules` exceeds the 50-rule maximum.
     /// Returns [`ContractError::InvalidRuleDescriptor`] if a rule is not a recognised descriptor.
     pub fn register_alert(
@@ -314,6 +350,7 @@ impl AlertRegistry {
         }
 
         Self::validate_rules(&env, &rules)?;
+        Self::assert_global_alert_limit(&env)?;
         Self::assert_per_owner_limit(&env, &owner)?;
 
         let id = Self::next_id(&env);
@@ -985,27 +1022,38 @@ impl AlertRegistry {
     /// # Arguments
     /// * `since` - Ledger timestamp (inclusive lower bound). Pass `0` to
     ///   retrieve every alert that is currently stored.
+    /// * `offset` - Number of IDs to skip from the start of the ID space.
+    /// * `limit` - Maximum number of IDs to scan starting at `offset`.
     ///
     /// # Returns
-    /// A `Vec<AlertConfig>` containing every live alert with
+    /// A `Vec<AlertConfig>` containing every live alert in the ID range
+    /// `[offset, offset + limit)` (clamped to the current alert count) with
     /// `updated_at >= since`. Alerts that have been removed (and whose storage
     /// entry has therefore expired) are silently omitted.
     ///
     /// # Note
-    /// The function scans all IDs from `0` up to the current `NEXT_ID`
-    /// counter. This is acceptable for the expected registry sizes on Soroban
-    /// and avoids the need for a separate timestamp index. For very large
-    /// registries consider combining this with the paginated variants.
+    /// The scan cost of a single call is bounded by `limit`, not by the total
+    /// size of the registry, so callers should page through with a bounded
+    /// `limit` (see [`get_global_alert_limit`] for an admin-settable ceiling
+    /// on total registry size) rather than requesting the whole ID space in
+    /// one call. Callers that need every alert should page repeatedly,
+    /// advancing `offset` by `limit` each call until fewer than `limit`
+    /// results are returned.
     #[must_use]
-    pub fn get_alerts_modified_since(env: Env, since: u64) -> Vec<AlertConfig> {
+    pub fn get_alerts_modified_since(env: Env, since: u64, offset: u32, limit: u32) -> Vec<AlertConfig> {
         let total: u64 = env
             .storage()
             .instance()
             .get(&symbol_short!("NEXT_ID"))
             .unwrap_or(0u64);
 
+        let range_start = u64::from(offset).min(total);
+        let range_end = u64::from(offset)
+            .saturating_add(u64::from(limit))
+            .min(total);
+
         let mut out: Vec<AlertConfig> = vec![&env];
-        for id in 0..total {
+        for id in range_start..range_end {
             if let Some(cfg) = env
                 .storage()
                 .persistent()
@@ -1097,6 +1145,17 @@ impl AlertRegistry {
         let limit = Self::get_per_owner_alert_limit(env.clone());
         if limit > 0 && Self::get_active_alert_count(env.clone(), owner.clone()) >= limit {
             return Err(ContractError::OwnerAlertLimitExceeded);
+        }
+        Ok(())
+    }
+
+    /// Reject registration once the total number of alerts ever registered
+    /// (the monotonic [`NextId`](DataKey::NextId) counter) reaches the
+    /// configured global ceiling. A limit of `0` means no ceiling.
+    fn assert_global_alert_limit(env: &Env) -> Result<(), ContractError> {
+        let limit = Self::get_global_alert_limit(env.clone());
+        if limit > 0 && Self::get_alert_count(env.clone()) >= u64::from(limit) {
+            return Err(ContractError::GlobalAlertLimitExceeded);
         }
         Ok(())
     }
@@ -1543,6 +1602,113 @@ mod tests {
             &str(&env, "Alert2"),
             &hash64c(&env, '2'),
             &vec![&env, str(&env, "rule:mint")],
+        );
+    }
+
+    // ── Feature: global alert-count ceiling (#38) ─────────────────────────
+
+    #[test]
+    fn test_global_alert_limit_defaults_to_zero_unlimited() {
+        let (_env, client) = setup();
+        assert_eq!(client.get_global_alert_limit(), 0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #13)")]
+    fn test_global_alert_limit_enforced_across_owners() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_global_alert_limit(&admin, &2u32);
+
+        let target = Address::generate(&env);
+        // Two different owners share the same global ceiling.
+        client.register_alert(
+            &Address::generate(&env),
+            &target,
+            &str(&env, "Alert1"),
+            &hash64c(&env, '1'),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        client.register_alert(
+            &Address::generate(&env),
+            &target,
+            &str(&env, "Alert2"),
+            &hash64c(&env, '2'),
+            &vec![&env, str(&env, "rule:mint")],
+        );
+
+        // Third registration, from yet another owner, exceeds the ceiling.
+        client.register_alert(
+            &Address::generate(&env),
+            &target,
+            &str(&env, "Alert3"),
+            &hash64c(&env, '3'),
+            &vec![&env, str(&env, "rule:mint")],
+        );
+    }
+
+    #[test]
+    fn test_global_alert_limit_not_decremented_by_removal() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_global_alert_limit(&admin, &1u32);
+
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert1"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        client.remove_alert(&owner, &id);
+
+        // The ceiling tracks the monotonic ever-registered count, not the
+        // live count, so a freed-up slot from removal does not reopen room.
+        assert_eq!(
+            client
+                .try_register_alert(
+                    &owner,
+                    &target,
+                    &str(&env, "Alert2"),
+                    &hash64c(&env, '2'),
+                    &vec![&env, str(&env, "rule:mint")],
+                )
+                .unwrap_err()
+                .unwrap(),
+            ContractError::GlobalAlertLimitExceeded
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_set_global_alert_limit_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        env.set_auths(&[]);
+        client.set_global_alert_limit(&admin, &5u32);
+    }
+
+    #[test]
+    fn test_set_global_alert_limit_non_admin_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client
+                .try_set_global_alert_limit(&attacker, &5u32)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
         );
     }
 
@@ -2287,7 +2453,7 @@ mod tests {
         client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
         client.register_alert(&owner, &target, &str(&env, "B"), &hash64(&env), &vec![&env]);
 
-        let results = client.get_alerts_modified_since(&0u64);
+        let results = client.get_alerts_modified_since(&0u64, &0u32, &u32::MAX);
         assert_eq!(results.len(), 2);
     }
 
@@ -2295,7 +2461,7 @@ mod tests {
     #[test]
     fn test_get_alerts_modified_since_empty_registry() {
         let (_env, client) = setup();
-        let results = client.get_alerts_modified_since(&0u64);
+        let results = client.get_alerts_modified_since(&0u64, &0u32, &u32::MAX);
         assert_eq!(results.len(), 0);
     }
 
@@ -2327,7 +2493,7 @@ mod tests {
         );
 
         // Query with since = 1000 — should only return the second alert
-        let results = client.get_alerts_modified_since(&1000u64);
+        let results = client.get_alerts_modified_since(&1000u64, &0u32, &u32::MAX);
         assert_eq!(results.len(), 1);
         assert_eq!(results.get(0).unwrap().label, str(&env, "New"));
     }
@@ -2350,7 +2516,7 @@ mod tests {
         client.update_alert(&owner, &id1, &vec![&env], &false);
 
         // Incremental sync from timestamp 500 should return only the updated alert
-        let results = client.get_alerts_modified_since(&500u64);
+        let results = client.get_alerts_modified_since(&500u64, &0u32, &u32::MAX);
         assert_eq!(results.len(), 1);
         assert_eq!(results.get(0).unwrap().label, str(&env, "A"));
     }
@@ -2369,7 +2535,7 @@ mod tests {
         client.remove_alert(&owner, &id1);
 
         // Only the surviving alert should be returned
-        let results = client.get_alerts_modified_since(&0u64);
+        let results = client.get_alerts_modified_since(&0u64, &0u32, &u32::MAX);
         assert_eq!(results.len(), 1);
         assert_eq!(results.get(0).unwrap().label, str(&env, "B"));
     }
@@ -2391,11 +2557,11 @@ mod tests {
         );
 
         // since == updated_at should be inclusive
-        let results = client.get_alerts_modified_since(&42u64);
+        let results = client.get_alerts_modified_since(&42u64, &0u32, &u32::MAX);
         assert_eq!(results.len(), 1);
 
         // since == updated_at + 1 should exclude it
-        let results_after = client.get_alerts_modified_since(&43u64);
+        let results_after = client.get_alerts_modified_since(&43u64, &0u32, &u32::MAX);
         assert_eq!(results_after.len(), 0);
     }
 
@@ -2643,7 +2809,7 @@ mod tests {
 
         // Measure scan instruction cost across all N alerts
         let cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
-        let modified = client.get_alerts_modified_since(&0u64);
+        let modified = client.get_alerts_modified_since(&0u64, &0u32, &u32::MAX);
         let cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
         let scan_cost = cpu_after.saturating_sub(cpu_before);
 
@@ -2653,6 +2819,52 @@ mod tests {
             scan_cost < 15_000_000,
             "get_alerts_modified_since cost {scan_cost} exceeded upper bound 15M instructions"
         );
+    }
+
+    /// Confirms the fix for #38: a caller that pages with a small, bounded
+    /// `limit` pays a scan cost proportional to that `limit`, not to the
+    /// total number of alerts ever registered. This is what stops an
+    /// attacker from inflating `NEXT_ID` (via repeated `register_alert`
+    /// calls) from degrading the read path for every other caller — each
+    /// caller controls their own scan cost via `limit`.
+    #[test]
+    fn test_get_alerts_modified_since_pagination_bounds_scan_cost() {
+        const N: u32 = 400;
+        const PAGE: u32 = 10;
+
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let hash = hash64(&env);
+        let rules = vec![&env, str(&env, "rule:transfer")];
+
+        for _ in 0..N {
+            let label = str(&env, "Alert");
+            client.register_alert(&owner, &target, &label, &hash, &rules);
+        }
+        assert_eq!(client.get_alert_count(), u64::from(N));
+
+        // A small page near the end of a large registry must still be cheap:
+        // cost is bounded by PAGE, not by N.
+        let cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
+        let page = client.get_alerts_modified_since(&0u64, &390u32, &PAGE);
+        let cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
+        let page_scan_cost = cpu_after.saturating_sub(cpu_before);
+
+        assert_eq!(page.len() as usize, PAGE as usize);
+        // A page of 10 out of a 400-alert registry should cost nowhere near
+        // the ~15M-instruction ceiling asserted for a full 50-alert scan
+        // above — if this ever regresses to an O(N) scan the cost will blow
+        // well past this bound.
+        assert!(
+            page_scan_cost < 2_000_000,
+            "paginated get_alerts_modified_since cost {page_scan_cost} exceeded upper bound 2M instructions for a page of {PAGE}"
+        );
+
+        // Requesting past the end of the registry returns an empty page
+        // rather than scanning anything.
+        let empty_page = client.get_alerts_modified_since(&0u64, &N, &PAGE);
+        assert_eq!(empty_page.len(), 0);
     }
 
     /// Load test quantifying the repeated rescan cost in `assert_per_owner_limit` (#39).
