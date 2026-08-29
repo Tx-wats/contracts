@@ -1,5 +1,8 @@
 # Build output
 target/
+**/fuzz/target/
+**/fuzz/artifacts/
+**/fuzz/corpus/
 
 # Cargo.lock is committed: these crates compile to deployable WASM artifacts,
 # so builds must be reproducible across contributors, CI, and deployments.
@@ -25,3 +28,8 @@ abi/
 .env
 .env.*
 !.env.example
+
+# cargo-mutants output
+mutants.out/
+mutants.out.old/
+

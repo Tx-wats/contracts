@@ -65,8 +65,9 @@ Source: `contracts/watcher-registry/src/lib.rs`
 
 | Key | Tier | Value Type | Description |
 |---|---|---|---|
-| `symbol_short!("ADMIN")` | Instance | `Address` | Current admin address |
-| `symbol_short!("WATCHERS")` | Instance | `Vec<Address>` | List of authorized watcher node addresses |
+| `DataKey::Admins` | Instance | `Vec<Address>` | The current admin set (multi-admin; any one admin can perform privileged operations) |
+| `DataKey::Watchers` | Instance | `Vec<Address>` | List of authorized watcher node addresses |
+| `symbol_short!("W_CNT")` | Instance | `u32` | Cached count of registered watchers, kept in sync by `register_watcher` / `remove_watcher` / `replace_watcher` / `clear_all_watchers` so `get_watcher_count` never deserializes the full `Watchers` vec |
 
 ### TTL Behavior
 
@@ -82,4 +83,4 @@ There are no persistent storage entries in WatcherRegistry.
 |---|---|---|---|
 | AlertRegistry | Persistent | `Alert`, `OwnerIndex`, `ContractIndex` | Contract (`extend_ttl`, 100 ledgers) |
 | AlertRegistry | Instance | `NEXT_ID` | Network |
-| WatcherRegistry | Instance | `ADMIN`, `WATCHERS` | Network |
+| WatcherRegistry | Instance | `Admins`, `Watchers`, `W_CNT` | Network |

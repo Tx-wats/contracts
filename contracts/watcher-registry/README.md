@@ -27,8 +27,10 @@ and is suitable for use as a reference implementation.
 - **`#[contracterror]` enum** — typed error codes (`AlreadyInitialized`,
   `Unauthorized`, `NotInitialized`, `LastAdmin`) instead of raw panics,
   giving callers structured error handling.
-- **Instance storage** — all state lives in instance storage, which is
-  appropriate for a small, frequently-accessed registry.
+- **Instance storage** for all state. Three entries live in instance storage:
+  the admin set (`DataKey::Admins`, a `Vec<Address>`), the authorized watcher
+  list (`DataKey::Watchers`, a `Vec<Address>`), and a cached watcher count
+  (`W_CNT`, a `u32`). This suits a small, frequently-accessed registry.
 - **Last-admin guard** — `remove_admin` refuses to remove the final admin,
   preventing the contract from becoming permanently unmanageable.
 
@@ -69,7 +71,7 @@ stellar contract invoke \
 # Check authorization
 stellar contract invoke \
   --id <CONTRACT_ID> --network testnet \
-  -- is_authorized --watcher <WATCHER_ADDRESS>
+  -- is_watcher_authorized --watcher <WATCHER_ADDRESS>
 ```
 
 ## TypeScript bindings

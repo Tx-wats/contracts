@@ -5,6 +5,9 @@ members = [
     "contracts/integration-tests",
     "contracts/test-utils",
 ]
+exclude = [
+    "contracts/alert-registry/fuzz",
+]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +15,16 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 soroban-sdk = { version = "22.0.0" }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Soroban's generated contract interface dictates these shapes, so the
+# corresponding pedantic lints fire on correct code and are scoped off here
+# rather than silenced case by case:
+#   - contract entry points must take `Env` and `Address` by value
+#   - `#[contractimpl]` re-exports getters, so `#[must_use]` is not ours to add
+needless_pass_by_value = "allow"
+must_use_candidate = "allow"
 
 [profile.release]
 opt-level = "z"
