@@ -276,6 +276,53 @@ impl WatcherRegistry {
         Ok(())
     }
 
+    /// Register multiple authorized watcher nodes in a single call (any admin may call this).
+    ///
+    /// Equivalent to calling [`register_watcher`] once per address, but rewrites
+    /// the watcher list once for the whole batch instead of once per address.
+    /// Already-registered addresses are skipped (idempotent), matching
+    /// [`register_watcher`]'s semantics. Emits one `("watcher", "register")`
+    /// event per newly-added watcher.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    pub fn register_watchers(
+        env: Env,
+        admin: Address,
+        watchers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        let mut current = Self::load_watchers(&env);
+        for i in 0..watchers.len() {
+            let watcher = watchers.get(i).unwrap();
+
+            let mut already_present = false;
+            for j in 0..current.len() {
+                if current.get(j).unwrap() == watcher {
+                    already_present = true;
+                    break;
+                }
+            }
+            if already_present {
+                continue;
+            }
+
+            current.push_back(watcher.clone());
+            Self::increment_watcher_count(&env);
+            env.events().publish(
+                (symbol_short!("watcher"), symbol_short!("register")),
+                watcher,
+            );
+        }
+        env.storage().instance().set(&DataKey::Watchers, &current);
+
+        Ok(())
+    }
+
     /// Remove (deauthorize) a watcher (any admin may call this).
     ///
     /// If the watcher address is not currently registered this is a no-op —
@@ -503,10 +550,17 @@ impl WatcherRegistry {
         Ok(Self::load_admins(&env))
     }
 
-    /// Get the primary admin address (first in the admin set).
+    /// Get an arbitrary admin address from the admin set (currently index 0).
+    ///
+    /// There is no concept of a stable "primary admin" — all admins are
+    /// equally privileged (see the admin model doc on [`WatcherRegistry`]).
+    /// The address returned here is an implementation detail of the
+    /// underlying `Vec` and is **not guaranteed to stay the same** across
+    /// calls: [`remove_admin`] shifts remaining entries, so the address at
+    /// index 0 can change identity without warning.
     ///
     /// Kept for backwards compatibility. Prefer [`get_admins`] when you need
-    /// the full admin set.
+    /// the full admin set, or [`is_admin`] to check a specific address.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     /// # Errors
@@ -517,6 +571,21 @@ impl WatcherRegistry {
         Ok(admins.get(0).unwrap())
     }
 
+    /// Check if an address is a current admin.
+    ///
+    /// Unlike [`get_admins`], this does not require the caller to fetch and
+    /// scan the entire admin set client-side.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    #[must_use]
+    pub fn is_admin(env: Env, address: Address) -> bool {
+        let admins = Self::load_admins(&env);
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == address {
+                return true;
+            }
+        }
+        false
     /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
@@ -975,6 +1044,22 @@ mod tests {
         );
     }
 
+    // 11b. get_admin's returned identity shifts after remove_admin — it is
+    // an arbitrary admin (index 0), not a stable "primary admin".
+    #[test]
+    fn test_get_admin_identity_shifts_after_remove_admin() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+
+        client.add_admin(&admin, &second_admin);
+        assert_eq!(client.get_admin(), admin);
+
+        // Removing the original index-0 admin shifts the remaining entry
+        // into index 0, so get_admin() now returns a different address.
+        client.remove_admin(&admin, &admin);
+        assert_eq!(client.get_admin(), second_admin);
+    }
+
     // ── Multi-admin tests ─────────────────────────────────────────────────────
 
     // transfer_admin only replaces the caller's own slot, preserving co-admins.
@@ -1207,6 +1292,24 @@ mod tests {
         );
     }
 
+    // 16b. is_admin returns true for current admins, false otherwise
+    #[test]
+    fn test_is_admin() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        assert!(client.is_admin(&admin));
+        assert!(!client.is_admin(&second_admin));
+
+        client.add_admin(&admin, &second_admin);
+        assert!(client.is_admin(&second_admin));
+        assert!(!client.is_admin(&stranger));
+
+        client.remove_admin(&admin, &second_admin);
+        assert!(!client.is_admin(&second_admin));
+    }
+
     // 17. get_admins returns all admins
     #[test]
     fn test_get_admins() {
@@ -1433,6 +1536,67 @@ mod tests {
         assert!(env.events().all().len() >= 2);
     }
 
+    // ── register_watchers (batch) tests ──────────────────────────────────────
+
+    // 31. Happy path — register_watchers registers all new addresses
+    #[test]
+    fn test_register_watchers_happy_path() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+
+        client.register_watchers(&admin, &vec![&env, w1.clone(), w2.clone(), w3.clone()]);
+
+        assert_eq!(client.get_watchers().len(), 3);
+        assert!(client.is_watcher_authorized(&w1));
+        assert!(client.is_watcher_authorized(&w2));
+        assert!(client.is_watcher_authorized(&w3));
+        assert_eq!(client.get_watcher_count(), 3);
+    }
+
+    // 32. register_watchers skips addresses already registered (idempotent)
+    #[test]
+    fn test_register_watchers_idempotent() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watchers(&admin, &vec![&env, w1.clone(), w2.clone()]);
+
+        assert_eq!(client.get_watchers().len(), 2);
+        assert_eq!(client.get_watcher_count(), 2);
+    }
+
+    // 33. register_watchers rejects non-admin callers
+    #[test]
+    fn test_register_watchers_unauthorized() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let w1 = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_register_watchers(&attacker, &vec![&env, w1])
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 34. register_watchers emits one event per newly-added watcher
+    #[test]
+    fn test_register_watchers_emits_one_event_per_watcher() {
+        use soroban_sdk::testutils::Events as _;
+
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_watchers(&admin, &vec![&env, w1, w2]);
+
+        assert_eq!(env.events().all().len(), 2);
     // 31. self-replace (old == new) is a no-op — no spurious watcher.remove
     #[test]
     fn test_replace_watcher_self_replace_emits_no_events() {
