@@ -1,3 +1,4 @@
+.PHONY: build test lint fmt check-events deploy-testnet bindings clean shellcheck
 .PHONY: build test lint fmt check-events deploy-testnet verify upgrade audit bindings clean
 
 build:
@@ -14,6 +15,9 @@ fmt:
 
 check-events:
 	bash scripts/check-events-doc.sh
+
+shellcheck:
+	shellcheck scripts/*.sh
 
 deploy-testnet:
 	bash scripts/deploy.sh
