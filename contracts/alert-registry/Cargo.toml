@@ -21,5 +21,7 @@ soroban-sdk = { workspace = true }
 watcher-registry = { path = "../watcher-registry", optional = true }
 
 [dev-dependencies]
+proptest = "1.6"
 soroban-sdk = { workspace = true, features = ["testutils"] }
 watcher-registry = { path = "../watcher-registry", features = ["testutils"] }
+

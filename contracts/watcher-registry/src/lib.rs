@@ -51,6 +51,20 @@ pub enum DataKey {
 /// sole admin while keeping the authorization model simple and auditable.
 ///
 /// All admin mutations emit Soroban events so changes are visible on-chain.
+///
+/// # Role policy
+/// Roles are **not mutually exclusive and are not restricted to external
+/// accounts**, by design:
+/// - The same [`Address`] may be both an admin and a registered watcher. The
+///   watcher role grants no privilege beyond "is an authorized watcher", so a
+///   dual-role address gains nothing it could not already do.
+/// - Contract addresses are accepted wherever an [`Address`] is taken (admins
+///   and watchers alike); Soroban treats account and contract addresses
+///   uniformly and the registry does not distinguish them.
+///
+/// Callers needing external-account-only or disjoint-role guarantees must
+/// enforce that off-chain before calling `initialize`, `add_admin`, or
+/// `register_watcher`.
 #[contract]
 pub struct WatcherRegistry;
 
@@ -289,6 +303,8 @@ impl WatcherRegistry {
     /// # Events
     /// Emits `("watcher", "remove")` for `old_watcher` and
     /// `("watcher", "replace")` with data `(old_watcher, new_watcher)`.
+    /// A self-replace (`old_watcher == new_watcher`) is a no-op and emits
+    /// nothing, since the address stays authorized the entire time.
     /// # Errors
     /// Returns [`ContractError::WatcherNotFound`] if the address is not a registered watcher.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
@@ -318,6 +334,13 @@ impl WatcherRegistry {
 
         if !found {
             return Err(ContractError::WatcherNotFound);
+        }
+
+        // A self-replace leaves old_watcher authorized the whole time. Emitting
+        // watcher.remove here would tell listeners to revoke a still-valid
+        // watcher, so short-circuit before any storage write or event.
+        if old_watcher == new_watcher {
+            return Ok(());
         }
 
         // Add new_watcher only if not already present
@@ -506,6 +529,10 @@ impl WatcherRegistry {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "regression_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1109,6 +1136,64 @@ mod tests {
 
         // At least two events emitted (remove + replace)
         assert!(env.events().all().len() >= 2);
+    }
+
+    // 31. self-replace (old == new) is a no-op — no spurious watcher.remove
+    #[test]
+    fn test_replace_watcher_self_replace_emits_no_events() {
+        let (env, admin, client) = setup();
+        let w = Address::generate(&env);
+
+        client.register_watcher(&admin, &w);
+        client.replace_watcher(&admin, &w, &w);
+
+        assert_eq!(
+            env.events().all().len(),
+            0,
+            "self-replace must not emit any watcher event"
+        );
+        assert!(client.is_watcher_authorized(&w));
+        assert_eq!(client.get_watcher_count(), 1);
+    // ── Role policy tests ─────────────────────────────────────────────────────
+
+    // 31. An address may hold both the admin and watcher roles at once.
+    #[test]
+    fn test_address_can_be_admin_and_watcher() {
+        let (env, admin, client) = setup();
+        let dual = Address::generate(&env);
+
+        assert_eq!(client.try_add_admin(&admin, &dual).unwrap(), Ok(()));
+        assert_eq!(client.try_register_watcher(&admin, &dual).unwrap(), Ok(()));
+
+        assert!(client.is_watcher_authorized(&dual));
+        assert!(client.get_admins().contains(&dual));
+
+        // Both roles are independently exercisable by the dual-role address.
+        let watcher = Address::generate(&env);
+        assert_eq!(
+            client.try_register_watcher(&dual, &watcher).unwrap(),
+            Ok(())
+        );
+        assert!(client.is_watcher_authorized(&watcher));
+    }
+
+    // 32. A contract address is accepted as a watcher (and as an admin).
+    #[test]
+    fn test_contract_address_can_hold_roles() {
+        let (env, admin, client) = setup();
+        let contract_addr = env.register(WatcherRegistry, ());
+
+        assert_eq!(
+            client.try_register_watcher(&admin, &contract_addr).unwrap(),
+            Ok(())
+        );
+        assert!(client.is_watcher_authorized(&contract_addr));
+
+        assert_eq!(
+            client.try_add_admin(&admin, &contract_addr).unwrap(),
+            Ok(())
+        );
+        assert!(client.get_admins().contains(&contract_addr));
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
