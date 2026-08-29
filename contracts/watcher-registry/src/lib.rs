@@ -1300,4 +1300,130 @@ mod tests {
         env.set_auths(&[]);
         client.clear_all_watchers(&admin);
     }
+
+    // === Pre-initialization coverage
+    // Every admin-gated entrypoint routes through assert_admin, which returns
+    // NotInitialized before initialize() has run; get_admins runs the same check
+    // directly. test_get_admin_uninitialized already covers get_admin, so these
+    // close the gap for the rest of that surface.
+
+    fn uninit() -> (Env, WatcherRegistryClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(WatcherRegistry, ());
+        let client = WatcherRegistryClient::new(&env, &contract_id);
+        (env, client)
+    }
+
+    #[test]
+    fn test_clear_all_watchers_before_initialize() {
+        let (env, client) = uninit();
+        let admin = Address::generate(&env);
+
+        assert_eq!(
+            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    #[test]
+    fn test_add_admin_before_initialize() {
+        let (env, client) = uninit();
+        let caller = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_add_admin(&caller, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    #[test]
+    fn test_remove_admin_before_initialize() {
+        let (env, client) = uninit();
+        let caller = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_remove_admin(&caller, &target)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    #[test]
+    fn test_transfer_admin_before_initialize() {
+        let (env, client) = uninit();
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_transfer_admin(&admin, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    #[test]
+    fn test_register_watcher_before_initialize() {
+        let (env, client) = uninit();
+        let admin = Address::generate(&env);
+        let watcher = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_register_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    #[test]
+    fn test_remove_watcher_before_initialize() {
+        let (env, client) = uninit();
+        let admin = Address::generate(&env);
+        let watcher = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_remove_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    #[test]
+    fn test_replace_watcher_before_initialize() {
+        let (env, client) = uninit();
+        let admin = Address::generate(&env);
+        let old_watcher = Address::generate(&env);
+        let new_watcher = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_replace_watcher(&admin, &old_watcher, &new_watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    #[test]
+    fn test_get_admins_before_initialize() {
+        let (_env, client) = uninit();
+
+        assert_eq!(
+            client.try_get_admins().unwrap_err().unwrap(),
+            ContractError::NotInitialized
+        );
+    }
 }
