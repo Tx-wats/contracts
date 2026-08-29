@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
       # read rust-toolchain.toml. Parse the pin so that file stays the one source
