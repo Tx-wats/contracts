@@ -87,3 +87,15 @@ jobs:
 
       - name: Cargo audit
         run: cargo audit
+
+  # Issue #102 — PR-time dependency diffing and review
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
