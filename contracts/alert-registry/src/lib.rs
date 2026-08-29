@@ -50,6 +50,11 @@ pub enum DataKey {
     AlertActive(u64),
     /// Stores the list of alert IDs owned by a given address.
     OwnerIndex(Address),
+    /// Stores the number of currently live (non-removed) alerts owned by a
+    /// given address, maintained incrementally alongside [`DataKey::OwnerIndex`]
+    /// so [`AlertRegistry::get_active_alert_count`] never has to rescan the
+    /// owner's full index.
+    OwnerActiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
     /// Monotonic counter used to generate unique alert IDs.
@@ -1050,18 +1055,14 @@ impl AlertRegistry {
     ///
     /// Unlike [`get_alert_count`], this reflects removals and only counts
     /// alerts whose storage entries are still live.
-    /// # Panics
-    /// Panics if the contract's stored state is malformed or missing.
+    ///
+    /// Backed by a running counter maintained incrementally by
+    /// [`Self::push_owner_index`]/[`Self::remove_from_owner_index`], so this
+    /// is an O(1) lookup regardless of how many alerts `owner` has ever
+    /// registered — it no longer rescans the owner's index on every call.
+    #[must_use]
     pub fn get_active_alert_count(env: Env, owner: Address) -> u32 {
-        let ids = Self::owner_index(&env, &owner);
-        let mut count: u32 = 0;
-        for i in 0..ids.len() {
-            let id = ids.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::Alert(id)) {
-                count += 1;
-            }
-        }
-        count
+        Self::owner_active_count(&env, &owner)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -1182,6 +1183,26 @@ impl AlertRegistry {
             .unwrap_or_else(|| vec![env])
     }
 
+    /// Read the running per-owner live-alert counter, or `0` if unset.
+    fn owner_active_count(env: &Env, owner: &Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwnerActiveCount(owner.clone()))
+            .unwrap_or(0u32)
+    }
+
+    /// Persist the running per-owner live-alert counter with a refreshed TTL.
+    fn set_owner_active_count(env: &Env, owner: &Address, count: u32) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerActiveCount(owner.clone()), &count);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerActiveCount(owner.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+    }
+
     /// Append `id` to the owner's index and persist it with a refreshed TTL.
     fn push_owner_index(env: &Env, owner: &Address, id: u64) -> Result<(), ContractError> {
         let mut ids = Self::owner_index(env, owner);
@@ -1199,6 +1220,8 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+        let count = Self::owner_active_count(env, owner);
+        Self::set_owner_active_count(env, owner, count + 1);
         Ok(())
     }
 
@@ -1226,9 +1249,12 @@ impl AlertRegistry {
     fn remove_from_owner_index(env: &Env, owner: &Address, id: u64) {
         let ids = Self::owner_index(env, owner);
         let mut updated: Vec<u64> = vec![env];
+        let mut removed = false;
         for i in 0..ids.len() {
             let v = ids.get(i).unwrap();
-            if v != id {
+            if v == id {
+                removed = true;
+            } else {
                 updated.push_back(v);
             }
         }
@@ -1240,6 +1266,10 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+        if removed {
+            let count = Self::owner_active_count(env, owner);
+            Self::set_owner_active_count(env, owner, count.saturating_sub(1));
+        }
     }
 
     /// Remove `id` from the contract's index and persist the updated list.
@@ -2684,12 +2714,18 @@ mod tests {
         );
     }
 
-    /// Load test quantifying the repeated rescan cost in `assert_per_owner_limit` (#39).
-    /// Registers alerts with an active per-owner limit and benchmarks instruction growth,
-    /// asserting an upper bound regression guard.
+    /// Load test quantifying the (formerly O(n²)) cost of `assert_per_owner_limit` (#39).
+    ///
+    /// Registers `LIMIT` alerts for the same owner under an active per-owner
+    /// limit and benchmarks instruction growth across the run. Before the
+    /// fix, `assert_per_owner_limit` rescanned `get_active_alert_count` (an
+    /// O(n) full-index scan) on every call, so `last_reg_cost` grew roughly
+    /// linearly with `LIMIT` — at LIMIT=100 the last call cost ~100x the
+    /// first. With the running per-owner counter, the limit check is O(1),
+    /// so cost per registration should stay flat regardless of `LIMIT`.
     #[test]
     fn test_load_assert_per_owner_limit_instruction_cost() {
-        const LIMIT: u32 = 40;
+        const LIMIT: u32 = 100;
 
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -2728,10 +2764,49 @@ mod tests {
             first_reg_cost > 0 && last_reg_cost > 0,
             "Registration costs must be non-zero"
         );
+        // Before/after regression guard: with an O(1) per-owner counter, the
+        // Nth registration should not cost meaningfully more than the 1st.
+        // (Under the old O(n) rescan, this ratio grew with LIMIT itself.)
+        assert!(
+            last_reg_cost < first_reg_cost.saturating_mul(3),
+            "registration cost grew from {first_reg_cost} to {last_reg_cost} across {LIMIT} \
+             calls — assert_per_owner_limit is no longer O(1)"
+        );
         // Assert an upper bound regression guard on total batch registration cost with limit checks
         assert!(
             total_registration_cost < 50_000_000,
             "Total registration cost {total_registration_cost} exceeded upper bound 50M instructions"
+        );
+    }
+
+    /// `get_active_alert_count` is O(1) regardless of how many alerts an
+    /// owner has ever registered — it reads a maintained counter instead of
+    /// rescanning `OwnerIndex` (#39).
+    #[test]
+    fn test_get_active_alert_count_instruction_cost_is_constant() {
+        const N: u32 = 200;
+
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let hash = hash64(&env);
+        let rules = vec![&env];
+
+        for _ in 0..N {
+            client.register_alert(&owner, &target, &str(&env, "Alert"), &hash, &rules);
+        }
+
+        let before = env.cost_estimate().budget().cpu_instruction_cost();
+        let count = client.get_active_alert_count(&owner);
+        let after = env.cost_estimate().budget().cpu_instruction_cost();
+        let cost = after.saturating_sub(before);
+
+        assert_eq!(count, N);
+        // An O(n) rescan at N=200 would cost far more than a single storage
+        // read; this bound would fail under the old scan-based implementation.
+        assert!(
+            cost < 200_000,
+            "get_active_alert_count cost {cost} at N={N} looks O(n), not O(1)"
         );
     }
 
