@@ -14,7 +14,7 @@ resolver = "3"
 rust-version = "1.88"
 
 [workspace.dependencies]
-soroban-sdk = { version = "22.0.0" }
+soroban-sdk = { version = "25.3.0" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
