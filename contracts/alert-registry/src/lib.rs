@@ -253,7 +253,10 @@ impl AlertRegistry {
     ///
     /// Once set, `get_alerts_for_contract`, `get_alerts_by_owner`, and their
     /// paginated variants will cross-call `WatcherRegistry::is_watcher_authorized`
-    /// before returning data. Pass the zero address to disable gating.
+    /// before returning data. Any address configured here — including a
+    /// zero/default `Address` — is treated as a real registry and will be
+    /// cross-called. Use [`AlertRegistry::clear_watcher_registry`] to disable
+    /// gating.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
@@ -270,6 +273,26 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
+        Ok(())
+    }
+
+    /// Clear the configured `WatcherRegistry` contract address, disabling
+    /// watcher-gating on the read queries (admin only).
+    ///
+    /// After this call, `get_alerts_for_contract`, `get_alerts_by_owner`, and
+    /// their paginated variants no longer cross-call `WatcherRegistry` and
+    /// behave as if gating had never been configured. Call
+    /// [`AlertRegistry::set_watcher_registry`] again to re-enable gating.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn clear_watcher_registry(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage().instance().remove(&symbol_short!("WATCHREG"));
         Ok(())
     }
 
@@ -2109,6 +2132,107 @@ mod tests {
                 .unwrap_err()
                 .unwrap(),
             ContractError::Unauthorized
+        );
+    }
+
+    // 17b. clear_watcher_registry disables gating; set_watcher_registry can
+    // re-enable it afterward.
+    #[test]
+    #[cfg(feature = "testutils")]
+    fn test_clear_watcher_registry_disables_then_reconfigure() {
+        let (env, alert_client, watcher_client) = setup_with_watcher_registry();
+
+        let admin = Address::generate(&env);
+        let watcher = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        watcher_client.initialize(&admin);
+        watcher_client.register_watcher(&admin, &watcher);
+
+        alert_client.initialize(&admin);
+        let watcher_contract_id = watcher_client.address.clone();
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+        assert!(alert_client.is_watcher_gating_enabled());
+
+        alert_client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        // Gating active: unregistered querier is rejected.
+        assert_eq!(
+            alert_client
+                .try_get_alerts_for_contract(&stranger, &target)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAWatcher
+        );
+
+        // Clear gating.
+        alert_client.clear_watcher_registry(&admin);
+        assert!(alert_client.get_watcher_registry().is_none());
+        assert!(!alert_client.is_watcher_gating_enabled());
+
+        // Any querier can now read.
+        assert_eq!(
+            alert_client
+                .get_alerts_for_contract(&stranger, &target)
+                .len(),
+            1
+        );
+
+        // Re-configure gating.
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+        assert!(alert_client.is_watcher_gating_enabled());
+        assert_eq!(
+            alert_client
+                .try_get_alerts_for_contract(&stranger, &target)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAWatcher
+        );
+        assert_eq!(
+            alert_client
+                .get_alerts_for_contract(&watcher, &target)
+                .len(),
+            1
+        );
+    }
+
+    // 17c. clear_watcher_registry rejects non-admin callers.
+    #[test]
+    fn test_clear_watcher_registry_non_admin_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client
+                .try_clear_watcher_registry(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 17d. clear_watcher_registry requires the contract to be initialized.
+    #[test]
+    fn test_clear_watcher_registry_not_initialized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_clear_watcher_registry(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
         );
     }
 

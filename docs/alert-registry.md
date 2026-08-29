@@ -564,7 +564,7 @@ Returns the total number of alerts ever registered.
 
 ### `set_watcher_registry`
 
-Configures the `WatcherRegistry` contract address used for optional watcher-gating on read queries. Once set, `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants will cross-call `WatcherRegistry::is_watcher_authorized` before returning data. Admin only.
+Configures the `WatcherRegistry` contract address used for optional watcher-gating on read queries. Once set, `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants will cross-call `WatcherRegistry::is_watcher_authorized` before returning data. Any address configured here — including a zero/default `Address` — is treated as a real registry and will be cross-called; use `clear_watcher_registry` to disable gating. Admin only.
 
 **Requires auth:** `admin`
 
@@ -576,6 +576,24 @@ Configures the `WatcherRegistry` contract address used for optional watcher-gati
 | `watcher_registry` | `Address` | Address of the deployed `WatcherRegistry` contract |
 
 **Returns:** nothing
+
+---
+
+### `clear_watcher_registry`
+
+Clears the configured `WatcherRegistry` contract address, disabling watcher-gating on the read queries. After this call, `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants no longer cross-call `WatcherRegistry` and behave as if gating had never been configured. Call `set_watcher_registry` again to re-enable gating. Admin only.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::NotInitialized` if the contract has not been initialized; `ContractError::Unauthorized` if caller is not the admin.
 
 ---
 
