@@ -492,6 +492,8 @@ Returns the total number of alerts ever registered.
 
 Configures the `WatcherRegistry` contract address used for optional watcher-gating on read queries. Once set, `get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated variants will cross-call `WatcherRegistry::is_watcher_authorized` before returning data. Admin only.
 
+`watcher_registry` is probed with a read-only `is_watcher_authorized` call before being persisted. A misconfigured address (not a contract, or a contract that doesn't implement the `WatcherRegistry` interface) is rejected here with `InvalidWatcherRegistry` instead of surfacing later as a panic the next time a gated query runs.
+
 **Requires auth:** `admin`
 
 **Parameters**
@@ -502,6 +504,8 @@ Configures the `WatcherRegistry` contract address used for optional watcher-gati
 | `watcher_registry` | `Address` | Address of the deployed `WatcherRegistry` contract |
 
 **Returns:** nothing
+
+**Errors:** `InvalidWatcherRegistry` if `watcher_registry` does not respond to the `WatcherRegistry` interface.
 
 ---
 
@@ -531,7 +535,15 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `AlertNotFound` | 2 | No alert exists for the given ID |
 | `AlreadyInitialized` | 3 | `initialize` was called more than once |
 | `NotInitialized` | 4 | Admin function called before `initialize` |
-| `NoPendingWebhook` | 5 | `confirm_webhook` called but no rotation is in progress |
+| `NotAWatcher` | 5 | Watcher-gating is enabled and `querier` is not a registered watcher |
+| `InvalidWebhookHash` | 6 | Webhook hash is not exactly 64 characters |
+| `LabelTooLong` | 7 | `label` exceeds 128 bytes |
+| `TooManyRules` | 8 | `rules` exceeds the 50-rule maximum |
+| `InvalidRuleDescriptor` | 9 | A rule is not a recognised descriptor (`rule:transfer`, `rule:mint`) |
+| `OwnerAlertLimitExceeded` | 10 | Owner is at the configured per-owner active alert limit |
+| `DuplicateAlertId` | 11 | Internal invariant violation — an ID was already present in an index |
+| `NoPendingWebhook` | 12 | `confirm_webhook` called but no rotation is in progress |
+| `InvalidWatcherRegistry` | 13 | `set_watcher_registry` given an address that doesn't implement the `WatcherRegistry` interface |
 
 ---
 

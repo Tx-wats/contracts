@@ -80,6 +80,11 @@ pub enum ContractError {
     DuplicateAlertId = 11,
     /// Returned by `confirm_webhook` when no webhook rotation is in progress.
     NoPendingWebhook = 12,
+    /// Returned by `set_watcher_registry` when the given address does not
+    /// respond to the `WatcherRegistry` interface (probed at configuration
+    /// time), so gating would otherwise fail later inside
+    /// `assert_watcher_if_configured` at query time.
+    InvalidWatcherRegistry = 13,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -241,11 +246,20 @@ impl AlertRegistry {
     /// paginated variants will cross-call `WatcherRegistry::is_watcher_authorized`
     /// before returning data. Pass the zero address to disable gating.
     ///
+    /// `watcher_registry` is probed with a read-only
+    /// `is_watcher_authorized` call before being persisted, so a
+    /// misconfigured address (not a contract, or a contract that doesn't
+    /// implement the `WatcherRegistry` interface) is rejected here with a
+    /// typed error instead of surfacing later as a panic inside
+    /// `assert_watcher_if_configured` the next time a gated query runs.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::InvalidWatcherRegistry`] if `watcher_registry` does not respond
+    /// to the `WatcherRegistry` interface.
     pub fn set_watcher_registry(
         env: Env,
         admin: Address,
@@ -253,6 +267,12 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+
+        let probe = ExtWatcherClient::new(&env, &watcher_registry);
+        if probe.try_is_watcher_authorized(&admin).is_err() {
+            return Err(ContractError::InvalidWatcherRegistry);
+        }
+
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
@@ -1996,6 +2016,75 @@ mod tests {
                 .unwrap_err()
                 .unwrap(),
             ContractError::Unauthorized
+        );
+    }
+
+    // 17b. set_watcher_registry probes the target and rejects a contract that
+    // doesn't implement the WatcherRegistry interface (#44)
+    #[test]
+    fn test_set_watcher_registry_rejects_invalid_contract() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // A real, deployed contract — but not a WatcherRegistry, so it has
+        // no `is_watcher_authorized` entry point for the probe to find.
+        let not_a_watcher_registry = env.register(AlertRegistry, ());
+
+        assert_eq!(
+            client
+                .try_set_watcher_registry(&admin, &not_a_watcher_registry)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidWatcherRegistry
+        );
+        // The rejected configuration must not have been persisted.
+        assert!(client.get_watcher_registry().is_none());
+        assert!(!client.is_watcher_gating_enabled());
+    }
+
+    // 17c. set_watcher_registry rejects a plain (non-contract) address (#44)
+    #[test]
+    fn test_set_watcher_registry_rejects_non_contract_address() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let not_a_contract = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_set_watcher_registry(&admin, &not_a_contract)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidWatcherRegistry
+        );
+    }
+
+    // 17d. set_watcher_registry accepts a real WatcherRegistry after a prior
+    // misconfigured attempt was rejected (#44)
+    #[test]
+    #[cfg(feature = "testutils")]
+    fn test_set_watcher_registry_recovers_after_invalid_attempt() {
+        let (env, alert_client, watcher_client) = setup_with_watcher_registry();
+        let admin = Address::generate(&env);
+        alert_client.initialize(&admin);
+
+        let bogus = env.register(AlertRegistry, ());
+        assert_eq!(
+            alert_client
+                .try_set_watcher_registry(&admin, &bogus)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidWatcherRegistry
+        );
+        assert!(alert_client.get_watcher_registry().is_none());
+
+        let watcher_contract_id = watcher_client.address.clone();
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+        assert_eq!(
+            alert_client.get_watcher_registry().unwrap(),
+            watcher_contract_id
         );
     }
 
