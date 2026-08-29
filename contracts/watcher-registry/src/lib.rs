@@ -27,7 +27,16 @@ pub enum ContractError {
     LastAdmin = 4,
     /// Returned when the specified watcher is not currently registered.
     WatcherNotFound = 5,
+    /// Returned when a state-mutating call is made while the contract is paused.
+    Paused = 6,
+    /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
+    BelowMinWatchers = 7,
 }
+
+/// Minimum number of registered watchers that must remain after
+/// `remove_watcher` or `clear_all_watchers`. Prevents an admin (or a
+/// compromised admin key) from halting the monitoring system entirely.
+pub const MIN_WATCHERS: u32 = 1;
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -38,6 +47,8 @@ pub enum DataKey {
     Admins,
     /// Stores the `Vec<Address>` of authorized watcher nodes.
     Watchers,
+    /// Stores the `bool` paused flag.
+    Paused,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -107,6 +118,7 @@ impl WatcherRegistry {
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+        Self::assert_not_paused(&env)?;
 
         let mut admins = Self::load_admins(&env);
         for i in 0..admins.len() {
@@ -146,6 +158,7 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+        Self::assert_not_paused(&env)?;
 
         let admins = Self::load_admins(&env);
         if admins.len() <= 1 {
@@ -169,11 +182,19 @@ impl WatcherRegistry {
         Ok(())
     }
 
-    /// Transfer the sole admin role to a new address (any existing admin may call this).
+    /// Transfer the caller's own admin slot to a new address (any existing
+    /// admin may call this, and only affects that admin's own membership).
     ///
-    /// This replaces the **entire** admin set with a single new admin. Use
-    /// [`add_admin`] + [`remove_admin`] if you want to rotate one member of a
-    /// multi-admin set without losing the others.
+    /// This replaces **only the caller's own entry** in the admin set with
+    /// `new_admin` — every other admin's membership is left untouched. In a
+    /// multi-admin set this means no single admin can unilaterally strip the
+    /// others; each admin can only hand off their own slot. Use [`add_admin`]
+    /// + [`remove_admin`] if you need finer-grained control over another
+    /// admin's membership (which itself requires that admin's own consent to
+    /// remove, aside from the last-admin guard).
+    ///
+    /// If `new_admin` is already an admin, the caller's slot is simply
+    /// dropped rather than duplicated.
     ///
     /// Emits an `("admin", "transfer")` event recording both the old and new admin.
     ///
@@ -190,11 +211,27 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
-        let new_admins: Vec<Address> = vec![&env, new_admin.clone()];
-        env.storage().instance().set(&DataKey::Admins, &new_admins);
+        let admins = Self::load_admins(&env);
+        let mut updated: Vec<Address> = vec![&env];
+        let mut new_already_present = false;
+        for i in 0..admins.len() {
+            let a = admins.get(i).unwrap();
+            if a == admin {
+                continue;
+            }
+            if a == new_admin {
+                new_already_present = true;
+            }
+            updated.push_back(a);
+        }
+        if !new_already_present {
+            updated.push_back(new_admin.clone());
+        }
+        env.storage().instance().set(&DataKey::Admins, &updated);
 
-        // Emit an auditable on-chain event recording the full admin transfer.
+        // Emit an auditable on-chain event recording the admin slot transfer.
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("transfer")),
             (admin, new_admin),
@@ -218,6 +255,7 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let mut watchers = Self::load_watchers(&env);
         for i in 0..watchers.len() {
@@ -241,7 +279,8 @@ impl WatcherRegistry {
     /// Remove (deauthorize) a watcher (any admin may call this).
     ///
     /// If the watcher address is not currently registered this is a no-op —
-    /// the call succeeds and no event is emitted.
+    /// the call succeeds and no event is emitted. Refuses to drop the
+    /// watcher count below [`MIN_WATCHERS`].
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -253,6 +292,7 @@ impl WatcherRegistry {
     /// Dependent systems (e.g. `AlertRegistry` watcher-gating) should listen
     /// for this event to revoke trust immediately.
     /// # Errors
+    /// Returns [`ContractError::BelowMinWatchers`] if removing this watcher would drop the count below [`MIN_WATCHERS`].
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Panics
@@ -260,6 +300,7 @@ impl WatcherRegistry {
     pub fn remove_watcher(env: Env, admin: Address, watcher: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let watchers = Self::load_watchers(&env);
         let mut updated: Vec<Address> = vec![&env];
@@ -272,6 +313,11 @@ impl WatcherRegistry {
                 updated.push_back(w);
             }
         }
+
+        if removed && updated.len() < MIN_WATCHERS {
+            return Err(ContractError::BelowMinWatchers);
+        }
+
         env.storage().instance().set(&DataKey::Watchers, &updated);
 
         // Only emit the event and decrement the counter when the watcher was
@@ -319,6 +365,7 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let watchers = Self::load_watchers(&env);
         let mut found = false;
@@ -399,12 +446,16 @@ impl WatcherRegistry {
     ///
     /// This is a bulk deauthorization operation.  Each removed watcher emits
     /// a `("watcher", "remove")` event so dependent systems can revoke trust
-    /// for every affected address.
+    /// for every affected address. Refused outright when [`MIN_WATCHERS`] is
+    /// greater than zero and the registry is non-empty, since clearing would
+    /// necessarily drop the count below that threshold; use [`remove_watcher`]
+    /// for selective removal instead.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
     /// existing admin.
     /// # Errors
+    /// Returns [`ContractError::BelowMinWatchers`] if the registry is non-empty and [`MIN_WATCHERS`] is greater than zero.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Panics
@@ -412,8 +463,13 @@ impl WatcherRegistry {
     pub fn clear_all_watchers(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let watchers = Self::load_watchers(&env);
+        if !watchers.is_empty() && MIN_WATCHERS > 0 {
+            return Err(ContractError::BelowMinWatchers);
+        }
+
         for i in 0..watchers.len() {
             let w = watchers.get(i).unwrap();
             env.events()
@@ -459,6 +515,50 @@ impl WatcherRegistry {
         let admins = Self::get_admins(env)?;
         // load_admins guarantees at least one entry after initialization
         Ok(admins.get(0).unwrap())
+    }
+
+    /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
+    ///
+    /// Intended as an emergency circuit-breaker if an admin key is suspected
+    /// compromised — mutations can be frozen while the incident is investigated.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("pause")), caller);
+        Ok(())
+    }
+
+    /// Resume normal operation after a [`Self::pause`].
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("unpause")), caller);
+        Ok(())
+    }
+
+    /// Return `true` if the contract is currently paused.
+    #[must_use]
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     /// Get the number of registered watchers as a cheap u32 read, avoiding
@@ -513,6 +613,15 @@ impl WatcherRegistry {
             .unwrap_or_else(|| vec![env])
     }
 
+    /// Return `Ok(())` if the contract is not paused, `Err(Paused)` otherwise.
+    fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            return Err(ContractError::Paused);
+        }
+        Ok(())
+    }
+
     /// Return `Ok(())` if `caller` is in the admin set, `Err(Unauthorized)` otherwise.
     fn assert_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
         if !env.storage().instance().has(&DataKey::Admins) {
@@ -538,6 +647,15 @@ mod regression_tests;
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env};
+
+    fn vec_contains(items: &Vec<Address>, target: &Address) -> bool {
+        for i in 0..items.len() {
+            if items.get(i).unwrap() == *target {
+                return true;
+            }
+        }
+        false
+    }
 
     fn setup() -> (Env, Address, WatcherRegistryClient<'static>) {
         let env = Env::default();
@@ -734,10 +852,20 @@ mod tests {
         assert_eq!(client.try_register_watcher(&admin, &w3).unwrap(), Ok(()));
         assert_eq!(client.get_watchers().len(), 3);
 
+        // Down to MIN_WATCHERS (1) removals succeed...
         assert_eq!(client.try_remove_watcher(&admin, &w1).unwrap(), Ok(()));
         assert_eq!(client.try_remove_watcher(&admin, &w2).unwrap(), Ok(()));
-        assert_eq!(client.try_remove_watcher(&admin, &w3).unwrap(), Ok(()));
-        assert_eq!(client.get_watchers().len(), 0);
+        assert_eq!(client.get_watchers().len(), 1);
+
+        // ...but removing the last remaining watcher is rejected.
+        assert_eq!(
+            client
+                .try_remove_watcher(&admin, &w3)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert_eq!(client.get_watchers().len(), 1);
     }
 
     // 10. get_admin returns correct admin
@@ -784,11 +912,15 @@ mod tests {
         assert_eq!(client.try_register_watcher(&admin, &w3).unwrap(), Ok(()));
         assert_eq!(client.get_watchers().len(), 3);
 
-        assert_eq!(client.try_clear_all_watchers(&admin).unwrap(), Ok(()));
-        assert_eq!(client.get_watchers().len(), 0);
-        assert!(!client.is_authorized(&w1));
-        assert!(!client.is_authorized(&w2));
-        assert!(!client.is_authorized(&w3));
+        // With MIN_WATCHERS enforced, clearing a non-empty registry is rejected.
+        assert_eq!(
+            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert_eq!(client.get_watchers().len(), 3);
+        assert!(client.is_authorized(&w1));
+        assert!(client.is_authorized(&w2));
+        assert!(client.is_authorized(&w3));
     }
 
     // 13. clear_all_watchers rejects non-admin
@@ -844,6 +976,169 @@ mod tests {
     }
 
     // ── Multi-admin tests ─────────────────────────────────────────────────────
+
+    // transfer_admin only replaces the caller's own slot, preserving co-admins.
+    #[test]
+    fn test_transfer_admin_preserves_co_admins() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.try_add_admin(&admin, &second_admin).unwrap(), Ok(()));
+        assert_eq!(client.get_admins().len(), 2);
+
+        // admin transfers its own slot to new_admin.
+        assert_eq!(
+            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            Ok(())
+        );
+
+        let admins = client.get_admins();
+        assert_eq!(admins.len(), 2);
+        assert!(vec_contains(&admins, &new_admin));
+        assert!(vec_contains(&admins, &second_admin));
+        assert!(!vec_contains(&admins, &admin));
+
+        // the old admin slot no longer has privileges...
+        assert_eq!(
+            client
+                .try_add_admin(&admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+        // ...but the co-admin that was never touched still does.
+        assert_eq!(
+            client
+                .try_add_admin(&second_admin, &Address::generate(&env))
+                .unwrap(),
+            Ok(())
+        );
+    }
+
+    // transfer_admin cannot be used by one admin to strip every other admin.
+    #[test]
+    fn test_transfer_admin_cannot_strip_other_admins() {
+        let (env, admin, client) = setup();
+        let second_admin = Address::generate(&env);
+        let attacker_target = Address::generate(&env);
+
+        assert_eq!(client.try_add_admin(&admin, &second_admin).unwrap(), Ok(()));
+
+        // admin transfers its own slot to a brand new address — at no point
+        // does second_admin lose its slot, since transfer_admin only ever
+        // touches the caller's own entry.
+        assert_eq!(
+            client.try_transfer_admin(&admin, &attacker_target).unwrap(),
+            Ok(())
+        );
+
+        let admins = client.get_admins();
+        assert_eq!(admins.len(), 2);
+        assert!(vec_contains(&admins, &second_admin));
+    }
+
+    // MIN_WATCHERS — remove_watcher refuses to drop below the threshold
+    #[test]
+    fn test_remove_watcher_below_min_watchers_rejected() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+
+        assert_eq!(
+            client.try_register_watcher(&admin, &watcher).unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            client
+                .try_remove_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert!(client.is_watcher_authorized(&watcher));
+    }
+
+    // MIN_WATCHERS — removing down to exactly the threshold is allowed
+    #[test]
+    fn test_remove_watcher_down_to_min_watchers_allowed() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+
+        assert_eq!(client.try_remove_watcher(&admin, &w1).unwrap(), Ok(()));
+        assert_eq!(client.get_watchers().len(), 1);
+    }
+
+    // MIN_WATCHERS — clear_all_watchers rejected while any watcher remains
+    #[test]
+    fn test_clear_all_watchers_below_min_watchers_rejected() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+
+        client.register_watcher(&admin, &watcher);
+
+        assert_eq!(
+            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            ContractError::BelowMinWatchers
+        );
+    }
+
+    // ── Pause / circuit-breaker tests ────────────────────────────────────────
+
+    // pause blocks state-mutating calls, unpause restores them
+    #[test]
+    fn test_pause_blocks_mutations() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+
+        assert_eq!(client.try_pause(&admin).unwrap(), Ok(()));
+        assert!(client.is_paused());
+
+        assert_eq!(
+            client
+                .try_register_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+
+        assert_eq!(client.try_unpause(&admin).unwrap(), Ok(()));
+        assert!(!client.is_paused());
+
+        assert_eq!(
+            client.try_register_watcher(&admin, &watcher).unwrap(),
+            Ok(())
+        );
+    }
+
+    // pause does not block read-only calls
+    #[test]
+    fn test_pause_allows_reads() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        client.pause(&admin);
+
+        assert!(client.is_watcher_authorized(&watcher));
+        assert_eq!(client.get_watchers().len(), 1);
+        assert_eq!(client.get_admins().len(), 1);
+    }
+
+    // only an admin can pause/unpause
+    #[test]
+    fn test_pause_unauthorized() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+
+        assert_eq!(
+            client.try_pause(&attacker).unwrap_err().unwrap(),
+            ContractError::Unauthorized
+        );
+    }
 
     // 13. add_admin — second admin can perform privileged operations
     #[test]
