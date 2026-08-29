@@ -174,7 +174,9 @@ Transfers admin authority to a new address. Requires current admin auth.
 
 Returns the current admin address.
 
-**Returns:** `Address`
+**Returns:** `Result<Address, ContractError>`
+
+**Errors:** `NotInitialized` if `initialize` has not been called.
 
 ---
 

@@ -7,8 +7,8 @@
 //   - `#[contractimpl]` re-exports getters, so `#[must_use]` is not ours to add
 #![allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
-    symbol_short, vec, Address, Env, String, Vec,
+    contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec,
+    Address, Env, String, Vec,
 };
 
 contractmeta!(key = "Name", val = "AlertRegistry");
@@ -200,13 +200,13 @@ impl AlertRegistry {
     }
 
     /// Get the current admin address.
-    /// # Panics
-    /// Panics if the contract's stored state is malformed or missing.
-    pub fn get_admin(env: Env) -> Address {
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    pub fn get_admin(env: Env) -> Result<Address, ContractError> {
         env.storage()
             .instance()
             .get(&symbol_short!("ADMIN"))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
+            .ok_or(ContractError::NotInitialized)
     }
 
     /// Set a per-owner active alert limit (admin only). A value of `0` means no limit.
@@ -3182,6 +3182,8 @@ mod tests {
     }
 
     // 18. get_admin panics with NotInitialized when contract is not initialized
+    // (Result-returning contract functions still panic via the plain client
+    // call when they return Err — this mirrors WatcherRegistry::get_admin.)
     #[test]
     #[should_panic(expected = "Error(Contract, #4)")]
     fn test_get_admin_not_initialized() {
@@ -3189,6 +3191,30 @@ mod tests {
         let contract_id = env.register(AlertRegistry, ());
         let client = AlertRegistryClient::new(&env, &contract_id);
         client.get_admin();
+    }
+
+    // 18b. get_admin returns a typed NotInitialized error via try_get_admin (#41)
+    #[test]
+    fn test_try_get_admin_uninitialized() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+
+        assert_eq!(
+            client.try_get_admin().unwrap_err().unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    // 18c. get_admin returns Ok(admin) once initialized
+    #[test]
+    fn test_try_get_admin_after_initialize() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.try_get_admin().unwrap().unwrap(), admin);
+        assert_eq!(client.get_admin(), admin);
     }
 
     // 19. Alert can be deactivated and reactivated via update_alert

@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getContractAlertsPaginated({ querier, target_contract, offset, limit })` and `getAlertsByOwnerPaginated({ querier, owner, offset, limit })`.
 - Vitest unit tests covering parameter encoding and method bindings.
 
+### Changed
+- `getAdmin()` now surfaces `NotInitialized` as a typed contract error instead of an untyped panic, matching `WatcherRegistry`'s `getAdmin()` convention.
+
 ## [0.1.0] - 2025-05-28
 
 ### Added
