@@ -1,0 +1,19 @@
+# cargo-mutants configuration for TxWatch contracts workspace
+# Exclude test files, test harnesses, integration tests, and support crates
+
+examine_globs = [
+    "contracts/alert-registry/src/lib.rs",
+    "contracts/watcher-registry/src/lib.rs",
+]
+
+exclude_globs = [
+    "contracts/alert-registry/src/tests.rs",
+    "contracts/alert-registry/src/proptests.rs",
+    "contracts/watcher-registry/src/tests.rs",
+    "contracts/integration-tests/**",
+    "contracts/test-utils/**",
+    "**/tests/**",
+]
+
+minimum_test_timeout = 30
+timeout_multiplier = 2
