@@ -115,6 +115,45 @@ Returns a page of authorized watcher addresses. `offset` and `limit` are saturat
 
 ---
 
+### `clear_all_watchers`
+
+Removes all registered watchers in a single call, emitting one `("watcher", "remove")` event per watcher.
+
+**Limitation:** with a large enough watcher set, this can exceed per-transaction resource/event limits and become unusable. Prefer `clear_watchers_batch` for large watcher sets.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin |
+
+**Returns:** nothing
+
+**Errors:** `Unauthorized` if `admin` is not an existing admin.
+
+---
+
+### `clear_watchers_batch`
+
+Removes up to `max_count` registered watchers in a single call. Batched fallback for `clear_all_watchers` — call repeatedly until `get_watcher_count` returns 0 to clear an arbitrarily large watcher set without exceeding per-transaction resource/event limits.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin |
+| `max_count` | `u32` | Maximum number of watchers to remove in this call |
+
+**Returns:** nothing
+
+**Errors:** `Unauthorized` if `admin` is not an existing admin.
+
+---
+
 ### `propose_admin_transfer`
 
 Proposes transferring the admin role to a new address. Does **not** take effect until `new_admin` calls `accept_admin_transfer` with their own signature — this two-step flow prevents a typo'd or unowned `new_admin` from permanently locking the contract. Replaces any previously pending proposal.

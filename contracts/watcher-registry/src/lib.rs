@@ -480,6 +480,60 @@ impl WatcherRegistry {
         Ok(())
     }
 
+    /// Remove up to `max_count` registered watchers in a single admin call.
+    ///
+    /// Batched fallback for [`clear_all_watchers`] — with a large enough
+    /// watcher set, clearing everything and emitting one event per watcher in
+    /// a single transaction can exceed per-transaction resource/event
+    /// limits. Call this repeatedly until [`get_watcher_count`] returns 0 to
+    /// clear an arbitrarily large watcher set.
+    ///
+    /// Watchers are removed from the front of the list. Each removed watcher
+    /// emits a `("watcher", "remove")` event.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    pub fn clear_watchers_batch(
+        env: Env,
+        admin: Address,
+        max_count: u32,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        let watchers = Self::load_watchers(&env);
+        let remove_count = max_count.min(watchers.len());
+
+        let mut remaining: Vec<Address> = vec![&env];
+        for i in 0..watchers.len() {
+            let w = watchers.get(i).unwrap();
+            if i < remove_count {
+                env.events()
+                    .publish((symbol_short!("watcher"), symbol_short!("remove")), w);
+            } else {
+                remaining.push_back(w);
+            }
+        }
+        env.storage().instance().set(&DataKey::Watchers, &remaining);
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("W_CNT"))
+            .unwrap_or(0u32);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("W_CNT"), &count.saturating_sub(remove_count));
+
+        Ok(())
+    }
+
     /// Get all authorized watcher addresses.
     #[must_use]
     pub fn get_watchers(env: Env) -> Vec<Address> {
@@ -1367,6 +1421,77 @@ mod tests {
     fn test_get_watchers_paginated_empty() {
         let (_env, _admin, client) = setup();
         assert_eq!(client.get_watchers_paginated(&0u32, &10u32).len(), 0);
+    }
+
+    // ── clear_watchers_batch tests ───────────────────────────────────────────
+
+    // 34. clear_watchers_batch removes only up to max_count watchers
+    #[test]
+    fn test_clear_watchers_batch_partial() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+        client.register_watcher(&admin, &w3);
+
+        assert_eq!(
+            client.try_clear_watchers_batch(&admin, &2u32).unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_watcher_count(), 1);
+        assert_eq!(client.get_watchers().len(), 1);
+        assert!(client.is_watcher_authorized(&w3));
+    }
+
+    // 35. clear_watchers_batch with a large max_count clears everything
+    #[test]
+    fn test_clear_watchers_batch_full() {
+        let (env, admin, client) = setup();
+        for _ in 0..20 {
+            client.register_watcher(&admin, &Address::generate(&env));
+        }
+
+        assert_eq!(
+            client.try_clear_watchers_batch(&admin, &1_000u32).unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_watcher_count(), 0);
+        assert_eq!(client.get_watchers().len(), 0);
+    }
+
+    // 36. clear_watchers_batch called repeatedly clears a large watcher set,
+    // demonstrating the batched fallback for the unbounded-event risk in
+    // clear_all_watchers.
+    #[test]
+    fn test_clear_watchers_batch_repeated_calls() {
+        let (env, admin, client) = setup();
+        for _ in 0..25 {
+            client.register_watcher(&admin, &Address::generate(&env));
+        }
+
+        while client.get_watcher_count() > 0 {
+            client.clear_watchers_batch(&admin, &10u32);
+        }
+        assert_eq!(client.get_watchers().len(), 0);
+    }
+
+    // 37. clear_watchers_batch rejects non-admin
+    #[test]
+    fn test_clear_watchers_batch_unauthorized() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        client.register_watcher(&admin, &Address::generate(&env));
+
+        assert_eq!(
+            client
+                .try_clear_watchers_batch(&attacker, &10u32)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
