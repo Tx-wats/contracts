@@ -33,6 +33,8 @@ case "$NETWORK" in
 esac
 
 IDENTITY="${STELLAR_IDENTITY:-deployer}"
+# `upgrade` is admin-gated, so the invocation needs the admin's address.
+ADMIN="${ADMIN_ADDRESS:-$(stellar keys address "$IDENTITY")}"
 WASM_NAME="${CONTRACT//-/_}"
 WASM="target/wasm32-unknown-unknown/release/${WASM_NAME}.wasm"
 
@@ -57,6 +59,7 @@ stellar contract invoke \
   --rpc-url "$RPC_URL" \
   --network-passphrase "$NETWORK_PASSPHRASE" \
   -- upgrade \
+  --admin "$ADMIN" \
   --new_wasm_hash "$NEW_WASM_HASH"
 
 echo "==> Upgrade complete. Contract $CONTRACT_ID now runs WASM $NEW_WASM_HASH"

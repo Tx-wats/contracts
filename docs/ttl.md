@@ -20,7 +20,33 @@ This applies to:
 - `DataKey::OwnerIndex(address)` — per-owner alert ID lists
 - `DataKey::ContractIndex(address)` — per-contract alert ID lists
 
-The `watcher-registry` uses **instance storage**, which has its own TTL managed by the network and is not explicitly extended in the current implementation.
+The `watcher-registry` uses **instance storage**, which has its own TTL managed
+by the network. No registry entrypoint extends it as a side effect, so see
+[Keeping the watcher registry alive](#keeping-the-watcher-registry-alive) below.
+
+## Keeping the Watcher Registry Alive
+
+All `WatcherRegistry` state (admins, watchers, timelock) lives in a single
+instance entry. Its TTL is only refreshed when a transaction touches the
+contract — and a registry whose watchers are registered once and then rarely
+changed may go untouched long enough for the entry to be archived, taking the
+whole registry offline until it is restored for a fee.
+
+`bump_instance_ttl` is the keep-alive entrypoint:
+
+```rust
+// Anyone may call this — no auth, no state change.
+watcher_client.bump_instance_ttl();
+```
+
+It extends the instance TTL to `INSTANCE_BUMP_AMOUNT` (535 680 ledgers, ~31
+days) whenever it has dropped below `INSTANCE_BUMP_THRESHOLD` (17 280 ledgers,
+~24 hours), and is the `WatcherRegistry` analogue of `AlertRegistry::bump_alert`.
+
+**Operators should schedule a keeper to call it well inside the ~31-day
+window** — a call every few days is cheap and leaves ample margin. Any other
+transaction against the contract in the meantime does *not* refresh the TTL on
+its own, so do not rely on incidental traffic.
 
 ## Configurable TTL via `bump_alert`
 

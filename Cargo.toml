@@ -5,6 +5,9 @@ members = [
     "contracts/integration-tests",
     "contracts/test-utils",
 ]
+exclude = [
+    "contracts/alert-registry/fuzz",
+]
 resolver = "3"
 
 [workspace.package]

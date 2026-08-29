@@ -8,7 +8,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "stellar contract bindings typescript --wasm ../../target/wasm32-unknown-unknown/release/alert_registry.wasm --output-dir ./dist --contract-id placeholder --overwrite",
+    "build": "stellar contract bindings typescript --wasm ../../target/wasm32-unknown-unknown/release/alert_registry.wasm --output-dir ./dist --contract-id CDSO4GGZH7KBUQYKOIQDCMCFSRYEPOVDUX7Z4IB5TWNTLT2GDRKDQOYR --overwrite",
     "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
