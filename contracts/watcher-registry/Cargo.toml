@@ -12,6 +12,9 @@ documentation = "https://docs.rs/watcher-registry"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[lints]
+workspace = true
+
 [dependencies]
 soroban-sdk = { workspace = true }
 

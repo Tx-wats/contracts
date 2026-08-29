@@ -102,17 +102,77 @@ horizon_url   = "https://horizon.stellar.org"
 
 ### Invoking Contracts (Stellar CLI)
 
+Below is a consolidated cheatsheet with copy-pasteable `stellar contract invoke` examples for every public function across both contracts, grouped to mirror the reference documentation in [docs/alert-registry.md](docs/alert-registry.md) and [docs/watcher-registry.md](docs/watcher-registry.md).
+
+#### Alert Registry (`ALERT_REGISTRY_CONTRACT_ID`)
+
+**Admin & Configuration:**
+
 ```bash
-# Register a watcher (admin only)
+# Initialize contract admin (one-time)
 stellar contract invoke \
-  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
   --source <ADMIN_IDENTITY> \
   --network testnet \
-  -- register_watcher \
-  --admin <ADMIN_ADDRESS> \
-  --watcher <WATCHER_ADDRESS>
+  -- initialize \
+  --admin <ADMIN_ADDRESS>
 
-# Register an alert config
+# Transfer admin role
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- transfer_admin \
+  --admin <ADMIN_ADDRESS> \
+  --new_admin <NEW_ADMIN_ADDRESS>
+
+# Get current admin
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_admin
+
+# Set per-owner alert limit (0 = unlimited)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- set_per_owner_alert_limit \
+  --admin <ADMIN_ADDRESS> \
+  --limit 10
+
+# Get configured per-owner alert limit
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_per_owner_alert_limit
+
+# Configure Watcher Registry address for read gating
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- set_watcher_registry \
+  --admin <ADMIN_ADDRESS> \
+  --watcher_registry <WATCHER_REGISTRY_CONTRACT_ID>
+
+# Get configured Watcher Registry address
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_watcher_registry
+
+# Check if watcher gating is enabled
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- is_watcher_gating_enabled
+```
+
+**Alert Mutations:**
+
+```bash
+# Register a new alert config
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --source <OWNER_IDENTITY> \
@@ -124,12 +184,313 @@ stellar contract invoke \
   --webhook_hash "<sha256-of-webhook-url>" \
   --rules '["rule:transfer","rule:mint"]'
 
-# Query alerts for a contract
+# Update alert rules and active flag
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- update_alert \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --rules '["rule:transfer"]' \
+  --active true
+
+# Update alert label
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- update_label \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --label "Updated Alert Label"
+
+# Update webhook hash directly
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- update_webhook \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --webhook_hash "<new-sha256-hash>"
+
+# Propose new webhook hash (step 1 of 2-step rotation)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- propose_webhook \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --webhook_hash "<staged-sha256-hash>"
+
+# Confirm new webhook hash (step 2 of 2-step rotation)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- confirm_webhook \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1
+
+# Renew alert TTL (owner-authenticated, preserves updated_at)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- renew_alert_ttl \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1
+
+# Bump alert TTL (unauthenticated / keeper service)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <CALLER_IDENTITY> \
+  --network testnet \
+  -- bump_alert \
+  --config_id 1 \
+  --ttl 535680
+
+# Update target contract for an alert
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- update_target_contract \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --new_target <NEW_WATCHED_CONTRACT_ADDRESS>
+
+# Deactivate all alerts owned by caller
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- deactivate_all_alerts \
+  --caller <OWNER_ADDRESS>
+
+# Remove an alert (owner only)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- remove_alert \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1
+
+# Remove an alert by admin (admin only)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- remove_alert_by_admin \
+  --admin <ADMIN_ADDRESS> \
+  --config_id 1
+```
+
+**Alert Queries & Inspection:**
+
+```bash
+# Retrieve a single alert config by ID
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alert \
+  --config_id 1
+
+# Check if an alert is active (lightweight read)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alert_active \
+  --config_id 1
+
+# Query all alerts for a contract
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --network testnet \
   -- get_alerts_for_contract \
+  --querier <QUERIER_ADDRESS> \
   --target_contract <WATCHED_CONTRACT_ADDRESS>
+
+# Query active alerts for a contract
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_active_alerts_for_contract \
+  --target_contract <WATCHED_CONTRACT_ADDRESS>
+
+# Query all alerts owned by an address
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alerts_by_owner \
+  --querier <QUERIER_ADDRESS> \
+  --owner <OWNER_ADDRESS>
+
+# Query alerts for a contract with pagination
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_contract_alerts_paginated \
+  --querier <QUERIER_ADDRESS> \
+  --target_contract <WATCHED_CONTRACT_ADDRESS> \
+  --offset 0 \
+  --limit 10
+
+# Query alerts by owner with pagination
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alerts_by_owner_paginated \
+  --querier <QUERIER_ADDRESS> \
+  --owner <OWNER_ADDRESS> \
+  --offset 0 \
+  --limit 10
+
+# Query alerts modified since ledger timestamp (incremental sync)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alerts_modified_since \
+  --since 1700000000
+
+# Get total cumulative alert count
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alert_count
+
+# Get active alert count for an owner
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_active_alert_count \
+  --owner <OWNER_ADDRESS>
+```
+
+#### Watcher Registry (`WATCHER_REGISTRY_CONTRACT_ID`)
+
+**Admin & Governance:**
+
+```bash
+# Initialize registry with initial admin (one-time)
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- initialize \
+  --admin <ADMIN_ADDRESS>
+
+# Add a co-admin
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- add_admin \
+  --caller <ADMIN_ADDRESS> \
+  --new_admin <NEW_ADMIN_ADDRESS>
+
+# Remove an admin
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- remove_admin \
+  --caller <ADMIN_ADDRESS> \
+  --admin_to_remove <ADMIN_TO_REMOVE_ADDRESS>
+
+# Transfer admin role (replaces admin set)
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- transfer_admin \
+  --caller <ADMIN_ADDRESS> \
+  --new_admin <NEW_ADMIN_ADDRESS>
+
+# Get primary admin address
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_admin
+
+# Get all current admin addresses
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_admins
+```
+
+**Watcher Management:**
+
+```bash
+# Register an authorized watcher
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- register_watcher \
+  --admin <ADMIN_ADDRESS> \
+  --watcher <WATCHER_ADDRESS>
+
+# Remove an authorized watcher
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- remove_watcher \
+  --admin <ADMIN_ADDRESS> \
+  --watcher <WATCHER_ADDRESS>
+
+# Replace an existing watcher with a new address
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- replace_watcher \
+  --admin <ADMIN_ADDRESS> \
+  --old_watcher <OLD_WATCHER_ADDRESS> \
+  --new_watcher <NEW_WATCHER_ADDRESS>
+
+# Clear all authorized watchers (bulk deauthorization)
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- clear_all_watchers \
+  --admin <ADMIN_ADDRESS>
+```
+
+**Watcher Queries:**
+
+```bash
+# Check if an address is an authorized watcher
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- is_watcher_authorized \
+  --watcher <WATCHER_ADDRESS>
+
+# Check authorization (backward-compatible alias)
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- is_authorized \
+  --watcher <WATCHER_ADDRESS>
+
+# Get all authorized watcher addresses
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_watchers
+
+# Get total count of authorized watchers
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_watcher_count
 ```
 
 ### Invoking Contracts (JavaScript SDK)
@@ -319,6 +680,7 @@ See [DEPLOYMENTS.md](DEPLOYMENTS.md).
 
 - [Alert Registry function reference](docs/alert-registry.md)
 - [Watcher Registry function reference](docs/watcher-registry.md)
+- [Upgrade guide](docs/upgrade-guide.md)
 - [Compatibility Matrix](docs/compatibility.md)
 - [Ecosystem submission guide](docs/ecosystem-submission.md)
 

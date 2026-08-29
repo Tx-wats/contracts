@@ -59,9 +59,10 @@ Example TTL approach:
 - Is there a plan for TTL/cleanup if data can grow over time?
 - Are loops bounded or paginated?
 - Are public invariants tested?
+- Are monorepo `CHANGELOG.md` and per-package changelogs (`bindings/*/CHANGELOG.md`) updated?
 
 ## Helpful references
 - Soroban SDK docs and examples (check upstream docs).
 - This repo's `integration-tests` for cross-contract examples.
+- [docs/compatibility.md](compatibility.md) for bindings and sister repo release instructions.
 
-If you want, I can add examples or expand any section into concrete code snippets tailored to a specific contract in this repo.

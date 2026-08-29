@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 alert-registry = { path = "../alert-registry", features = ["testutils"] }
