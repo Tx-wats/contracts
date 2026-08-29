@@ -59,7 +59,7 @@ fn test_register_and_get_alert() {
         &vec![&env, str(&env, "rule:transfer")],
     );
 
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert_eq!(cfg.label, str(&env, "My Alert"));
     assert_eq!(cfg.owner, owner);
     assert!(cfg.active);
@@ -87,7 +87,7 @@ fn test_update_alert() {
         Ok(())
     );
 
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert!(!cfg.active);
     assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:mint"));
 }
@@ -108,7 +108,7 @@ fn test_remove_alert() {
     );
 
     assert_eq!(client.try_remove_alert(&owner, &id).unwrap(), Ok(()));
-    assert!(client.get_alert(&id).is_none());
+    assert!(client.get_alert(&owner, &id).is_none());
 }
 
 // 4. Unauthorized update rejected
@@ -187,7 +187,7 @@ fn test_admin_remove_any_alert() {
     );
 
     client.remove_alert_by_admin(&admin, &id);
-    assert!(client.get_alert(&id).is_none());
+    assert!(client.get_alert(&owner, &id).is_none());
 }
 
 #[test]
@@ -369,8 +369,8 @@ fn test_remove_unauthorized() {
 // 6. Edge case — get nonexistent alert returns None
 #[test]
 fn test_get_nonexistent_alert() {
-    let (_env, client) = setup();
-    assert!(client.get_alert(&999u64).is_none());
+    let (env, client) = setup();
+    assert!(client.get_alert(&Address::generate(&env), &999u64).is_none());
 }
 
 // 7. Edge case — get alerts for contract with no alerts returns empty vec
@@ -461,7 +461,7 @@ fn test_update_webhook() {
         Ok(())
     );
     assert_eq!(
-        client.get_alert(&id).unwrap().webhook_hash,
+        client.get_alert(&owner, &id).unwrap().webhook_hash,
         hash64c(&env, 'b')
     );
 }
@@ -526,7 +526,7 @@ fn test_active_defaults_to_true() {
         &hash64(&env),
         &vec![&env],
     );
-    assert!(client.get_alert(&id).unwrap().active);
+    assert!(client.get_alert(&owner, &id).unwrap().active);
 }
 
 // 13. register_alert rejects more than 50 rules
@@ -580,7 +580,7 @@ fn test_register_alert_exactly_50_rules() {
         ));
     }
     let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
-    assert_eq!(client.get_alert(&id).unwrap().rules.len(), 50);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().rules.len(), 50);
 }
 
 // 16. Label exceeding 128 bytes is rejected
@@ -658,14 +658,14 @@ fn test_renew_alert_ttl_happy_path() {
         &vec![&env, str(&env, "rule:transfer")],
     );
 
-    let before = client.get_alert(&id).unwrap();
+    let before = client.get_alert(&owner, &id).unwrap();
 
     // Advance time — renew should NOT change updated_at
     env.ledger().with_mut(|li| li.timestamp += 100);
 
     assert_eq!(client.try_renew_alert_ttl(&owner, &id).unwrap(), Ok(()));
 
-    let after = client.get_alert(&id).unwrap();
+    let after = client.get_alert(&owner, &id).unwrap();
 
     // Data must be completely unchanged
     assert_eq!(after.label, before.label);
@@ -740,7 +740,7 @@ fn test_propose_webhook_stores_pending_hash() {
         Ok(())
     );
 
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     // Live hash must still be the original
     assert_eq!(cfg.webhook_hash, hash64c(&env, 'a'));
     // Pending hash must be set
@@ -766,7 +766,7 @@ fn test_confirm_webhook_promotes_pending_hash() {
 
     assert_eq!(client.try_confirm_webhook(&owner, &id).unwrap(), Ok(()));
 
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     // Live hash must now be the new one
     assert_eq!(cfg.webhook_hash, hash64c(&env, 'b'));
     // Pending hash must be cleared
@@ -897,7 +897,7 @@ fn test_propose_webhook_overwrites_previous_pending() {
     client.propose_webhook(&owner, &id, &hash64c(&env, 't'));
     client.propose_webhook(&owner, &id, &hash64c(&env, 'u'));
 
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert_eq!(cfg.pending_webhook_hash, Some(hash64c(&env, 'u')));
     // Live hash still unchanged
     assert_eq!(cfg.webhook_hash, hash64c(&env, 's'));
@@ -921,14 +921,14 @@ fn test_webhook_rotation_full_cycle() {
     // First rotation
     client.propose_webhook(&owner, &id, &hash64c(&env, 'q'));
     client.confirm_webhook(&owner, &id);
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert_eq!(cfg.webhook_hash, hash64c(&env, 'q'));
     assert!(cfg.pending_webhook_hash.is_none());
 
     // Second rotation
     client.propose_webhook(&owner, &id, &hash64c(&env, 'r'));
     client.confirm_webhook(&owner, &id);
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert_eq!(cfg.webhook_hash, hash64c(&env, 'r'));
     assert!(cfg.pending_webhook_hash.is_none());
 }
@@ -989,7 +989,7 @@ fn test_pending_webhook_hash_none_on_registration() {
         &vec![&env],
     );
 
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert!(cfg.pending_webhook_hash.is_none());
 }
 
@@ -1119,7 +1119,7 @@ fn test_validate_rule_mint_and_invalid_descriptors() {
         &hash64(&env),
         &vec![&env, str(&env, "rule:mint")],
     );
-    let cfg = client.get_alert(&id).unwrap();
+    let cfg = client.get_alert(&owner, &id).unwrap();
     assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:mint"));
 
     // invalid rules rejected
@@ -1175,8 +1175,8 @@ fn test_update_target_contract_moves_indices() {
 
     assert_eq!(client.get_alerts_for_contract(&querier, &target_a).len(), 0);
     assert_eq!(client.get_alerts_for_contract(&querier, &target_b).len(), 1);
-    assert_eq!(client.get_active_alerts_for_contract(&target_a).len(), 0);
-    assert_eq!(client.get_active_alerts_for_contract(&target_b).len(), 1);
+    assert_eq!(client.get_active_alerts_for_contract(&querier, &target_a).len(), 0);
+    assert_eq!(client.get_active_alerts_for_contract(&querier, &target_b).len(), 1);
 }
 
 #[test]
@@ -1185,7 +1185,7 @@ fn test_get_alert_active_states_and_counts() {
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    assert_eq!(client.get_alert_active(&999), None);
+    assert_eq!(client.get_alert_active(&owner, &999), None);
     assert_eq!(client.get_alert_count(), 0);
 
     let id = client.register_alert(
@@ -1196,14 +1196,14 @@ fn test_get_alert_active_states_and_counts() {
         &vec![&env],
     );
 
-    assert_eq!(client.get_alert_active(&id), Some(true));
+    assert_eq!(client.get_alert_active(&owner, &id), Some(true));
     assert_eq!(client.get_alert_count(), 1);
 
     client.update_alert(&owner, &id, &vec![&env], &false);
-    assert_eq!(client.get_alert_active(&id), Some(false));
+    assert_eq!(client.get_alert_active(&owner, &id), Some(false));
 
     client.remove_alert(&owner, &id);
-    assert_eq!(client.get_alert_active(&id), None);
+    assert_eq!(client.get_alert_active(&owner, &id), None);
     assert_eq!(client.get_alert_count(), 1); // count is total allocated
 }
 
@@ -1248,10 +1248,10 @@ fn test_deactivate_all_alerts_precise_behavior() {
 
     let count = client.deactivate_all_alerts(&owner1);
     assert_eq!(count, 3);
-    assert_eq!(client.get_alert_active(&id0), Some(false));
-    assert_eq!(client.get_alert_active(&id1), Some(false));
-    assert_eq!(client.get_alert_active(&id2), Some(false));
-    assert_eq!(client.get_alert_active(&id3), Some(true));
+    assert_eq!(client.get_alert_active(&Address::generate(&env), &id0), Some(false));
+    assert_eq!(client.get_alert_active(&Address::generate(&env), &id1), Some(false));
+    assert_eq!(client.get_alert_active(&Address::generate(&env), &id2), Some(false));
+    assert_eq!(client.get_alert_active(&Address::generate(&env), &id3), Some(true));
 
     // Second deactivate is a no-op
     let count2 = client.deactivate_all_alerts(&owner1);
@@ -1285,24 +1285,24 @@ fn test_get_alerts_modified_since_precision() {
     env.ledger().set_timestamp(3000);
     client.update_webhook(&owner, &id0, &hash64c(&env, 'z'));
 
-    let res_0 = client.get_alerts_modified_since(&0);
+    let res_0 = client.get_alerts_modified_since(&0, &0u32, &u32::MAX);
     assert_eq!(res_0.len(), 2);
 
-    let res_1000 = client.get_alerts_modified_since(&1000);
+    let res_1000 = client.get_alerts_modified_since(&1000, &0u32, &u32::MAX);
     assert_eq!(res_1000.len(), 2);
 
-    let res_2000 = client.get_alerts_modified_since(&2000);
+    let res_2000 = client.get_alerts_modified_since(&2000, &0u32, &u32::MAX);
     assert_eq!(res_2000.len(), 2);
 
-    let res_2001 = client.get_alerts_modified_since(&2001);
+    let res_2001 = client.get_alerts_modified_since(&2001, &0u32, &u32::MAX);
     assert_eq!(res_2001.len(), 1);
     assert_eq!(res_2001.get(0).unwrap().label, str(&env, "A0"));
 
-    let res_3000 = client.get_alerts_modified_since(&3000);
+    let res_3000 = client.get_alerts_modified_since(&3000, &0u32, &u32::MAX);
     assert_eq!(res_3000.len(), 1);
     assert_eq!(res_3000.get(0).unwrap().label, str(&env, "A0"));
 
-    let res_3001 = client.get_alerts_modified_since(&3001);
+    let res_3001 = client.get_alerts_modified_since(&3001, &0u32, &u32::MAX);
     assert_eq!(res_3001.len(), 0);
 
     let _ = id1;

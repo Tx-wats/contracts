@@ -58,7 +58,7 @@ The contract supports:
 - **Saturating Pagination**: Pagination math in `get_contract_alerts_paginated` and `get_alerts_by_owner_paginated` uses saturating arithmetic to prevent integer overflow denial of service.
 
 ### 5. Unauthorized Read Access (Watcher-Gating Attack Surface)
-- **Gated Query Access**: When `WatcherRegistry` is configured, read queries (`get_alerts_for_contract`, `get_alerts_by_owner`, `get_active_alerts_for_contract`, and paginated variants) cross-call `WatcherRegistry::is_watcher_authorized` with the `querier` address. Unauthorized queriers are rejected with `ContractError::NotAWatcher`.
+- **Gated Query Access**: When `WatcherRegistry` is configured, read queries (`get_alerts_for_contract`, `get_alerts_by_owner`, `get_active_alerts_for_contract`, `get_alert`, `get_alert_active`, and paginated variants) cross-call `WatcherRegistry::is_watcher_authorized` with the `querier` address. Unauthorized queriers are rejected with `ContractError::NotAWatcher`.
 - **Fail-Closed Verification**: If watcher-gating is enabled and the querying address is not registered, alert data is withheld.
 
 ### 6. Storage Expiry & Sync Drift

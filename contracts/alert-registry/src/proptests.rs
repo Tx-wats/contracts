@@ -561,11 +561,11 @@ fn run_state_machine(actions: Vec<AlertAction>) {
             if alert.removed {
                 // Invariant: A removed alert can never be read or retrieved
                 assert!(
-                    client.get_alert(&id).is_none(),
+                    client.get_alert(&owners[0], &id).is_none(),
                     "Removed alert must not exist in get_alert"
                 );
                 assert!(
-                    client.get_alert_active(&id).is_none(),
+                    client.get_alert_active(&owners[0], &id).is_none(),
                     "Removed alert must not have active flag"
                 );
 
@@ -626,7 +626,7 @@ fn run_state_machine(actions: Vec<AlertAction>) {
                 );
             } else {
                 // Invariant: Live alert matches expected state machine model
-                let on_chain = client.get_alert(&id).expect("Live alert must exist");
+                let on_chain = client.get_alert(&owners[0], &id).expect("Live alert must exist");
                 assert_eq!(on_chain.owner, owners[alert.owner_idx]);
                 assert_eq!(on_chain.target_contract, targets[alert.target_idx]);
                 assert_eq!(on_chain.label, make_str(&env, &alert.label));
@@ -641,7 +641,7 @@ fn run_state_machine(actions: Vec<AlertAction>) {
                         .map(|c| make_hash64(&env, c))
                 );
                 assert_eq!(on_chain.active, alert.active);
-                assert_eq!(client.get_alert_active(&id), Some(alert.active));
+                assert_eq!(client.get_alert_active(&owners[0], &id), Some(alert.active));
                 assert_eq!(on_chain.created_at, alert.created_at);
                 assert_eq!(on_chain.updated_at, alert.updated_at);
                 assert!(on_chain.updated_at >= on_chain.created_at);
@@ -683,7 +683,7 @@ fn run_state_machine(actions: Vec<AlertAction>) {
                 live_contract_alert_ids.len()
             );
 
-            let on_chain_active_alerts = client.get_active_alerts_for_contract(target);
+            let on_chain_active_alerts = client.get_active_alerts_for_contract(&querier, target);
             let live_active_contract_alert_ids: Vec<u64> = model_alerts
                 .values()
                 .filter(|a| !a.removed && a.target_idx == i && a.active)
@@ -724,7 +724,7 @@ proptest! {
         );
 
         // Before propose: pending is None, confirm returns NoPendingWebhook
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg.webhook_hash, make_hash64(&env, initial_char));
         assert!(cfg.pending_webhook_hash.is_none());
         assert_eq!(
@@ -734,19 +734,19 @@ proptest! {
 
         // Propose 1: pending is Some(propose1), live hash is still initial
         client.propose_webhook(&owner, &id, &make_hash64(&env, propose1_char));
-        let cfg1 = client.get_alert(&id).unwrap();
+        let cfg1 = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg1.webhook_hash, make_hash64(&env, initial_char));
         assert_eq!(cfg1.pending_webhook_hash, Some(make_hash64(&env, propose1_char)));
 
         // Propose 2: overwrites pending with propose2 without changing live hash
         client.propose_webhook(&owner, &id, &make_hash64(&env, propose2_char));
-        let cfg2 = client.get_alert(&id).unwrap();
+        let cfg2 = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg2.webhook_hash, make_hash64(&env, initial_char));
         assert_eq!(cfg2.pending_webhook_hash, Some(make_hash64(&env, propose2_char)));
 
         // Confirm: promotes propose2 to live, clears pending
         client.confirm_webhook(&owner, &id);
-        let cfg3 = client.get_alert(&id).unwrap();
+        let cfg3 = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg3.webhook_hash, make_hash64(&env, propose2_char));
         assert!(cfg3.pending_webhook_hash.is_none());
 
@@ -776,7 +776,7 @@ proptest! {
         assert_eq!(res.unwrap(), Ok(()));
 
         // Alert remains intact
-        let cfg = client.get_alert(&id).unwrap();
+        let cfg = client.get_alert(&owner, &id).unwrap();
         assert_eq!(cfg.owner, owner);
     }
 
@@ -845,7 +845,7 @@ proptest! {
         }
 
         let since = base_time + since_offset;
-        let modified = client.get_alerts_modified_since(&since);
+        let modified = client.get_alerts_modified_since(&since, &0u32, &u32::MAX);
 
         let expected_count = timestamps.iter().filter(|&&t| t >= since).count();
         assert_eq!(modified.len() as usize, expected_count);

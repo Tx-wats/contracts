@@ -340,13 +340,16 @@ Removes multiple alert configs owned by `caller` in a single call. Each ID is va
 
 Retrieves a single alert config by ID.
 
+If a `WatcherRegistry` is configured (via `set_watcher_registry`), `querier` must be a registered watcher or the call returns `ContractError::NotAWatcher`.
+
 **Parameters**
 
 | Name | Type | Description |
 |---|---|---|
+| `querier` | `Address` | Address performing the query (checked against watcher registry if configured) |
 | `config_id` | `u64` | Alert config ID |
 
-**Returns:** `Option<AlertConfig>` — `Some(config)` if found, `None` otherwise.
+**Returns:** `Result<Option<AlertConfig>, ContractError>` — `Ok(Some(config))` if found, `Ok(None)` otherwise.
 
 ---
 
@@ -354,13 +357,16 @@ Retrieves a single alert config by ID.
 
 Cheap read-only function that returns just the `active` bool for a given alert ID, avoiding the cost of deserializing the full [`AlertConfig`](#alertconfig). The active flag is stored under a dedicated storage key (`DataKey::AlertActive`).
 
+If a `WatcherRegistry` is configured (via `set_watcher_registry`), `querier` must be a registered watcher or the call returns `ContractError::NotAWatcher`.
+
 **Parameters**
 
 | Name | Type | Description |
 |---|---|---|
+| `querier` | `Address` | Address performing the query (checked against watcher registry if configured) |
 | `config_id` | `u64` | Alert config ID |
 
-**Returns:** `Option<bool>` — `Some(true)` if active, `Some(false)` if inactive, `None` if the alert does not exist.
+**Returns:** `Result<Option<bool>, ContractError>` — `Ok(Some(true))` if active, `Ok(Some(false))` if inactive, `Ok(None)` if the alert does not exist.
 
 ---
 

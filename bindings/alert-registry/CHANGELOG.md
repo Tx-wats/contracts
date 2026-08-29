@@ -14,11 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `confirmWebhook({ caller, id })`
 - `renewAlertTtl({ caller, id })` for renewing alert TTL without altering modification timestamps.
 - `bumpAlert({ id, ttl })` for permissionless keeper-based TTL bumping.
-- `getAlertsModifiedSince({ since })` for incremental alert synchronizations.
+- `getAlertsModifiedSince({ since, offset, limit })` for paginated incremental alert synchronization.
 - `getContractAlertsPaginated({ querier, target_contract, offset, limit })` and `getAlertsByOwnerPaginated({ querier, owner, offset, limit })`.
+- `setGlobalAlertLimit({ admin, limit })` / `getGlobalAlertLimit()` — admin-settable ceiling on the total number of alerts ever registered.
+- `setPerContractAlertLimit({ admin, limit })` / `getPerContractAlertLimit()` and `getActiveContractAlertCount({ target_contract })` — admin-settable ceiling on active alerts per target contract, symmetric to the existing per-owner limit.
 - Vitest unit tests covering parameter encoding and method bindings.
 
 ### Changed
+- **Breaking:** `getAlertsModifiedSince` now takes `offset` and `limit` in addition to `since`; a single call's scan cost is bounded by `limit` rather than the full registry size.
+- **Breaking:** `getAlert({ querier, id })` and `getAlertActive({ querier, id })` now take a `querier` address and return a `Result`, matching the existing gating on `getAlertsForContract` / `getAlertsByOwner`. When a `WatcherRegistry` is configured, a non-watcher `querier` is rejected with `NotAWatcher`.
+- **Breaking:** `getActiveAlertsForContract({ querier, target_contract })` now takes a `querier` address and returns a `Result` for the same reason — previously it was the only contract-scoped query left ungated.
 - `getAdmin()` now surfaces `NotInitialized` as a typed contract error instead of an untyped panic, matching `WatcherRegistry`'s `getAdmin()` convention.
 - `setWatcherRegistry({ admin, watcher_registry })` now probes the target contract and rejects a misconfigured address with `InvalidWatcherRegistry` at call time instead of leaving gating silently broken until the next read query.
 
