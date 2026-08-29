@@ -83,6 +83,9 @@ jobs:
       - name: Check workspace (MSRV)
         run: cargo check --workspace --locked
 
+      # Issue #111 — Verify events documentation matches source emissions
+      - name: Check events documentation
+        run: bash scripts/check-events-doc.sh
 
   # Issue #105 — Dependency vulnerability scanning.
   #

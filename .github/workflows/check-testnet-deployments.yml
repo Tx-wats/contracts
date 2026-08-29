@@ -1,0 +1,33 @@
+name: Check Testnet Deployments Liveness
+
+# Periodic scheduled check ensuring that deployed testnet contract addresses
+# recorded in DEPLOYMENTS.md remain live and have not been wiped by a testnet reset.
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # Allow manual execution from GitHub Actions UI
+
+concurrency:
+  group: check-testnet-deployments
+  cancel-in-progress: true
+
+jobs:
+  check-testnet-liveness:
+    name: Verify Testnet Contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Testnet Deployment Liveness Check
+        run: |
+          chmod +x scripts/check-testnet-deployments.sh
+          ./scripts/check-testnet-deployments.sh DEPLOYMENTS.md

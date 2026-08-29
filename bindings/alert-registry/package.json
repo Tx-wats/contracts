@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "build": "stellar contract bindings typescript --wasm ../../target/wasm32-unknown-unknown/release/alert_registry.wasm --output-dir ./dist --contract-id placeholder --overwrite",
+    "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "@stellar/stellar-sdk": "^12.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^1.6.0"
   }
 }

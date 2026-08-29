@@ -46,7 +46,19 @@ The following are **out of scope**:
 - Stellar protocol-level vulnerabilities (report to the [Stellar Development Foundation](https://stellar.org/bug-bounty))
 - Issues in off-chain infrastructure not part of this repository
 
+## Incident Response & Operator Runbook
+
+In the event of a suspected or confirmed compromise of an administrative private key, operators should immediately follow the step-by-step procedures outlined in the [Incident Response Runbook](docs/incident-response.md):
+
+* **Immediate containment actions** (revoking admin privileges via `remove_admin` or `transfer_admin`)
+* **State audit & remediation** (purging unauthorized watchers, restoring watcher gating, validating per-owner limits)
+* **Stakeholder notification procedures** for downstream watcher nodes and alert owners
+* **Post-incident review and key hardening**
+
+See [`docs/incident-response.md`](docs/incident-response.md) for full operational guidance.
+
 ## Contact
 
 Maintainer: Emmanuel Chukwunyere — emmanuelanalaba@gmail.com  
 Organization: [Tx-wat](https://github.com/Tx-wat)
+

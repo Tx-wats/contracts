@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "build": "tsc --project tsconfig.json",
+    "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -44,6 +45,7 @@
   },
   "devDependencies": {
     "@stellar/stellar-sdk": "12.3.0",
-    "typescript": "5.4.5"
+    "typescript": "5.4.5",
+    "vitest": "^1.6.0"
   }
 }

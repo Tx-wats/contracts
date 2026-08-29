@@ -11,10 +11,10 @@ After running `scripts/deploy.sh`, replace the placeholder values with the print
 
 ## Stellar Testnet
 
-| Contract | Address |
-|---|---|
-| Alert Registry | `CDSO4GGZH7KBUQYKOIQDCMCFSRYEPOVDUX7Z4IB5TWNTLT2GDRKDQOYR` |
-| Watcher Registry | `CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J` |
+| Contract | Address | WASM Hash |
+|---|---|---|
+| Alert Registry | `CDSO4GGZH7KBUQYKOIQDCMCFSRYEPOVDUX7Z4IB5TWNTLT2GDRKDQOYR` | `TODO` |
+| Watcher Registry | `CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J` | `TODO` |
 
 Deployed and initialized on 2026-08-17. Verified end to end on-chain:
 `register_alert` → `get_alert`, then a full `propose_webhook` → `confirm_webhook`
@@ -32,16 +32,19 @@ rotation emitting `alert.wh_prop` and `alert.wh_conf`.
 | Network Passphrase | `Test SDF Network ; September 2015` |
 | Horizon URL | `https://horizon-testnet.stellar.org` |
 
-> Testnet resets periodically. Re-deploy with `bash scripts/deploy.sh` and update the addresses above after each reset.
+> **Periodic Liveness Check:** Testnet resets wipe contract state. Run `./scripts/check-testnet-deployments.sh` to check liveness.
+> A daily CI job automatically validates that the addresses above are still live.
+> For reset recovery instructions, see the [Deployment & Testnet Liveness Guide](docs/deployment-guide.md).
+
 
 ---
 
 ## Stellar Mainnet
 
-| Contract | Address |
-|---|---|
-| Alert Registry | `CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` |
-| Watcher Registry | `CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` |
+| Contract | Address | WASM Hash |
+|---|---|---|
+| Alert Registry | `CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` | `TODO` |
+| Watcher Registry | `CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` | `TODO` |
 
 ### Mainnet Network Details
 
@@ -62,8 +65,8 @@ rotation emitting `alert.wh_prop` and `alert.wh_conf`.
    ```bash
    bash scripts/deploy.sh
    ```
-2. Copy the contract addresses printed at the end of the script output.
-3. Replace the corresponding `CXXX...` placeholders in the table above.
+2. Copy the contract addresses and WASM hashes printed at the end of the script output.
+3. Replace the corresponding `CXXX...` placeholders and `TODO` hashes in the table above.
 4. Commit the update:
    ```bash
    git add DEPLOYMENTS.md
@@ -74,6 +77,6 @@ rotation emitting `alert.wh_prop` and `alert.wh_conf`.
 
 ## Deployment History
 
-| Date | Network | Contract | Address | Notes |
-|---|---|---|---|---|
-| — | — | — | — | Initial placeholder |
+| Date | Network | Contract | Address | WASM Hash | Notes |
+|---|---|---|---|---|---|
+| — | — | — | — | — | Initial placeholder |
