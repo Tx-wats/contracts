@@ -54,6 +54,60 @@ bash scripts/deploy.sh
 
 3. Update `DEPLOYMENTS.md` with the printed contract addresses.
 
+## Verifying a Deployment
+
+Verify that a deployed on-chain contract matches the locally compiled WASM binary:
+
+1. Run the verification script against the target contract and network:
+
+```bash
+# Verify Alert Registry on Testnet
+bash scripts/verify.sh --contract alert-registry --contract-id <ALERT_REGISTRY_CONTRACT_ID> --network testnet
+
+# Verify Watcher Registry on Testnet
+bash scripts/verify.sh --contract watcher-registry --contract-id <WATCHER_REGISTRY_CONTRACT_ID> --network testnet
+```
+
+2. For mainnet verification, ensure `MAINNET_RPC_URL` is exported:
+
+```bash
+export MAINNET_RPC_URL="https://mainnet.stellar.validationcloud.io/v1/<API_KEY>"
+bash scripts/verify.sh --contract alert-registry --contract-id <ALERT_REGISTRY_CONTRACT_ID> --network mainnet
+```
+
+The script compiles the contracts locally in release mode, calculates the local SHA-256 hash, retrieves the deployed WASM hash from the network via Stellar CLI, and asserts that they match.
+
+## Upgrading a Deployed Contract
+
+Upgrade an already-deployed contract to a new WASM binary:
+
+1. Ensure the deployer identity is configured and funded (defaults to `deployer`, or customize via `STELLAR_IDENTITY`):
+
+```bash
+export STELLAR_IDENTITY=deployer
+```
+
+2. Run the upgrade script for the target contract:
+
+```bash
+# Upgrade Alert Registry
+bash scripts/upgrade.sh --contract alert-registry --contract-id <ALERT_REGISTRY_CONTRACT_ID> --network testnet
+
+# Upgrade Watcher Registry
+bash scripts/upgrade.sh --contract watcher-registry --contract-id <WATCHER_REGISTRY_CONTRACT_ID> --network testnet
+```
+
+3. For mainnet upgrades, export `MAINNET_RPC_URL`:
+
+```bash
+export MAINNET_RPC_URL="https://mainnet.stellar.validationcloud.io/v1/<API_KEY>"
+bash scripts/upgrade.sh --contract alert-registry --contract-id <ALERT_REGISTRY_CONTRACT_ID> --network mainnet
+```
+
+The script builds the contract locally, installs the new WASM on-chain via `stellar contract install`, and invokes the contract's `upgrade` function with the new WASM hash.
+
+4. Update `DEPLOYMENTS.md` with the new WASM hash and version details.
+
 ## Adding a New Function to an Existing Contract
 
 1. Add the function inside the `#[contractimpl]` block in `contracts/<name>/src/lib.rs`.
