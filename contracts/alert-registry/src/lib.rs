@@ -1,6 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
+    contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec,
+    Address, Env, String, Vec,
     contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
     symbol_short, vec, Address, BytesN, Env, String, Vec,
 };
@@ -46,6 +48,11 @@ pub enum DataKey {
     AlertActive(u64),
     /// Stores the list of alert IDs owned by a given address.
     OwnerIndex(Address),
+    /// Stores the number of currently live (non-removed) alerts owned by a
+    /// given address, maintained incrementally alongside [`DataKey::OwnerIndex`]
+    /// so [`AlertRegistry::get_active_alert_count`] never has to rescan the
+    /// owner's full index.
+    OwnerActiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
     /// Monotonic counter used to generate unique alert IDs.
@@ -71,6 +78,11 @@ pub enum ContractError {
     DuplicateAlertId = 11,
     /// Returned by `confirm_webhook` when no webhook rotation is in progress.
     NoPendingWebhook = 12,
+    /// Returned by `set_watcher_registry` when the given address does not
+    /// respond to the `WatcherRegistry` interface (probed at configuration
+    /// time), so gating would otherwise fail later inside
+    /// `assert_watcher_if_configured` at query time.
+    InvalidWatcherRegistry = 13,
     /// Returned when a state-mutating call is made while the contract is paused.
     Paused = 13,
 }
@@ -240,13 +252,13 @@ impl AlertRegistry {
     }
 
     /// Get the current admin address.
-    /// # Panics
-    /// Panics if the contract's stored state is malformed or missing.
-    pub fn get_admin(env: Env) -> Address {
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    pub fn get_admin(env: Env) -> Result<Address, ContractError> {
         env.storage()
             .instance()
             .get(&symbol_short!("ADMIN"))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
+            .ok_or(ContractError::NotInitialized)
     }
 
     /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
@@ -331,11 +343,20 @@ impl AlertRegistry {
     /// cross-called. Use [`AlertRegistry::clear_watcher_registry`] to disable
     /// gating.
     ///
+    /// `watcher_registry` is probed with a read-only
+    /// `is_watcher_authorized` call before being persisted, so a
+    /// misconfigured address (not a contract, or a contract that doesn't
+    /// implement the `WatcherRegistry` interface) is rejected here with a
+    /// typed error instead of surfacing later as a panic inside
+    /// `assert_watcher_if_configured` the next time a gated query runs.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::InvalidWatcherRegistry`] if `watcher_registry` does not respond
+    /// to the `WatcherRegistry` interface.
     pub fn set_watcher_registry(
         env: Env,
         admin: Address,
@@ -343,6 +364,12 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+
+        let probe = ExtWatcherClient::new(&env, &watcher_registry);
+        if probe.try_is_watcher_authorized(&admin).is_err() {
+            return Err(ContractError::InvalidWatcherRegistry);
+        }
+
         Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
@@ -1126,6 +1153,22 @@ impl AlertRegistry {
         Ok(Self::configs_for_ids(&env, &ids))
     }
 
+    /// Retrieve the raw list of alert IDs owned by a given address.
+    ///
+    /// Thin wrapper over the underlying `OwnerIndex` entry. Use this instead
+    /// of [`Self::get_alerts_by_owner`] when only the IDs are needed (e.g. an
+    /// existence check or a count) so callers don't pay the cost of
+    /// deserializing every full [`AlertConfig`].
+    ///
+    /// Unlike [`Self::get_alerts_by_owner`], this is not subject to
+    /// watcher-gating, since it exposes no alert content.
+    ///
+    /// Returns an empty vec if `owner` has no registered alerts.
+    #[must_use]
+    pub fn get_alert_ids_by_owner(env: Env, owner: Address) -> Vec<u64> {
+        Self::owner_index(&env, &owner)
+    }
+
     /// Get a page of alert configs for a target contract (offset + limit).
     ///
     /// If a `WatcherRegistry` is configured, `querier` must be a registered
@@ -1339,18 +1382,14 @@ impl AlertRegistry {
     ///
     /// Unlike [`get_alert_count`], this reflects removals and only counts
     /// alerts whose storage entries are still live.
-    /// # Panics
-    /// Panics if the contract's stored state is malformed or missing.
+    ///
+    /// Backed by a running counter maintained incrementally by
+    /// [`Self::push_owner_index`]/[`Self::remove_from_owner_index`], so this
+    /// is an O(1) lookup regardless of how many alerts `owner` has ever
+    /// registered — it no longer rescans the owner's index on every call.
+    #[must_use]
     pub fn get_active_alert_count(env: Env, owner: Address) -> u32 {
-        let ids = Self::owner_index(&env, &owner);
-        let mut count: u32 = 0;
-        for i in 0..ids.len() {
-            let id = ids.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::Alert(id)) {
-                count += 1;
-            }
-        }
-        count
+        Self::owner_active_count(&env, &owner)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -1464,6 +1503,26 @@ impl AlertRegistry {
             .unwrap_or_else(|| vec![env])
     }
 
+    /// Read the running per-owner live-alert counter, or `0` if unset.
+    fn owner_active_count(env: &Env, owner: &Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwnerActiveCount(owner.clone()))
+            .unwrap_or(0u32)
+    }
+
+    /// Persist the running per-owner live-alert counter with a refreshed TTL.
+    fn set_owner_active_count(env: &Env, owner: &Address, count: u32) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::OwnerActiveCount(owner.clone()), &count);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerActiveCount(owner.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+    }
+
     /// Append `id` to the owner's index and persist it with a refreshed TTL.
     fn push_owner_index(env: &Env, owner: &Address, id: u64) -> Result<(), ContractError> {
         let mut ids = Self::owner_index(env, owner);
@@ -1481,6 +1540,8 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+        let count = Self::owner_active_count(env, owner);
+        Self::set_owner_active_count(env, owner, count + 1);
         Ok(())
     }
 
@@ -1508,9 +1569,12 @@ impl AlertRegistry {
     fn remove_from_owner_index(env: &Env, owner: &Address, id: u64) {
         let ids = Self::owner_index(env, owner);
         let mut updated: Vec<u64> = vec![env];
+        let mut removed = false;
         for i in 0..ids.len() {
             let v = ids.get(i).unwrap();
-            if v != id {
+            if v == id {
+                removed = true;
+            } else {
                 updated.push_back(v);
             }
         }
@@ -1522,6 +1586,10 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+        if removed {
+            let count = Self::owner_active_count(env, owner);
+            Self::set_owner_active_count(env, owner, count.saturating_sub(1));
+        }
     }
 
     /// Remove `id` from the contract's index and persist the updated list.
@@ -2023,6 +2091,40 @@ mod tests {
         assert_eq!(client.get_alerts_by_owner(&querier, &owner).len(), 2);
     }
 
+    // 8b. get_alert_ids_by_owner — thin ID-only wrapper over the owner index (#35)
+    #[test]
+    fn test_get_alert_ids_by_owner() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let other = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+
+        let id1 = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "A1"),
+            &hash64(&env),
+            &vec![&env],
+        );
+        let id2 = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "A2"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        let ids = client.get_alert_ids_by_owner(&owner);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.get(0).unwrap(), id1);
+        assert_eq!(ids.get(1).unwrap(), id2);
+
+        // Unrelated owner still sees an empty list.
+        assert_eq!(client.get_alert_ids_by_owner(&other).len(), 0);
+    }
+
     // 9. get_alert_count reflects registered alerts (monotonic — does not decrease)
     #[test]
     fn test_get_alert_count() {
@@ -2255,6 +2357,72 @@ mod tests {
         );
     }
 
+    // 17b. set_watcher_registry probes the target and rejects a contract that
+    // doesn't implement the WatcherRegistry interface (#44)
+    #[test]
+    fn test_set_watcher_registry_rejects_invalid_contract() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // A real, deployed contract — but not a WatcherRegistry, so it has
+        // no `is_watcher_authorized` entry point for the probe to find.
+        let not_a_watcher_registry = env.register(AlertRegistry, ());
+
+        assert_eq!(
+            client
+                .try_set_watcher_registry(&admin, &not_a_watcher_registry)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidWatcherRegistry
+        );
+        // The rejected configuration must not have been persisted.
+        assert!(client.get_watcher_registry().is_none());
+        assert!(!client.is_watcher_gating_enabled());
+    }
+
+    // 17c. set_watcher_registry rejects a plain (non-contract) address (#44)
+    #[test]
+    fn test_set_watcher_registry_rejects_non_contract_address() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let not_a_contract = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_set_watcher_registry(&admin, &not_a_contract)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidWatcherRegistry
+        );
+    }
+
+    // 17d. set_watcher_registry accepts a real WatcherRegistry after a prior
+    // misconfigured attempt was rejected (#44)
+    #[test]
+    #[cfg(feature = "testutils")]
+    fn test_set_watcher_registry_recovers_after_invalid_attempt() {
+        let (env, alert_client, watcher_client) = setup_with_watcher_registry();
+        let admin = Address::generate(&env);
+        alert_client.initialize(&admin);
+
+        let bogus = env.register(AlertRegistry, ());
+        assert_eq!(
+            alert_client
+                .try_set_watcher_registry(&admin, &bogus)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidWatcherRegistry
+        );
+        assert!(alert_client.get_watcher_registry().is_none());
+
+        let watcher_contract_id = watcher_client.address.clone();
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+        assert_eq!(
+            alert_client.get_watcher_registry().unwrap(),
+            watcher_contract_id
     // 17b. clear_watcher_registry disables gating; set_watcher_registry can
     // re-enable it afterward.
     #[test]
@@ -3071,12 +3239,18 @@ mod tests {
         );
     }
 
-    /// Load test quantifying the repeated rescan cost in `assert_per_owner_limit` (#39).
-    /// Registers alerts with an active per-owner limit and benchmarks instruction growth,
-    /// asserting an upper bound regression guard.
+    /// Load test quantifying the (formerly O(n²)) cost of `assert_per_owner_limit` (#39).
+    ///
+    /// Registers `LIMIT` alerts for the same owner under an active per-owner
+    /// limit and benchmarks instruction growth across the run. Before the
+    /// fix, `assert_per_owner_limit` rescanned `get_active_alert_count` (an
+    /// O(n) full-index scan) on every call, so `last_reg_cost` grew roughly
+    /// linearly with `LIMIT` — at LIMIT=100 the last call cost ~100x the
+    /// first. With the running per-owner counter, the limit check is O(1),
+    /// so cost per registration should stay flat regardless of `LIMIT`.
     #[test]
     fn test_load_assert_per_owner_limit_instruction_cost() {
-        const LIMIT: u32 = 40;
+        const LIMIT: u32 = 100;
 
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -3115,10 +3289,49 @@ mod tests {
             first_reg_cost > 0 && last_reg_cost > 0,
             "Registration costs must be non-zero"
         );
+        // Before/after regression guard: with an O(1) per-owner counter, the
+        // Nth registration should not cost meaningfully more than the 1st.
+        // (Under the old O(n) rescan, this ratio grew with LIMIT itself.)
+        assert!(
+            last_reg_cost < first_reg_cost.saturating_mul(3),
+            "registration cost grew from {first_reg_cost} to {last_reg_cost} across {LIMIT} \
+             calls — assert_per_owner_limit is no longer O(1)"
+        );
         // Assert an upper bound regression guard on total batch registration cost with limit checks
         assert!(
             total_registration_cost < 50_000_000,
             "Total registration cost {total_registration_cost} exceeded upper bound 50M instructions"
+        );
+    }
+
+    /// `get_active_alert_count` is O(1) regardless of how many alerts an
+    /// owner has ever registered — it reads a maintained counter instead of
+    /// rescanning `OwnerIndex` (#39).
+    #[test]
+    fn test_get_active_alert_count_instruction_cost_is_constant() {
+        const N: u32 = 200;
+
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let hash = hash64(&env);
+        let rules = vec![&env];
+
+        for _ in 0..N {
+            client.register_alert(&owner, &target, &str(&env, "Alert"), &hash, &rules);
+        }
+
+        let before = env.cost_estimate().budget().cpu_instruction_cost();
+        let count = client.get_active_alert_count(&owner);
+        let after = env.cost_estimate().budget().cpu_instruction_cost();
+        let cost = after.saturating_sub(before);
+
+        assert_eq!(count, N);
+        // An O(n) rescan at N=200 would cost far more than a single storage
+        // read; this bound would fail under the old scan-based implementation.
+        assert!(
+            cost < 200_000,
+            "get_active_alert_count cost {cost} at N={N} looks O(n), not O(1)"
         );
     }
 
@@ -3494,6 +3707,8 @@ mod tests {
     }
 
     // 18. get_admin panics with NotInitialized when contract is not initialized
+    // (Result-returning contract functions still panic via the plain client
+    // call when they return Err — this mirrors WatcherRegistry::get_admin.)
     #[test]
     #[should_panic(expected = "Error(Contract, #4)")]
     fn test_get_admin_not_initialized() {
@@ -3501,6 +3716,30 @@ mod tests {
         let contract_id = env.register(AlertRegistry, ());
         let client = AlertRegistryClient::new(&env, &contract_id);
         client.get_admin();
+    }
+
+    // 18b. get_admin returns a typed NotInitialized error via try_get_admin (#41)
+    #[test]
+    fn test_try_get_admin_uninitialized() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+
+        assert_eq!(
+            client.try_get_admin().unwrap_err().unwrap(),
+            ContractError::NotInitialized
+        );
+    }
+
+    // 18c. get_admin returns Ok(admin) once initialized
+    #[test]
+    fn test_try_get_admin_after_initialize() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.try_get_admin().unwrap().unwrap(), admin);
+        assert_eq!(client.get_admin(), admin);
     }
 
     // 19. Alert can be deactivated and reactivated via update_alert

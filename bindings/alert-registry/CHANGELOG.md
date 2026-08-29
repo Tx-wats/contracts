@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `getAlertIdsByOwner({ owner })` for fetching just the owner's alert IDs without the full configs.
 - Type declarations and client methods for two-phase webhook rotation:
   - `proposeWebhook({ caller, id, new_webhook_hash })`
   - `confirmWebhook({ caller, id })`
@@ -16,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getAlertsModifiedSince({ since })` for incremental alert synchronizations.
 - `getContractAlertsPaginated({ querier, target_contract, offset, limit })` and `getAlertsByOwnerPaginated({ querier, owner, offset, limit })`.
 - Vitest unit tests covering parameter encoding and method bindings.
+
+### Changed
+- `getAdmin()` now surfaces `NotInitialized` as a typed contract error instead of an untyped panic, matching `WatcherRegistry`'s `getAdmin()` convention.
+- `setWatcherRegistry({ admin, watcher_registry })` now probes the target contract and rejects a misconfigured address with `InvalidWatcherRegistry` at call time instead of leaving gating silently broken until the next read query.
 
 ## [0.1.0] - 2025-05-28
 
