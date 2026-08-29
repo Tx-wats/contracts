@@ -61,6 +61,10 @@ jobs:
       - name: Check events documentation
         run: bash scripts/check-events-doc.sh
 
+      # Issue #104 — Shell script linting
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh
+
   # Issue #105 — Dependency vulnerability scanning.
   #
   # cargo-audit's current release needs a newer rustc than the toolchain pinned
