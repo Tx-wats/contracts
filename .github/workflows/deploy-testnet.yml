@@ -16,7 +16,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
       # read rust-toolchain.toml. Parse the pin so that file stays the one source
@@ -92,7 +92,7 @@ jobs:
           EOF
 
       - name: Create Pull Request with updated DEPLOYMENTS.md
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           commit-message: "chore: update DEPLOYMENTS.md for ${{ github.ref_name }}"
           branch: "deploy/update-deployments-${{ github.ref_name }}"
