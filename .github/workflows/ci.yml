@@ -27,7 +27,7 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: wasm32-unknown-unknown
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -60,6 +60,20 @@ jobs:
       # Issue #111 — Verify events documentation matches source emissions
       - name: Check events documentation
         run: bash scripts/check-events-doc.sh
+
+      # Issue #103 — Code coverage reporting
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate code coverage
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   # Issue #105 — Dependency vulnerability scanning.
   #
