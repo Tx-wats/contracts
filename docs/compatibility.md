@@ -59,5 +59,42 @@ When preparing a new release tag:
    ```
 3. [ ] **Sister Repo Integration:** Run integration and end-to-end tests in `stellar-txwatch-core` and `stellar-txwatch-web` against the newly built WASM contracts.
 4. [ ] **Update Compatibility Matrix:** Add or update the row for the target release tag in both `docs/compatibility.md` and `README.md`.
-5. [ ] **Update Changelog:** Update `CHANGELOG.md` with version notes and link definitions.
-6. [ ] **Tag & Release:** Push the release tag (e.g. `v0.1.0`) to trigger GitHub Actions publishing for ABIs and npm bindings.
+5. [ ] **Update Changelogs:**
+   - Update root `CHANGELOG.md` with monorepo and contract changes.
+   - Update `bindings/alert-registry/CHANGELOG.md` with package-specific changes and bump `package.json` version.
+   - Update `bindings/watcher-registry/CHANGELOG.md` with package-specific changes and bump `package.json` version.
+6. [ ] **Tag & Release:** Push the release tag (e.g. `v0.1.0`) to trigger GitHub Actions publishing for ABIs and npm bindings (`@tx-wat/alert-registry-bindings` and `@tx-wat/watcher-registry`).
+
+---
+
+## Bindings Package Release Process
+
+Each bindings package (`bindings/alert-registry/` and `bindings/watcher-registry/`) is published to npm independently and maintains its own `CHANGELOG.md`.
+
+When modifying contracts or releasing a new bindings version:
+
+1. **Regenerate Bindings**:
+   ```bash
+   # Re-generate bindings from compiled WASM
+   stellar contract bindings typescript \
+     --wasm target/wasm32-unknown-unknown/release/alert_registry.wasm \
+     --output-dir bindings/alert-registry \
+     --overwrite
+
+   stellar contract bindings typescript \
+     --wasm target/wasm32-unknown-unknown/release/watcher_registry.wasm \
+     --output-dir bindings/watcher-registry \
+     --overwrite
+   ```
+
+2. **Update Package Changelogs**:
+   - For `bindings/alert-registry/CHANGELOG.md`: document any new/updated methods, types, or breaking interface changes for `@tx-wat/alert-registry-bindings`.
+   - For `bindings/watcher-registry/CHANGELOG.md`: document any changes for `@tx-wat/watcher-registry`.
+   - Move entries from `## [Unreleased]` to `## [<version>] - YYYY-MM-DD` and update comparison links at the bottom.
+
+3. **Verify Package Tests**:
+   ```bash
+   cd bindings/alert-registry && npm test
+   cd bindings/watcher-registry && npm test
+   ```
+

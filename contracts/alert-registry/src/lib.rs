@@ -20,6 +20,9 @@ contractmeta!(key = "Version", val = "0.1.0");
 #[path = "tests.rs"]
 mod contract_tests;
 
+#[cfg(test)]
+mod proptests;
+
 // ── TTL constants ─────────────────────────────────────────────────────────────
 
 /// Default TTL applied to persistent storage entries on every write.
