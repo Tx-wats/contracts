@@ -2,6 +2,8 @@
 
 Contract that stores authorized watcher node addresses on-chain. Only registered watchers (trusted instances of `stellar-txwatch-core`) may interact with the alert registry.
 
+The watcher set is capped at `MAX_WATCHERS` (1,000) and the admin set at `MAX_ADMINS` (50). `register_watcher`/`add_admin` return a typed error (`TooManyWatchers`/`TooManyAdmins`) once the cap is reached.
+
 ---
 
 ## Functions

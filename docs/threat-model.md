@@ -30,6 +30,7 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 - **Admin hijacking via direct call.** `propose_admin_transfer` requires the current admin's auth signature, preventing an attacker from reassigning admin without controlling the current admin key.
 - **Locking the contract via a typo'd or unowned new admin.** Admin transfer is a two-step `propose_admin_transfer` / `accept_admin_transfer` flow — the proposed `new_admin` must sign `accept_admin_transfer` themselves before the admin set is replaced, so a typo'd or unowned address cannot silently take over (or permanently lock) the contract. A pending proposal can be cancelled by any admin via `cancel_admin_transfer`.
 - **Replay attacks.** Stellar's sequence number mechanism prevents replaying previously valid transactions.
+- **Unbounded registry growth.** `register_watcher` and `add_admin` enforce `MAX_WATCHERS`/`MAX_ADMINS` caps, bounding the worst-case cost of operations (like `clear_all_watchers`) that iterate the full list.
 
 ---
 
@@ -78,3 +79,4 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 | Admin key compromise protection | ❌ |
 | Off-chain watcher behavior enforcement | ❌ |
 | Multi-sig / time-lock on admin actions | ❌ |
+| Bounded watcher/admin set size | ✅ (`MAX_WATCHERS`/`MAX_ADMINS`) |

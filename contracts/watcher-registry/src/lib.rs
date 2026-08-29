@@ -14,6 +14,11 @@ use soroban_sdk::{
 contractmeta!(key = "Name", val = "WatcherRegistry");
 contractmeta!(key = "Version", val = "0.1.0");
 
+/// Maximum number of watchers that may be registered at once.
+const MAX_WATCHERS: u32 = 1_000;
+/// Maximum number of admins that may be in the admin set at once.
+const MAX_ADMINS: u32 = 50;
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -29,6 +34,10 @@ pub enum ContractError {
     WatcherNotFound = 5,
     /// Returned when accepting/cancelling a transfer but none is pending.
     NoPendingTransfer = 6,
+    /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
+    TooManyWatchers = 7,
+    /// Returned when adding an admin would exceed [`MAX_ADMINS`].
+    TooManyAdmins = 8,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -94,6 +103,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TooManyAdmins`] if the admin set is already at [`MAX_ADMINS`].
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), ContractError> {
@@ -105,6 +115,9 @@ impl WatcherRegistry {
             if admins.get(i).unwrap() == new_admin {
                 return Ok(()); // already an admin, idempotent
             }
+        }
+        if admins.len() >= MAX_ADMINS {
+            return Err(ContractError::TooManyAdmins);
         }
         admins.push_back(new_admin.clone());
         env.storage().instance().set(&DataKey::Admins, &admins);
@@ -269,6 +282,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TooManyWatchers`] if the watcher set is already at [`MAX_WATCHERS`].
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn register_watcher(
@@ -284,6 +298,9 @@ impl WatcherRegistry {
             if watchers.get(i).unwrap() == watcher {
                 return Ok(()); // already registered, idempotent
             }
+        }
+        if watchers.len() >= MAX_WATCHERS {
+            return Err(ContractError::TooManyWatchers);
         }
         watchers.push_back(watcher.clone());
         env.storage().instance().set(&DataKey::Watchers, &watchers);
@@ -1492,6 +1509,45 @@ mod tests {
                 .unwrap(),
             ContractError::Unauthorized
         );
+    }
+
+    // ── MAX_WATCHERS / MAX_ADMINS cap tests ──────────────────────────────────
+
+    // 38. register_watcher rejects registration past MAX_WATCHERS
+    #[test]
+    fn test_register_watcher_cap_enforced() {
+        let (env, admin, client) = setup();
+        for _ in 0..MAX_WATCHERS {
+            client.register_watcher(&admin, &Address::generate(&env));
+        }
+
+        assert_eq!(
+            client
+                .try_register_watcher(&admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TooManyWatchers
+        );
+        assert_eq!(client.get_watcher_count(), MAX_WATCHERS);
+    }
+
+    // 39. add_admin rejects registration past MAX_ADMINS
+    #[test]
+    fn test_add_admin_cap_enforced() {
+        let (env, admin, client) = setup();
+        // admin from setup() already counts as 1
+        for _ in 0..(MAX_ADMINS - 1) {
+            client.add_admin(&admin, &Address::generate(&env));
+        }
+
+        assert_eq!(
+            client
+                .try_add_admin(&admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TooManyAdmins
+        );
+        assert_eq!(client.get_admins().len(), MAX_ADMINS);
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
