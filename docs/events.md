@@ -324,6 +324,68 @@ Emitted when the watcher registry admin role is transferred.
 
 ---
 
+### `admin.timelock`
+
+Emitted when the timelock delay applied to sensitive admin actions is changed.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("timelock")` |
+| Data | `(caller: Address, delay_ledgers: u32)` |
+
+**Status:** ✅ implemented (`set_timelock_delay`, `execute_admin_action`)
+
+---
+
+### `admin.propose`
+
+Emitted when a sensitive admin action is queued behind the timelock.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("propose")` |
+| Data | `(proposer: Address, ready_at: u32)` |
+
+**Status:** ✅ implemented (`propose_admin_action`)
+
+> `ready_at` is the ledger sequence at or after which the action may be
+> executed. Co-admins should watch this event and cancel anything they did not
+> expect before that ledger is reached.
+
+---
+
+### `admin.cancel`
+
+Emitted when a queued admin action is cancelled before execution.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("cancel")` |
+| Data | `(caller: Address)` |
+
+**Status:** ✅ implemented (`cancel_admin_action`)
+
+---
+
+### `admin.execute`
+
+Emitted when a queued admin action is executed after its delay has elapsed.
+The action's own event (`admin.add`, `admin.transfer`, `watcher.remove`, …) is
+emitted alongside it.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("execute")` |
+| Data | `(caller: Address)` |
+
+**Status:** ✅ implemented (`execute_admin_action`)
+
+---
+
 ## Implementation Notes
 
 - All topics use `symbol_short!` macros, which accept strings up to 9 characters.
