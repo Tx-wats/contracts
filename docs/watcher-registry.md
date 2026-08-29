@@ -100,22 +100,58 @@ This function provides an efficient way to get the count of authorized watchers 
 
 ---
 
-### `transfer_admin`
+### `propose_admin_transfer`
 
-Transfers the admin role to a new address.
+Proposes transferring the admin role to a new address. Does **not** take effect until `new_admin` calls `accept_admin_transfer` with their own signature — this two-step flow prevents a typo'd or unowned `new_admin` from permanently locking the contract. Replaces any previously pending proposal.
 
-**Requires auth:** `admin`
+**Requires auth:** `admin` (must be an existing admin)
 
 **Parameters**
 
 | Name | Type | Description |
 |---|---|---|
-| `admin` | `Address` | Current admin |
-| `new_admin` | `Address` | Address to become the new admin |
+| `admin` | `Address` | Current admin proposing the transfer |
+| `new_admin` | `Address` | Address proposed to become the new admin |
 
 **Returns:** nothing
 
-**Panics:** `"unauthorized"` if `admin` does not match the stored admin.
+**Errors:** `Unauthorized` if `admin` is not an existing admin; `NotInitialized` if the contract has not been initialized.
+
+---
+
+### `accept_admin_transfer`
+
+Accepts a pending admin transfer, requiring `new_admin`'s own signature. Replaces the entire admin set with `new_admin`.
+
+**Requires auth:** `new_admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `new_admin` | `Address` | Address accepting the proposed transfer |
+
+**Returns:** nothing
+
+**Errors:** `NoPendingTransfer` if no transfer is pending, or the pending proposal names a different address.
+
+---
+
+### `cancel_admin_transfer`
+
+Cancels a pending admin transfer.
+
+**Requires auth:** `admin` (must be an existing admin)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Existing admin cancelling the proposal |
+
+**Returns:** nothing
+
+**Errors:** `Unauthorized` if `admin` is not an existing admin; `NoPendingTransfer` if no transfer is pending.
 
 ---
 

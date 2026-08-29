@@ -27,6 +27,8 @@ pub enum ContractError {
     LastAdmin = 4,
     /// Returned when the specified watcher is not currently registered.
     WatcherNotFound = 5,
+    /// Returned when accepting/cancelling a transfer but none is pending.
+    NoPendingTransfer = 6,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -38,6 +40,10 @@ pub enum DataKey {
     Admins,
     /// Stores the `Vec<Address>` of authorized watcher nodes.
     Watchers,
+    /// Stores the `Address` proposed as the new admin set by
+    /// [`WatcherRegistry::propose_admin_transfer`], pending its own
+    /// acceptance via [`WatcherRegistry::accept_admin_transfer`].
+    PendingAdminTransfer,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -155,13 +161,16 @@ impl WatcherRegistry {
         Ok(())
     }
 
-    /// Transfer the sole admin role to a new address (any existing admin may call this).
+    /// Propose transferring the sole admin role to a new address (any existing
+    /// admin may call this). The transfer does not take effect until
+    /// `new_admin` calls [`accept_admin_transfer`] with their own signature —
+    /// this prevents a typo'd or unowned address from permanently locking the
+    /// contract.
     ///
-    /// This replaces the **entire** admin set with a single new admin. Use
+    /// This replaces any previously pending proposal. This replaces the
+    /// **entire** admin set with a single new admin once accepted. Use
     /// [`add_admin`] + [`remove_admin`] if you want to rotate one member of a
     /// multi-admin set without losing the others.
-    ///
-    /// Emits an `("admin", "transfer")` event recording both the old and new admin.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -169,7 +178,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
-    pub fn transfer_admin(
+    pub fn propose_admin_transfer(
         env: Env,
         admin: Address,
         new_admin: Address,
@@ -177,13 +186,78 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
 
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminTransfer, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("propose")),
+            (admin, new_admin),
+        );
+
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer proposed via [`propose_admin_transfer`].
+    ///
+    /// Requires `new_admin`'s own signature, proving key control before the
+    /// admin set is replaced. Emits an `("admin", "transfer")` event.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `new_admin`.
+    /// # Errors
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending,
+    /// or the pending proposal names a different address.
+    pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminTransfer)
+            .ok_or(ContractError::NoPendingTransfer)?;
+        if pending != new_admin {
+            return Err(ContractError::NoPendingTransfer);
+        }
+
         let new_admins: Vec<Address> = vec![&env, new_admin.clone()];
         env.storage().instance().set(&DataKey::Admins, &new_admins);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
 
-        // Emit an auditable on-chain event recording the full admin transfer.
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("transfer")),
-            (admin, new_admin),
+            new_admin,
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending admin transfer proposed via [`propose_admin_transfer`]
+    /// (any existing admin may call this).
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        if !env.storage().instance().has(&DataKey::PendingAdminTransfer) {
+            return Err(ContractError::NoPendingTransfer);
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("cancel")),
+            admin,
         );
 
         Ok(())
@@ -557,7 +631,7 @@ mod tests {
         assert!(!client.is_watcher_authorized(&watcher));
     }
 
-    // 3. Happy path — transfer admin (replaces entire admin set)
+    // 3. Happy path — two-step transfer admin (replaces entire admin set)
     #[test]
     fn test_transfer_admin() {
         let (env, admin, client) = setup();
@@ -565,7 +639,13 @@ mod tests {
         let watcher = Address::generate(&env);
 
         assert_eq!(
-            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            client.try_accept_admin_transfer(&new_admin).unwrap(),
             Ok(())
         );
         // new admin can register watchers
@@ -576,13 +656,14 @@ mod tests {
         assert!(client.is_watcher_authorized(&watcher));
     }
 
-    // 3b. transfer_admin emits an event
+    // 3b. accept_admin_transfer emits an event
     #[test]
     fn test_transfer_admin_emits_event() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.accept_admin_transfer(&new_admin);
 
         let events = env.events().all();
         // Find the transfer event
@@ -803,13 +884,131 @@ mod tests {
         let new_admin = Address::generate(&env);
         let watcher = Address::generate(&env);
 
+        client.propose_admin_transfer(&admin, &new_admin);
         assert_eq!(
-            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            client.try_accept_admin_transfer(&new_admin).unwrap(),
             Ok(())
         );
         assert_eq!(
             client
                 .try_register_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 15b. transfer does not take effect until the new admin accepts
+    #[test]
+    fn test_transfer_not_effective_until_accepted() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let watcher = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        // old admin can still act — transfer is only proposed, not accepted
+        assert_eq!(
+            client.try_register_watcher(&admin, &watcher).unwrap(),
+            Ok(())
+        );
+        // new admin cannot yet act
+        assert_eq!(
+            client
+                .try_register_watcher(&new_admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 15c. a mismatched address cannot accept someone else's pending transfer
+    #[test]
+    fn test_accept_admin_transfer_wrong_address() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // 15d. accepting with no pending proposal fails
+    #[test]
+    fn test_accept_admin_transfer_none_pending() {
+        let (env, _admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // 15e. a pending transfer can be cancelled by an admin
+    #[test]
+    fn test_cancel_admin_transfer() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(client.try_cancel_admin_transfer(&admin).unwrap(), Ok(()));
+
+        // the cancelled proposal can no longer be accepted
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // old admin retains control
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // 15f. cancelling with no pending proposal fails
+    #[test]
+    fn test_cancel_admin_transfer_none_pending() {
+        let (_env, admin, client) = setup();
+
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // 15g. non-admin cannot propose or cancel an admin transfer
+    #[test]
+    fn test_propose_and_cancel_admin_transfer_unauthorized() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&attacker, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&attacker)
                 .unwrap_err()
                 .unwrap(),
             ContractError::Unauthorized
@@ -1153,7 +1352,22 @@ mod tests {
         env.mock_all_auths();
         client.initialize(&admin);
         env.set_auths(&[]);
-        client.transfer_admin(&admin, &new_admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_accept_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(WatcherRegistry, ());
+        let client = WatcherRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        env.set_auths(&[]);
+        client.accept_admin_transfer(&new_admin);
     }
 
     #[test]

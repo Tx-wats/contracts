@@ -27,7 +27,8 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 ## What the Contract Protects Against
 
 - **Unauthorized watcher registration.** Only the current admin can call `register_watcher` or `remove_watcher`. Any unsigned or incorrectly signed call is rejected at the protocol level.
-- **Admin hijacking via direct call.** `transfer_admin` requires the current admin's auth signature, preventing an attacker from reassigning admin without controlling the current admin key.
+- **Admin hijacking via direct call.** `propose_admin_transfer` requires the current admin's auth signature, preventing an attacker from reassigning admin without controlling the current admin key.
+- **Locking the contract via a typo'd or unowned new admin.** Admin transfer is a two-step `propose_admin_transfer` / `accept_admin_transfer` flow — the proposed `new_admin` must sign `accept_admin_transfer` themselves before the admin set is replaced, so a typo'd or unowned address cannot silently take over (or permanently lock) the contract. A pending proposal can be cancelled by any admin via `cancel_admin_transfer`.
 - **Replay attacks.** Stellar's sequence number mechanism prevents replaying previously valid transactions.
 
 ---
@@ -60,6 +61,10 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 **Vector:** Admin calls `remove_watcher` for every registered address.  
 **Outcome:** No watchers remain; the monitoring system stops functioning. **Mitigation outside contract scope** — operational procedures and alerts on registry changes.
 
+### 5. Admin transfers to a typo'd or unowned address
+**Vector:** Admin calls `propose_admin_transfer` with an address they mistyped or don't control.  
+**Outcome:** No state change to the admin set — the proposal only takes effect once the named `new_admin` signs `accept_admin_transfer`. An unowned or unaccepted proposal can be cancelled by any existing admin via `cancel_admin_transfer`, so the contract is never locked out.
+
 ---
 
 ## Security Properties Summary
@@ -67,7 +72,8 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 | Property | Enforced by contract |
 |---|---|
 | Only admin can modify the registry | ✅ |
-| Admin transfer requires current admin auth | ✅ |
+| Admin transfer requires current admin auth to propose | ✅ |
+| Admin transfer requires new admin's own signature to complete | ✅ |
 | Replay protection | ✅ (Stellar protocol) |
 | Admin key compromise protection | ❌ |
 | Off-chain watcher behavior enforcement | ❌ |
