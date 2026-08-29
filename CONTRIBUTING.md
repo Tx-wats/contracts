@@ -140,6 +140,11 @@ fn main() {
 2. **Deployment Script:** Update `scripts/deploy.sh` to include the contract in the optimization loop (`stellar contract optimize`) and add deployment/initialization commands for testnet and mainnet.
 3. **Documentation:** Add a dedicated contract reference under `docs/<contract-name>.md`.
 
+## Documentation Guidelines
+
+- **`docs/` directory:** Reserved strictly for durable, evergreen reference material (e.g., architecture guides, storage layouts, event catalogs, protocol specifications, API references).
+- **PR summaries & changelog notes:** Do not commit temporary per-PR summaries or change descriptions directly into `docs/`. PR details belong in GitHub pull request descriptions, and notable changes should be added to `CHANGELOG.md`.
+
 ## Sister Repos
  
 - **Core engine:** https://github.com/Tx-wat/stellar-txwatch-core
