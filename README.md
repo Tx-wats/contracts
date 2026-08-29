@@ -59,9 +59,12 @@ flowchart TD
 
     W -->|"is_authorized(watcher)"| WR
     W -->|"get_alerts_for_contract(target)"| AR
+    AR -->|"is_watcher_authorized(querier)\n(on-chain, when gating enabled)"| WR
     Horizon["Horizon API"] -->|"GET /accounts/{id}/transactions"| W
     W -->|"POST webhook URL"| Endpoint["Downstream\nIntegration"]
 ```
+
+> `AlertRegistry`'s call into `WatcherRegistry` (via `assert_watcher_if_configured`) is optional: it only fires on gated read queries once an admin has pointed `AlertRegistry` at a `WatcherRegistry` contract with `set_watcher_registry`. Until then, `AlertRegistry` never calls `WatcherRegistry` and reads stay open.
 
 **Data flow:**
 
@@ -69,6 +72,7 @@ flowchart TD
 2. Authorized watcher nodes are recorded in `WatcherRegistry` by an admin.
 3. A watcher node polls Horizon for transaction activity, fetches matching alert configs from `AlertRegistry`, and checks whether any rule matches.
 4. On a match the watcher fires the configured webhook so downstream integrations can react.
+5. If `AlertRegistry` has been configured with a `WatcherRegistry` address (optional, via `set_watcher_registry`), each gated read from step 3 makes its own on-chain cross-contract call into `WatcherRegistry::is_watcher_authorized` before returning data — independent of the watcher node's own off-chain `is_authorized` check in step 2.
 
 ---
 
