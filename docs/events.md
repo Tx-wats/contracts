@@ -1,11 +1,13 @@
 # Event Reference
 
-This document specifies the planned on-chain events emitted by both contracts.
+This document specifies the on-chain events emitted by both contracts.
 Events follow the Soroban two-topic convention: `(category, action)`.
 
-> **Status:** `register_alert` and `remove_alert` already emit events.
-> All other entries below are **planned** — they define the topic and data
-> shapes that implementors MUST follow when wiring up the remaining events.
+> **Status:** each entry below carries its own status line. Most events are now
+> implemented; the remaining `🔲 planned` entries define the topic and data
+> shapes that implementors MUST follow when the corresponding function is wired
+> up to emit. The per-entry status line is authoritative — this table is
+> audited against the contract source (see issue #110 for the automated check).
 
 ---
 
@@ -212,6 +214,10 @@ Emitted when an existing watcher address is atomically replaced with a new watch
 | Topic 0 | `Symbol("watcher")` |
 | Topic 1 | `Symbol("replace")` |
 | Data | `(old_watcher: Address, new_watcher: Address)` |
+
+> A self-replace (`old_watcher == new_watcher`) is a no-op: the address stays
+> authorized throughout, so neither `watcher.replace` nor `watcher.remove` is
+> emitted.
 
 **Status:** ✅ implemented (`replace_watcher`)
 

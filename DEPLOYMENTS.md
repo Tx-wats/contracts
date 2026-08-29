@@ -32,7 +32,10 @@ rotation emitting `alert.wh_prop` and `alert.wh_conf`.
 | Network Passphrase | `Test SDF Network ; September 2015` |
 | Horizon URL | `https://horizon-testnet.stellar.org` |
 
-> Testnet resets periodically. Re-deploy with `bash scripts/deploy.sh` and update the addresses above after each reset.
+> **Periodic Liveness Check:** Testnet resets wipe contract state. Run `./scripts/check-testnet-deployments.sh` to check liveness.
+> A daily CI job automatically validates that the addresses above are still live.
+> For reset recovery instructions, see the [Deployment & Testnet Liveness Guide](docs/deployment-guide.md).
+
 
 ---
 
