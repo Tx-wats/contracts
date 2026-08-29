@@ -110,6 +110,25 @@ pub struct AlertConfig {
     pub active: bool,
 }
 
+/// Input record for [`AlertRegistry::batch_register_alert`].
+///
+/// Mirrors the arguments of [`AlertRegistry::register_alert`] so a batch call
+/// can register alerts for multiple owners/targets in one transaction.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AlertInput {
+    /// Address that will own and control this alert.
+    pub owner: Address,
+    /// Contract address to watch.
+    pub target_contract: Address,
+    /// Human-readable name for the alert.
+    pub label: String,
+    /// SHA-256 hash of the destination webhook URL.
+    pub webhook_hash: String,
+    /// Rule identifiers that should trigger the alert.
+    pub rules: Vec<String>,
+}
+
 // ── Contract ─────────────────────────────────────────────────────────────────
 
 /// On-chain registry for alert configurations.
@@ -307,7 +326,10 @@ impl AlertRegistry {
     ///
     /// Once set, `get_alerts_for_contract`, `get_alerts_by_owner`, and their
     /// paginated variants will cross-call `WatcherRegistry::is_watcher_authorized`
-    /// before returning data. Pass the zero address to disable gating.
+    /// before returning data. Any address configured here — including a
+    /// zero/default `Address` — is treated as a real registry and will be
+    /// cross-called. Use [`AlertRegistry::clear_watcher_registry`] to disable
+    /// gating.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
@@ -325,6 +347,26 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
+        Ok(())
+    }
+
+    /// Clear the configured `WatcherRegistry` contract address, disabling
+    /// watcher-gating on the read queries (admin only).
+    ///
+    /// After this call, `get_alerts_for_contract`, `get_alerts_by_owner`, and
+    /// their paginated variants no longer cross-call `WatcherRegistry` and
+    /// behave as if gating had never been configured. Call
+    /// [`AlertRegistry::set_watcher_registry`] again to re-enable gating.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn clear_watcher_registry(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        env.storage().instance().remove(&symbol_short!("WATCHREG"));
         Ok(())
     }
 
@@ -797,6 +839,180 @@ impl AlertRegistry {
             .ok_or(ContractError::AlertNotFound)?;
 
         Self::remove_alert_record(&env, &config, config_id, &admin);
+        Ok(())
+    }
+
+    /// Deactivate an alert without deleting its record (admin only).
+    ///
+    /// Unlike [`Self::remove_alert_by_admin`], the alert config and its
+    /// indexes are left intact — only the `active` flag is cleared — so
+    /// history is preserved for e.g. spam/abuse moderation.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("admin_off"))` with data `(id: u64, admin: Address)`.
+    pub fn deactivate_alert_by_admin(
+        env: Env,
+        admin: Address,
+        config_id: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        let mut config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+
+        config.active = false;
+        config.updated_at = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Alert(config_id), &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AlertActive(config_id), &false);
+        env.storage().persistent().extend_ttl(
+            &DataKey::AlertActive(config_id),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("admin_off")),
+            (config_id, admin),
+        );
+        Ok(())
+    }
+
+    /// Transfer ownership of an alert to a new address.
+    ///
+    /// Updates the [`AlertConfig::owner`] field and migrates the alert ID from
+    /// the old owner's [`DataKey::OwnerIndex`] to the new owner's.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be the
+    /// current owner of the alert.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the current owner.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("transfer"))` with data
+    /// `(id: u64, old_owner: Address, new_owner: Address)`.
+    pub fn transfer_alert_ownership(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        new_owner: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+
+        let mut config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+
+        Self::assert_owner(&config, &caller)?;
+
+        let old_owner = config.owner.clone();
+        config.owner = new_owner.clone();
+        config.updated_at = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Alert(config_id), &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+
+        Self::remove_from_owner_index(&env, &old_owner, config_id);
+        Self::push_owner_index(&env, &new_owner, config_id)?;
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("transfer")),
+            (config_id, old_owner, new_owner),
+        );
+        Ok(())
+    }
+
+    /// Register multiple alert configs in a single call.
+    ///
+    /// Each input is validated and authorized exactly as
+    /// [`Self::register_alert`] would, and each successful registration emits
+    /// the same `(Symbol("alert"), Symbol("register"))` event. If any input
+    /// fails validation or authorization, the entire batch (including any
+    /// alerts already registered earlier in the same call) is rolled back,
+    /// since Soroban invocations are atomic.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from each input's `owner`.
+    ///
+    /// # Returns
+    /// The new alerts' numeric IDs, in the same order as `inputs`.
+    /// # Errors
+    /// Returns the same errors as [`Self::register_alert`] for the failing item.
+    pub fn batch_register_alert(
+        env: Env,
+        inputs: Vec<AlertInput>,
+    ) -> Result<Vec<u64>, ContractError> {
+        let mut ids: Vec<u64> = vec![&env];
+        for i in 0..inputs.len() {
+            let input = inputs.get(i).unwrap();
+            let id = Self::register_alert(
+                env.clone(),
+                input.owner,
+                input.target_contract,
+                input.label,
+                input.webhook_hash,
+                input.rules,
+            )?;
+            ids.push_back(id);
+        }
+        Ok(ids)
+    }
+
+    /// Remove multiple alert configs owned by `caller` in a single call.
+    ///
+    /// Each ID is validated and authorized exactly as [`Self::remove_alert`]
+    /// would, and each successful removal emits the same
+    /// `(Symbol("alert"), Symbol("remove"))` event. If any ID does not exist
+    /// or is not owned by `caller`, the entire batch is rolled back, since
+    /// Soroban invocations are atomic.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if any `config_ids` entry does not identify an existing alert.
+    /// Returns [`ContractError::Unauthorized`] if `caller` does not own every alert in `config_ids`.
+    pub fn batch_remove_alert(
+        env: Env,
+        caller: Address,
+        config_ids: Vec<u64>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+
+        for i in 0..config_ids.len() {
+            let config_id = config_ids.get(i).unwrap();
+            let config: AlertConfig = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Alert(config_id))
+                .ok_or(ContractError::AlertNotFound)?;
+
+            Self::assert_owner(&config, &caller)?;
+            Self::remove_alert_record(&env, &config, config_id, &caller);
+        }
         Ok(())
     }
 
@@ -2036,6 +2252,107 @@ mod tests {
                 .unwrap_err()
                 .unwrap(),
             ContractError::Unauthorized
+        );
+    }
+
+    // 17b. clear_watcher_registry disables gating; set_watcher_registry can
+    // re-enable it afterward.
+    #[test]
+    #[cfg(feature = "testutils")]
+    fn test_clear_watcher_registry_disables_then_reconfigure() {
+        let (env, alert_client, watcher_client) = setup_with_watcher_registry();
+
+        let admin = Address::generate(&env);
+        let watcher = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        watcher_client.initialize(&admin);
+        watcher_client.register_watcher(&admin, &watcher);
+
+        alert_client.initialize(&admin);
+        let watcher_contract_id = watcher_client.address.clone();
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+        assert!(alert_client.is_watcher_gating_enabled());
+
+        alert_client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        // Gating active: unregistered querier is rejected.
+        assert_eq!(
+            alert_client
+                .try_get_alerts_for_contract(&stranger, &target)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAWatcher
+        );
+
+        // Clear gating.
+        alert_client.clear_watcher_registry(&admin);
+        assert!(alert_client.get_watcher_registry().is_none());
+        assert!(!alert_client.is_watcher_gating_enabled());
+
+        // Any querier can now read.
+        assert_eq!(
+            alert_client
+                .get_alerts_for_contract(&stranger, &target)
+                .len(),
+            1
+        );
+
+        // Re-configure gating.
+        alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+        assert!(alert_client.is_watcher_gating_enabled());
+        assert_eq!(
+            alert_client
+                .try_get_alerts_for_contract(&stranger, &target)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAWatcher
+        );
+        assert_eq!(
+            alert_client
+                .get_alerts_for_contract(&watcher, &target)
+                .len(),
+            1
+        );
+    }
+
+    // 17c. clear_watcher_registry rejects non-admin callers.
+    #[test]
+    fn test_clear_watcher_registry_non_admin_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client
+                .try_clear_watcher_registry(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 17d. clear_watcher_registry requires the contract to be initialized.
+    #[test]
+    fn test_clear_watcher_registry_not_initialized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_clear_watcher_registry(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotInitialized
         );
     }
 

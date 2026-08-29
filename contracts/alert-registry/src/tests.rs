@@ -1,3 +1,4 @@
+use crate::AlertInput;
 use crate::AlertRegistry;
 use crate::AlertRegistryClient;
 use crate::ContractError;
@@ -1339,4 +1340,385 @@ fn test_configs_paginated_boundaries() {
 
     let p5 = client.get_alerts_by_owner_paginated(&querier, &owner, &10, &2);
     assert_eq!(p5.len(), 0);
+}
+
+// ── Issue #34 — transfer_alert_ownership ────────────────────────────────
+
+#[test]
+fn test_transfer_alert_ownership_success() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.transfer_alert_ownership(&owner, &id, &new_owner);
+
+    let cfg = client.get_alert(&id).unwrap();
+    assert_eq!(cfg.owner, new_owner);
+
+    // OwnerIndex updated for both the old and new owner.
+    assert_eq!(client.get_alerts_by_owner(&new_owner, &owner).len(), 0);
+    let new_owner_alerts = client.get_alerts_by_owner(&new_owner, &new_owner);
+    assert_eq!(new_owner_alerts.len(), 1);
+    assert_eq!(new_owner_alerts.get(0).unwrap().owner, new_owner);
+}
+
+#[test]
+fn test_transfer_alert_ownership_unauthorized() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_transfer_alert_ownership(&attacker, &id, &new_owner)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+
+    // Ownership and indexes are unchanged.
+    assert_eq!(client.get_alert(&id).unwrap().owner, owner);
+    assert_eq!(client.get_alerts_by_owner(&owner, &owner).len(), 1);
+}
+
+#[test]
+fn test_transfer_alert_ownership_not_found() {
+    let (env, client) = setup();
+    let caller = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    assert_eq!(
+        client
+            .try_transfer_alert_ownership(&caller, &999u64, &new_owner)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertNotFound
+    );
+}
+
+#[test]
+fn test_transfer_alert_ownership_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    assert!(!env.events().all().is_empty());
+}
+
+// ── Issue #36 — deactivate_alert_by_admin ───────────────────────────────
+
+#[test]
+fn test_deactivate_alert_by_admin_success() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.deactivate_alert_by_admin(&admin, &id);
+
+    // Record still exists (not deleted) but is inactive.
+    let cfg = client.get_alert(&id).unwrap();
+    assert!(!cfg.active);
+    assert_eq!(client.get_alert_active(&id), Some(false));
+}
+
+#[test]
+fn test_deactivate_alert_by_admin_unauthorized() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    client.initialize(&admin);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_deactivate_alert_by_admin(&attacker, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+
+    assert!(client.get_alert(&id).unwrap().active);
+}
+
+#[test]
+fn test_deactivate_alert_by_admin_not_found() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    assert_eq!(
+        client
+            .try_deactivate_alert_by_admin(&admin, &999u64)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertNotFound
+    );
+}
+
+#[test]
+fn test_deactivate_alert_by_admin_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert!(!env.events().all().is_empty());
+}
+
+// ── Issue #37 — batch_register_alert / batch_remove_alert ───────────────
+
+fn alert_input(env: &Env, owner: &Address, target: &Address, label: &str) -> AlertInput {
+    AlertInput {
+        owner: owner.clone(),
+        target_contract: target.clone(),
+        label: str(env, label),
+        webhook_hash: hash64(env),
+        rules: vec![env],
+    }
+}
+
+#[test]
+fn test_batch_register_alert_single() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let inputs = vec![&env, alert_input(&env, &owner, &target, "A0")];
+
+    let ids = client.batch_register_alert(&inputs);
+    assert_eq!(ids.len(), 1);
+    assert!(client.get_alert(&ids.get(0).unwrap()).is_some());
+    assert_eq!(client.get_alert_count(), 1);
+}
+
+#[test]
+fn test_batch_register_alert_five() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let mut inputs: Vec<AlertInput> = vec![&env];
+    for _ in 0..5u32 {
+        inputs.push_back(alert_input(&env, &owner, &target, "A"));
+    }
+
+    let ids = client.batch_register_alert(&inputs);
+    assert_eq!(ids.len(), 5);
+    assert_eq!(client.get_alert_count(), 5);
+    assert_eq!(client.get_active_alert_count(&owner), 5);
+}
+
+#[test]
+fn test_batch_register_alert_boundary_size() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let mut inputs: Vec<AlertInput> = vec![&env];
+    for _ in 0..25u32 {
+        inputs.push_back(alert_input(&env, &owner, &target, "A"));
+    }
+
+    let ids = client.batch_register_alert(&inputs);
+    assert_eq!(ids.len(), 25);
+    assert_eq!(client.get_alert_count(), 25);
+    assert_eq!(client.get_active_alert_count(&owner), 25);
+}
+
+#[test]
+fn test_batch_register_alert_rolls_back_on_validation_error() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let mut bad = alert_input(&env, &owner, &target, "Bad");
+    bad.webhook_hash = str(&env, "too-short");
+
+    let inputs = vec![
+        &env,
+        alert_input(&env, &owner, &target, "Good"),
+        bad,
+    ];
+
+    assert_eq!(
+        client
+            .try_batch_register_alert(&inputs)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidWebhookHash
+    );
+    // The whole batch is rolled back, including the earlier valid item.
+    assert_eq!(client.get_alert_count(), 0);
+}
+
+#[test]
+fn test_batch_remove_alert_single() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.batch_remove_alert(&owner, &vec![&env, id]);
+    assert!(client.get_alert(&id).is_none());
+}
+
+#[test]
+fn test_batch_remove_alert_five() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let mut ids: Vec<u64> = vec![&env];
+    for _ in 0..5u32 {
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "A"),
+            &hash64(&env),
+            &vec![&env],
+        );
+        ids.push_back(id);
+    }
+
+    client.batch_remove_alert(&owner, &ids);
+    for i in 0..ids.len() {
+        assert!(client.get_alert(&ids.get(i).unwrap()).is_none());
+    }
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}
+
+#[test]
+fn test_batch_remove_alert_boundary_size() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let mut ids: Vec<u64> = vec![&env];
+    for _ in 0..25u32 {
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "A"),
+            &hash64(&env),
+            &vec![&env],
+        );
+        ids.push_back(id);
+    }
+
+    client.batch_remove_alert(&owner, &ids);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}
+
+#[test]
+fn test_batch_remove_alert_unauthorized_rolls_back() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id1 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    let id2 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "B"),
+        &hash64c(&env, 'b'),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_batch_remove_alert(&attacker, &vec![&env, id1, id2])
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+
+    // Nothing removed.
+    assert!(client.get_alert(&id1).is_some());
+    assert!(client.get_alert(&id2).is_some());
+}
+
+#[test]
+fn test_batch_remove_alert_not_found() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+
+    assert_eq!(
+        client
+            .try_batch_remove_alert(&owner, &vec![&env, 999u64])
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertNotFound
+    );
 }
