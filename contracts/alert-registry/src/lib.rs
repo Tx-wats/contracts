@@ -112,6 +112,25 @@ pub struct AlertConfig {
     pub active: bool,
 }
 
+/// Input record for [`AlertRegistry::batch_register_alert`].
+///
+/// Mirrors the arguments of [`AlertRegistry::register_alert`] so a batch call
+/// can register alerts for multiple owners/targets in one transaction.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AlertInput {
+    /// Address that will own and control this alert.
+    pub owner: Address,
+    /// Contract address to watch.
+    pub target_contract: Address,
+    /// Human-readable name for the alert.
+    pub label: String,
+    /// SHA-256 hash of the destination webhook URL.
+    pub webhook_hash: String,
+    /// Rule identifiers that should trigger the alert.
+    pub rules: Vec<String>,
+}
+
 // ── Contract ─────────────────────────────────────────────────────────────────
 
 /// On-chain registry for alert configurations.
@@ -818,6 +837,76 @@ impl AlertRegistry {
             (symbol_short!("alert"), symbol_short!("transfer")),
             (config_id, old_owner, new_owner),
         );
+        Ok(())
+    }
+
+    /// Register multiple alert configs in a single call.
+    ///
+    /// Each input is validated and authorized exactly as
+    /// [`Self::register_alert`] would, and each successful registration emits
+    /// the same `(Symbol("alert"), Symbol("register"))` event. If any input
+    /// fails validation or authorization, the entire batch (including any
+    /// alerts already registered earlier in the same call) is rolled back,
+    /// since Soroban invocations are atomic.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from each input's `owner`.
+    ///
+    /// # Returns
+    /// The new alerts' numeric IDs, in the same order as `inputs`.
+    /// # Errors
+    /// Returns the same errors as [`Self::register_alert`] for the failing item.
+    pub fn batch_register_alert(
+        env: Env,
+        inputs: Vec<AlertInput>,
+    ) -> Result<Vec<u64>, ContractError> {
+        let mut ids: Vec<u64> = vec![&env];
+        for i in 0..inputs.len() {
+            let input = inputs.get(i).unwrap();
+            let id = Self::register_alert(
+                env.clone(),
+                input.owner,
+                input.target_contract,
+                input.label,
+                input.webhook_hash,
+                input.rules,
+            )?;
+            ids.push_back(id);
+        }
+        Ok(ids)
+    }
+
+    /// Remove multiple alert configs owned by `caller` in a single call.
+    ///
+    /// Each ID is validated and authorized exactly as [`Self::remove_alert`]
+    /// would, and each successful removal emits the same
+    /// `(Symbol("alert"), Symbol("remove"))` event. If any ID does not exist
+    /// or is not owned by `caller`, the entire batch is rolled back, since
+    /// Soroban invocations are atomic.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if any `config_ids` entry does not identify an existing alert.
+    /// Returns [`ContractError::Unauthorized`] if `caller` does not own every alert in `config_ids`.
+    pub fn batch_remove_alert(
+        env: Env,
+        caller: Address,
+        config_ids: Vec<u64>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+
+        for i in 0..config_ids.len() {
+            let config_id = config_ids.get(i).unwrap();
+            let config: AlertConfig = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Alert(config_id))
+                .ok_or(ContractError::AlertNotFound)?;
+
+            Self::assert_owner(&config, &caller)?;
+            Self::remove_alert_record(&env, &config, config_id, &caller);
+        }
         Ok(())
     }
 

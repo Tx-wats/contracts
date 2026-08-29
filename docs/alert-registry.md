@@ -20,6 +20,18 @@ Contract that stores alert configurations on-chain, keyed by contract address.
 | `active` | `bool` | Whether the alert is active |
 | `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
+### `AlertInput`
+
+Input record for [`batch_register_alert`](#batch_register_alert). Mirrors the arguments of `register_alert`.
+
+| Field | Type | Description |
+|---|---|---|
+| `owner` | `Address` | Address that will own and control this alert |
+| `target_contract` | `Address` | Contract address to watch |
+| `label` | `String` | Human-readable name for the alert |
+| `webhook_hash` | `String` | SHA-256 hex digest of the destination webhook URL |
+| `rules` | `Vec<String>` | Serialized rule descriptors |
+
 ---
 
 ## Webhook Hash Scheme
@@ -278,6 +290,43 @@ Transfers ownership of an alert to a new address. Updates the `owner` field of t
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
 
 **Events:** Emits `(Symbol("alert"), Symbol("transfer"))` with data `(id: u64, old_owner: Address, new_owner: Address)`.
+
+---
+
+### `batch_register_alert`
+
+Registers multiple alert configs in a single call. Each input is validated and authorized exactly as `register_alert` would, and each successful registration emits the same `alert.register` event. Since Soroban invocations are atomic, if any input fails validation or authorization the entire batch — including any alerts already registered earlier in the same call — is rolled back.
+
+**Requires auth:** the `owner` of each input in `inputs`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `inputs` | `Vec<AlertInput>` | Alert records to register |
+
+**Returns:** `Vec<u64>` — the new alerts' IDs, in the same order as `inputs`
+
+**Errors:** Returns the same errors as `register_alert` for the failing item.
+
+---
+
+### `batch_remove_alert`
+
+Removes multiple alert configs owned by `caller` in a single call. Each ID is validated and authorized exactly as `remove_alert` would, and each successful removal emits the same `alert.remove` event. Since Soroban invocations are atomic, if any ID does not exist or is not owned by `caller`, the entire batch is rolled back.
+
+**Requires auth:** `caller`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must own every alert in `config_ids` |
+| `config_ids` | `Vec<u64>` | IDs of the alerts to remove |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::AlertNotFound` if any ID does not exist; `ContractError::Unauthorized` if caller does not own every alert in `config_ids`.
 
 ---
 
