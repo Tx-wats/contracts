@@ -23,6 +23,7 @@ mod contract_tests;
 #[cfg(test)]
 #[path = "regression_tests.rs"]
 mod regression_tests;
+mod proptests;
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
 
