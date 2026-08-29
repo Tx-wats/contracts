@@ -717,6 +717,59 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Deactivate an alert without deleting its record (admin only).
+    ///
+    /// Unlike [`Self::remove_alert_by_admin`], the alert config and its
+    /// indexes are left intact — only the `active` flag is cleared — so
+    /// history is preserved for e.g. spam/abuse moderation.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("admin_off"))` with data `(id: u64, admin: Address)`.
+    pub fn deactivate_alert_by_admin(
+        env: Env,
+        admin: Address,
+        config_id: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        let mut config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+
+        config.active = false;
+        config.updated_at = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Alert(config_id), &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AlertActive(config_id), &false);
+        env.storage().persistent().extend_ttl(
+            &DataKey::AlertActive(config_id),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("admin_off")),
+            (config_id, admin),
+        );
+        Ok(())
+    }
+
     /// Transfer ownership of an alert to a new address.
     ///
     /// Updates the [`AlertConfig::owner`] field and migrates the alert ID from

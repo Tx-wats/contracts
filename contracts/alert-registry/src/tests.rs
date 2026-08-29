@@ -1327,3 +1327,92 @@ fn test_transfer_alert_ownership_emits_event() {
     client.transfer_alert_ownership(&owner, &id, &new_owner);
     assert!(!env.events().all().is_empty());
 }
+
+// ── Issue #36 — deactivate_alert_by_admin ───────────────────────────────
+
+#[test]
+fn test_deactivate_alert_by_admin_success() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.deactivate_alert_by_admin(&admin, &id);
+
+    // Record still exists (not deleted) but is inactive.
+    let cfg = client.get_alert(&id).unwrap();
+    assert!(!cfg.active);
+    assert_eq!(client.get_alert_active(&id), Some(false));
+}
+
+#[test]
+fn test_deactivate_alert_by_admin_unauthorized() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    client.initialize(&admin);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_deactivate_alert_by_admin(&attacker, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+
+    assert!(client.get_alert(&id).unwrap().active);
+}
+
+#[test]
+fn test_deactivate_alert_by_admin_not_found() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    assert_eq!(
+        client
+            .try_deactivate_alert_by_admin(&admin, &999u64)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertNotFound
+    );
+}
+
+#[test]
+fn test_deactivate_alert_by_admin_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert!(!env.events().all().is_empty());
+}

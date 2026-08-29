@@ -219,6 +219,27 @@ Removes any alert config by ID. Requires admin auth.
 **Returns:** nothing
 
 ---
+
+### `deactivate_alert_by_admin`
+
+Deactivates any alert by ID without deleting its record. Unlike `remove_alert_by_admin`, the alert config and its owner/contract indexes are left intact — only the `active` flag is cleared — so an admin can moderate a single problematic alert (spam, abuse report) while preserving its history. Admin only.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+| `config_id` | `u64` | ID of the alert to deactivate |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the admin.
+
+**Events:** Emits `(Symbol("alert"), Symbol("admin_off"))` with data `(id: u64, admin: Address)`.
+
+---
 ### `remove_alert`
 
 Permanently removes an alert config. Only the original owner may call this.
