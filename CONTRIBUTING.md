@@ -15,6 +15,14 @@ Install the Stellar CLI:
 cargo install --locked stellar-cli --features opt
 ```
 
+## Minimum Supported Rust Version (MSRV)
+
+The workspace minimum supported Rust version (MSRV) is **1.88**, as declared in the root `Cargo.toml` (`rust-version = "1.88"`).
+
+- **CI Enforcement:** Verified continuously on every pull request and push to `main` via the `msrv` job in `.github/workflows/ci.yml` running `cargo check --workspace`.
+- **Bump Triggers:** MSRV is only bumped when strictly required by a necessary dependency update (e.g., newer `soroban-sdk` releases) or essential compiler features.
+- **Policy & Cadence:** MSRV bumps are not made casually. Any increase is considered a breaking change, documented in `CHANGELOG.md`, and accompanied by a corresponding update to `rust-version` in `Cargo.toml` and CI configuration.
+
 ## Build
 
 ```bash
