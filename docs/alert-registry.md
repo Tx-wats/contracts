@@ -238,6 +238,28 @@ Permanently removes an alert config. Only the original owner may call this.
 
 ---
 
+### `transfer_alert_ownership`
+
+Transfers ownership of an alert to a new address. Updates the `owner` field of the alert config and migrates the alert ID from the old owner's `OwnerIndex` to the new owner's. Only the current owner may call this.
+
+**Requires auth:** `caller` (must match `owner` of the config)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the current alert owner |
+| `config_id` | `u64` | ID of the alert to transfer |
+| `new_owner` | `Address` | Address to become the new owner |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
+
+**Events:** Emits `(Symbol("alert"), Symbol("transfer"))` with data `(id: u64, old_owner: Address, new_owner: Address)`.
+
+---
+
 ### `get_alert`
 
 Retrieves a single alert config by ID.

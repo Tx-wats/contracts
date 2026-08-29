@@ -1235,3 +1235,95 @@ fn test_configs_paginated_boundaries() {
     let p5 = client.get_alerts_by_owner_paginated(&querier, &owner, &10, &2);
     assert_eq!(p5.len(), 0);
 }
+
+// ── Issue #34 — transfer_alert_ownership ────────────────────────────────
+
+#[test]
+fn test_transfer_alert_ownership_success() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.transfer_alert_ownership(&owner, &id, &new_owner);
+
+    let cfg = client.get_alert(&id).unwrap();
+    assert_eq!(cfg.owner, new_owner);
+
+    // OwnerIndex updated for both the old and new owner.
+    assert_eq!(client.get_alerts_by_owner(&new_owner, &owner).len(), 0);
+    let new_owner_alerts = client.get_alerts_by_owner(&new_owner, &new_owner);
+    assert_eq!(new_owner_alerts.len(), 1);
+    assert_eq!(new_owner_alerts.get(0).unwrap().owner, new_owner);
+}
+
+#[test]
+fn test_transfer_alert_ownership_unauthorized() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_transfer_alert_ownership(&attacker, &id, &new_owner)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+
+    // Ownership and indexes are unchanged.
+    assert_eq!(client.get_alert(&id).unwrap().owner, owner);
+    assert_eq!(client.get_alerts_by_owner(&owner, &owner).len(), 1);
+}
+
+#[test]
+fn test_transfer_alert_ownership_not_found() {
+    let (env, client) = setup();
+    let caller = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    assert_eq!(
+        client
+            .try_transfer_alert_ownership(&caller, &999u64, &new_owner)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertNotFound
+    );
+}
+
+#[test]
+fn test_transfer_alert_ownership_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    assert!(!env.events().all().is_empty());
+}

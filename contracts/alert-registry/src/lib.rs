@@ -717,6 +717,57 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Transfer ownership of an alert to a new address.
+    ///
+    /// Updates the [`AlertConfig::owner`] field and migrates the alert ID from
+    /// the old owner's [`DataKey::OwnerIndex`] to the new owner's.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be the
+    /// current owner of the alert.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the current owner.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("transfer"))` with data
+    /// `(id: u64, old_owner: Address, new_owner: Address)`.
+    pub fn transfer_alert_ownership(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        new_owner: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+
+        let mut config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+
+        Self::assert_owner(&config, &caller)?;
+
+        let old_owner = config.owner.clone();
+        config.owner = new_owner.clone();
+        config.updated_at = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Alert(config_id), &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+
+        Self::remove_from_owner_index(&env, &old_owner, config_id);
+        Self::push_owner_index(&env, &new_owner, config_id)?;
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("transfer")),
+            (config_id, old_owner, new_owner),
+        );
+        Ok(())
+    }
+
     /// Extend the TTL of an alert and its associated indexes.
     ///
     /// Callers may request any TTL up to [`MAX_TTL`] ledgers.  Values above
