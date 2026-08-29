@@ -26,9 +26,15 @@
 export * from "./watcher_registry.js";
 
 // ── Network address map ───────────────────────────────────────────────────────
-// Keyed by Stellar network name. Update contract IDs after each deployment
-// by editing DEPLOYMENTS.md and running the deploy workflow — the CI
-// publish-bindings job overlays the correct contract ID at publish time.
+// Keyed by Stellar network name. DEPLOYMENTS.md is the source of truth: update
+// it after each deployment. The CI publish-bindings job re-reads DEPLOYMENTS.md
+// and overlays the correct contract IDs into this file at publish time
+// (scripts/deployment_address.py), so the published package always ships the
+// real testnet address even if the value committed here has drifted.
+//
+// `mainnet.contractId` is intentionally empty: the WatcherRegistry is not yet
+// deployed on mainnet. It stays empty until the mainnet deployment lands
+// (tracked in issue #90), at which point CI fills it from DEPLOYMENTS.md.
 
 export interface NetworkConfig {
   /** Deployed contract ID (56-character Stellar address starting with C). */
@@ -41,12 +47,14 @@ export interface NetworkConfig {
 
 export const networks: Record<string, NetworkConfig> = {
   testnet: {
-    contractId: "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    contractId: "CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J",
     networkPassphrase: "Test SDF Network ; September 2015",
     rpcUrl: "https://soroban-testnet.stellar.org",
   },
   mainnet: {
-    contractId: "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    // Not yet deployed on mainnet — see issue #90. CI overlays the real
+    // address here once DEPLOYMENTS.md lists it.
+    contractId: "",
     networkPassphrase: "Public Global Stellar Network ; September 2015",
     rpcUrl: "https://mainnet.stellar.validationcloud.io/v1/",
   },
