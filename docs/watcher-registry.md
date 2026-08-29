@@ -2,6 +2,7 @@
 
 Contract that stores authorized watcher node addresses on-chain. Only registered watchers (trusted instances of `stellar-txwatch-core`) may interact with the alert registry.
 
+The watcher set is capped at `MAX_WATCHERS` (1,000) and the admin set at `MAX_ADMINS` (50). `register_watcher`/`add_admin` return a typed error (`TooManyWatchers`/`TooManyAdmins`) once the cap is reached.
 The registry uses a **set of admins** (N independent signers). Any single admin can perform every privileged operation. All admin and watcher mutations emit Soroban events so changes are auditable on-chain.
 
 All mutating entrypoints return `Result<(), ContractError>`; read entrypoints either return their value directly or a `Result` where noted. See [Errors](#errors) for the full variant list and [docs/events.md](events.md) for the authoritative event topic and data shapes.
@@ -421,6 +422,26 @@ Returns every address in the current admin set.
 
 ---
 
+### `get_watchers_paginated`
+
+Returns a page of authorized watcher addresses. `offset` and `limit` are saturating — an `offset` beyond the end of the list returns an empty page rather than erroring.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `offset` | `u32` | Index of the first watcher to return |
+| `limit` | `u32` | Maximum number of watchers to return |
+
+**Returns:** `Vec<Address>` — may be empty.
+
+---
+
+### `clear_all_watchers`
+
+Removes all registered watchers in a single call, emitting one `("watcher", "remove")` event per watcher.
+
+**Limitation:** with a large enough watcher set, this can exceed per-transaction resource/event limits and become unusable. Prefer `clear_watchers_batch` for large watcher sets.
 ### `get_watcher_count`
 
 Returns the number of registered watchers as a cheap integer read, avoiding the cost of fetching and deserializing the full watcher list.
@@ -437,6 +458,7 @@ Returns the number of registered watchers as a cheap integer read, avoiding the 
 
 | Variant | Code | Meaning |
 |---|---|---|
+| `admin` | `Address` | Current admin |
 | `AlreadyInitialized` | 1 | `initialize` was called on an already-initialized contract. |
 | `Unauthorized` | 2 | The caller is not in the admin set. |
 | `NotInitialized` | 3 | A privileged or admin-reading entrypoint was called before `initialize`. |
@@ -448,6 +470,81 @@ Returns the primary admin address (first entry in the admin set). Kept for backw
 
 **Returns:** `Result<Address, ContractError>`
 
+**Errors:** `Unauthorized` if `admin` is not an existing admin.
+
+---
+
+### `clear_watchers_batch`
+
+Removes up to `max_count` registered watchers in a single call. Batched fallback for `clear_all_watchers` — call repeatedly until `get_watcher_count` returns 0 to clear an arbitrarily large watcher set without exceeding per-transaction resource/event limits.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin |
+| `max_count` | `u32` | Maximum number of watchers to remove in this call |
+
+**Returns:** nothing
+
+**Errors:** `Unauthorized` if `admin` is not an existing admin.
+
+---
+
+### `propose_admin_transfer`
+
+Proposes transferring the admin role to a new address. Does **not** take effect until `new_admin` calls `accept_admin_transfer` with their own signature — this two-step flow prevents a typo'd or unowned `new_admin` from permanently locking the contract. Replaces any previously pending proposal.
+
+**Requires auth:** `admin` (must be an existing admin)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin proposing the transfer |
+| `new_admin` | `Address` | Address proposed to become the new admin |
+
+**Returns:** nothing
+
+**Errors:** `Unauthorized` if `admin` is not an existing admin; `NotInitialized` if the contract has not been initialized.
+
+---
+
+### `accept_admin_transfer`
+
+Accepts a pending admin transfer, requiring `new_admin`'s own signature. Replaces the entire admin set with `new_admin`.
+
+**Requires auth:** `new_admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `new_admin` | `Address` | Address accepting the proposed transfer |
+
+**Returns:** nothing
+
+**Errors:** `NoPendingTransfer` if no transfer is pending, or the pending proposal names a different address.
+
+---
+
+### `cancel_admin_transfer`
+
+Cancels a pending admin transfer.
+
+**Requires auth:** `admin` (must be an existing admin)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Existing admin cancelling the proposal |
+
+**Returns:** nothing
+
+**Errors:** `Unauthorized` if `admin` is not an existing admin; `NoPendingTransfer` if no transfer is pending.
 **Errors:** returns `ContractError::NotInitialized` (`#3`) if the contract has not been initialized. A raw client call panics with `Error(Contract, #3)`; `try_get_admin` returns `Ok(Err(ContractError::NotInitialized))`.
 
 ---

@@ -14,6 +14,11 @@ use soroban_sdk::{
 contractmeta!(key = "Name", val = "WatcherRegistry");
 contractmeta!(key = "Version", val = "0.1.0");
 
+/// Maximum number of watchers that may be registered at once.
+const MAX_WATCHERS: u32 = 1_000;
+/// Maximum number of admins that may be in the admin set at once.
+const MAX_ADMINS: u32 = 50;
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -27,6 +32,12 @@ pub enum ContractError {
     LastAdmin = 4,
     /// Returned when the specified watcher is not currently registered.
     WatcherNotFound = 5,
+    /// Returned when accepting/cancelling a transfer but none is pending.
+    NoPendingTransfer = 6,
+    /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
+    TooManyWatchers = 7,
+    /// Returned when adding an admin would exceed [`MAX_ADMINS`].
+    TooManyAdmins = 8,
     /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
     MaxWatchersReached = 6,
     /// Returned when adding an admin would exceed [`MAX_ADMINS`].
@@ -86,6 +97,10 @@ pub enum DataKey {
     Admins,
     /// Stores the `Vec<Address>` of authorized watcher nodes.
     Watchers,
+    /// Stores the `Address` proposed as the new admin set by
+    /// [`WatcherRegistry::propose_admin_transfer`], pending its own
+    /// acceptance via [`WatcherRegistry::accept_admin_transfer`].
+    PendingAdminTransfer,
     /// Stores the timelock delay in ledgers (`u32`). Absent or `0` means the
     /// timelock is disabled and sensitive actions execute immediately.
     TimelockDelay,
@@ -201,6 +216,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TooManyAdmins`] if the admin set is already at [`MAX_ADMINS`].
     /// Returns [`ContractError::MaxAdminsReached`] if the admin set already holds [`MAX_ADMINS`] entries.
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
     /// # Panics
@@ -211,6 +227,24 @@ impl WatcherRegistry {
         Self::assert_timelock_disabled(&env)?;
         Self::assert_not_paused(&env)?;
 
+        let mut admins = Self::load_admins(&env);
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == new_admin {
+                return Ok(()); // already an admin, idempotent
+            }
+        }
+        if admins.len() >= MAX_ADMINS {
+            return Err(ContractError::TooManyAdmins);
+        }
+        admins.push_back(new_admin.clone());
+        env.storage().instance().set(&DataKey::Admins, &admins);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("add")),
+            (caller, new_admin),
+        );
+
+        Ok(())
         Self::do_add_admin(&env, &caller, new_admin)
     }
 
@@ -259,6 +293,17 @@ impl WatcherRegistry {
         Ok(())
     }
 
+    /// Propose transferring the sole admin role to a new address (any existing
+    /// admin may call this). The transfer does not take effect until
+    /// `new_admin` calls [`accept_admin_transfer`] with their own signature —
+    /// this prevents a typo'd or unowned address from permanently locking the
+    /// contract.
+    ///
+    /// This replaces any previously pending proposal. This replaces the
+    /// **entire** admin set with a single new admin once accepted. Use
+    /// [`add_admin`] + [`remove_admin`] if you want to rotate one member of a
+    /// multi-admin set without losing the others.
+    ///
     /// Transfer the caller's own admin slot to a new address (any existing
     /// admin may call this, and only affects that admin's own membership).
     ///
@@ -284,6 +329,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    pub fn propose_admin_transfer(
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
     pub fn transfer_admin(
         env: Env,
@@ -293,6 +339,46 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminTransfer, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("propose")),
+            (admin, new_admin),
+        );
+
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer proposed via [`propose_admin_transfer`].
+    ///
+    /// Requires `new_admin`'s own signature, proving key control before the
+    /// admin set is replaced. Emits an `("admin", "transfer")` event.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `new_admin`.
+    /// # Errors
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending,
+    /// or the pending proposal names a different address.
+    pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminTransfer)
+            .ok_or(ContractError::NoPendingTransfer)?;
+        if pending != new_admin {
+            return Err(ContractError::NoPendingTransfer);
+        }
+
+        let new_admins: Vec<Address> = vec![&env, new_admin.clone()];
+        env.storage().instance().set(&DataKey::Admins, &new_admins);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
 
         Self::do_transfer_admin(&env, &admin, new_admin);
         Self::assert_not_paused(&env)?;
@@ -318,7 +404,36 @@ impl WatcherRegistry {
         // Emit an auditable on-chain event recording the admin slot transfer.
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("transfer")),
-            (admin, new_admin),
+            new_admin,
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending admin transfer proposed via [`propose_admin_transfer`]
+    /// (any existing admin may call this).
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        if !env.storage().instance().has(&DataKey::PendingAdminTransfer) {
+            return Err(ContractError::NoPendingTransfer);
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("cancel")),
+            admin,
         );
 
         Ok(())
@@ -332,6 +447,7 @@ impl WatcherRegistry {
     /// Returns [`ContractError::MaxWatchersReached`] if the registry already holds [`MAX_WATCHERS`] watchers.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TooManyWatchers`] if the watcher set is already at [`MAX_WATCHERS`].
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn register_watcher(
@@ -350,6 +466,7 @@ impl WatcherRegistry {
             }
         }
         if watchers.len() >= MAX_WATCHERS {
+            return Err(ContractError::TooManyWatchers);
             return Err(ContractError::MaxWatchersReached);
         }
         watchers.push_back(watcher.clone());
@@ -628,10 +745,82 @@ impl WatcherRegistry {
         Ok(())
     }
 
+    /// Remove up to `max_count` registered watchers in a single admin call.
+    ///
+    /// Batched fallback for [`clear_all_watchers`] — with a large enough
+    /// watcher set, clearing everything and emitting one event per watcher in
+    /// a single transaction can exceed per-transaction resource/event
+    /// limits. Call this repeatedly until [`get_watcher_count`] returns 0 to
+    /// clear an arbitrarily large watcher set.
+    ///
+    /// Watchers are removed from the front of the list. Each removed watcher
+    /// emits a `("watcher", "remove")` event.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    pub fn clear_watchers_batch(
+        env: Env,
+        admin: Address,
+        max_count: u32,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        let watchers = Self::load_watchers(&env);
+        let remove_count = max_count.min(watchers.len());
+
+        let mut remaining: Vec<Address> = vec![&env];
+        for i in 0..watchers.len() {
+            let w = watchers.get(i).unwrap();
+            if i < remove_count {
+                env.events()
+                    .publish((symbol_short!("watcher"), symbol_short!("remove")), w);
+            } else {
+                remaining.push_back(w);
+            }
+        }
+        env.storage().instance().set(&DataKey::Watchers, &remaining);
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("W_CNT"))
+            .unwrap_or(0u32);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("W_CNT"), &count.saturating_sub(remove_count));
+
+        Ok(())
+    }
+
     /// Get all authorized watcher addresses.
     #[must_use]
     pub fn get_watchers(env: Env) -> Vec<Address> {
         Self::load_watchers(&env)
+    }
+
+    /// Get a page of authorized watcher addresses.
+    ///
+    /// `offset` and `limit` are saturating — an `offset` beyond the end of
+    /// the list returns an empty page rather than erroring.
+    #[must_use]
+    pub fn get_watchers_paginated(env: Env, offset: u32, limit: u32) -> Vec<Address> {
+        let watchers = Self::load_watchers(&env);
+        let count = watchers.len();
+        let first = offset.min(count);
+        let last = offset.saturating_add(limit).min(count);
+
+        let mut out: Vec<Address> = vec![&env];
+        for i in first..last {
+            out.push_back(watchers.get(i).unwrap());
+        }
+        out
     }
 
     /// Get all current admin addresses.
@@ -1171,7 +1360,7 @@ mod tests {
         assert!(!client.is_watcher_authorized(&watcher));
     }
 
-    // 3. Happy path — transfer admin (replaces entire admin set)
+    // 3. Happy path — two-step transfer admin (replaces entire admin set)
     #[test]
     fn test_transfer_admin() {
         let (env, admin, client) = setup();
@@ -1179,7 +1368,13 @@ mod tests {
         let watcher = Address::generate(&env);
 
         assert_eq!(
-            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            client.try_accept_admin_transfer(&new_admin).unwrap(),
             Ok(())
         );
         // new admin can register watchers
@@ -1190,13 +1385,14 @@ mod tests {
         assert!(client.is_watcher_authorized(&watcher));
     }
 
-    // 3b. transfer_admin emits an event
+    // 3b. accept_admin_transfer emits an event
     #[test]
     fn test_transfer_admin_emits_event() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.accept_admin_transfer(&new_admin);
 
         let events = env.events().all();
         // Find the transfer event
@@ -1431,8 +1627,9 @@ mod tests {
         let new_admin = Address::generate(&env);
         let watcher = Address::generate(&env);
 
+        client.propose_admin_transfer(&admin, &new_admin);
         assert_eq!(
-            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            client.try_accept_admin_transfer(&new_admin).unwrap(),
             Ok(())
         );
         assert_eq!(
@@ -1444,6 +1641,126 @@ mod tests {
         );
     }
 
+    // 15b. transfer does not take effect until the new admin accepts
+    #[test]
+    fn test_transfer_not_effective_until_accepted() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let watcher = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        // old admin can still act — transfer is only proposed, not accepted
+        assert_eq!(
+            client.try_register_watcher(&admin, &watcher).unwrap(),
+            Ok(())
+        );
+        // new admin cannot yet act
+        assert_eq!(
+            client
+                .try_register_watcher(&new_admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 15c. a mismatched address cannot accept someone else's pending transfer
+    #[test]
+    fn test_accept_admin_transfer_wrong_address() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // 15d. accepting with no pending proposal fails
+    #[test]
+    fn test_accept_admin_transfer_none_pending() {
+        let (env, _admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // 15e. a pending transfer can be cancelled by an admin
+    #[test]
+    fn test_cancel_admin_transfer() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(client.try_cancel_admin_transfer(&admin).unwrap(), Ok(()));
+
+        // the cancelled proposal can no longer be accepted
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // old admin retains control
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // 15f. cancelling with no pending proposal fails
+    #[test]
+    fn test_cancel_admin_transfer_none_pending() {
+        let (_env, admin, client) = setup();
+
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // 15g. non-admin cannot propose or cancel an admin transfer
+    #[test]
+    fn test_propose_and_cancel_admin_transfer_unauthorized() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&attacker, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // ── Multi-admin tests ─────────────────────────────────────────────────────
+
+    // 13. add_admin — second admin can perform privileged operations
     // 11b. get_admin's returned identity shifts after remove_admin — it is
     // an arbitrary admin (index 0), not a stable "primary admin".
     #[test]
@@ -1936,6 +2253,158 @@ mod tests {
         assert!(env.events().all().len() >= 2);
     }
 
+    // ── get_watchers_paginated tests ─────────────────────────────────────────
+
+    // 31. get_watchers_paginated — basic pagination
+    #[test]
+    fn test_get_watchers_paginated() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+        client.register_watcher(&admin, &w3);
+
+        let page1 = client.get_watchers_paginated(&0u32, &2u32);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), w1);
+        assert_eq!(page1.get(1).unwrap(), w2);
+
+        let page2 = client.get_watchers_paginated(&2u32, &2u32);
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2.get(0).unwrap(), w3);
+    }
+
+    // 32. get_watchers_paginated — offset beyond the list returns empty, not an error
+    #[test]
+    fn test_get_watchers_paginated_offset_beyond_end() {
+        let (env, admin, client) = setup();
+        client.register_watcher(&admin, &Address::generate(&env));
+
+        let page = client.get_watchers_paginated(&10u32, &5u32);
+        assert_eq!(page.len(), 0);
+    }
+
+    // 33. get_watchers_paginated — empty list
+    #[test]
+    fn test_get_watchers_paginated_empty() {
+        let (_env, _admin, client) = setup();
+        assert_eq!(client.get_watchers_paginated(&0u32, &10u32).len(), 0);
+    }
+
+    // ── clear_watchers_batch tests ───────────────────────────────────────────
+
+    // 34. clear_watchers_batch removes only up to max_count watchers
+    #[test]
+    fn test_clear_watchers_batch_partial() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let w3 = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+        client.register_watcher(&admin, &w3);
+
+        assert_eq!(
+            client.try_clear_watchers_batch(&admin, &2u32).unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_watcher_count(), 1);
+        assert_eq!(client.get_watchers().len(), 1);
+        assert!(client.is_watcher_authorized(&w3));
+    }
+
+    // 35. clear_watchers_batch with a large max_count clears everything
+    #[test]
+    fn test_clear_watchers_batch_full() {
+        let (env, admin, client) = setup();
+        for _ in 0..20 {
+            client.register_watcher(&admin, &Address::generate(&env));
+        }
+
+        assert_eq!(
+            client.try_clear_watchers_batch(&admin, &1_000u32).unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_watcher_count(), 0);
+        assert_eq!(client.get_watchers().len(), 0);
+    }
+
+    // 36. clear_watchers_batch called repeatedly clears a large watcher set,
+    // demonstrating the batched fallback for the unbounded-event risk in
+    // clear_all_watchers.
+    #[test]
+    fn test_clear_watchers_batch_repeated_calls() {
+        let (env, admin, client) = setup();
+        for _ in 0..25 {
+            client.register_watcher(&admin, &Address::generate(&env));
+        }
+
+        while client.get_watcher_count() > 0 {
+            client.clear_watchers_batch(&admin, &10u32);
+        }
+        assert_eq!(client.get_watchers().len(), 0);
+    }
+
+    // 37. clear_watchers_batch rejects non-admin
+    #[test]
+    fn test_clear_watchers_batch_unauthorized() {
+        let (env, admin, client) = setup();
+        let attacker = Address::generate(&env);
+        client.register_watcher(&admin, &Address::generate(&env));
+
+        assert_eq!(
+            client
+                .try_clear_watchers_batch(&attacker, &10u32)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // ── MAX_WATCHERS / MAX_ADMINS cap tests ──────────────────────────────────
+
+    // 38. register_watcher rejects registration past MAX_WATCHERS
+    #[test]
+    fn test_register_watcher_cap_enforced() {
+        let (env, admin, client) = setup();
+        for _ in 0..MAX_WATCHERS {
+            client.register_watcher(&admin, &Address::generate(&env));
+        }
+
+        assert_eq!(
+            client
+                .try_register_watcher(&admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TooManyWatchers
+        );
+        assert_eq!(client.get_watcher_count(), MAX_WATCHERS);
+    }
+
+    // 39. add_admin rejects registration past MAX_ADMINS
+    #[test]
+    fn test_add_admin_cap_enforced() {
+        let (env, admin, client) = setup();
+        // admin from setup() already counts as 1
+        for _ in 0..(MAX_ADMINS - 1) {
+            client.add_admin(&admin, &Address::generate(&env));
+        }
+
+        assert_eq!(
+            client
+                .try_add_admin(&admin, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TooManyAdmins
+        );
+        assert_eq!(client.get_admins().len(), MAX_ADMINS);
+    }
+
+    // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
     // ── Capacity-limit tests ──────────────────────────────────────────────────
 
     // 31. Registering up to MAX_WATCHERS succeeds; the next registration is rejected.
@@ -1949,6 +2418,33 @@ mod tests {
         }
         assert_eq!(client.get_watcher_count(), MAX_WATCHERS);
 
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_transfer_admin_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(WatcherRegistry, ());
+        let client = WatcherRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        env.set_auths(&[]);
+        client.propose_admin_transfer(&admin, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_accept_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(WatcherRegistry, ());
+        let client = WatcherRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        env.set_auths(&[]);
+        client.accept_admin_transfer(&new_admin);
         let overflow = Address::generate(&env);
         assert_eq!(
             client

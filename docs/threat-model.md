@@ -27,10 +27,13 @@ The `WatcherRegistry` contract stores a set of authorized watcher node addresses
 ## What the Contract Protects Against
 
 - **Unauthorized watcher registration.** Only the current admin can call `register_watcher` or `remove_watcher`. Any unsigned or incorrectly signed call is rejected at the protocol level.
+- **Admin hijacking via direct call.** `propose_admin_transfer` requires the current admin's auth signature, preventing an attacker from reassigning admin without controlling the current admin key.
+- **Locking the contract via a typo'd or unowned new admin.** Admin transfer is a two-step `propose_admin_transfer` / `accept_admin_transfer` flow — the proposed `new_admin` must sign `accept_admin_transfer` themselves before the admin set is replaced, so a typo'd or unowned address cannot silently take over (or permanently lock) the contract. A pending proposal can be cancelled by any admin via `cancel_admin_transfer`.
 - **Admin hijacking via direct call.** `transfer_admin` requires the current admin's auth signature, preventing an attacker from reassigning admin without controlling the current admin key.
 - **A single admin unilaterally stripping co-admins.** In a multi-admin set, `transfer_admin` only ever replaces the *caller's own* slot in the admin set — it cannot touch other admins' entries. An admin wanting to remove another admin must use `remove_admin`, which is a separate, individually-authorized call per target and still refuses to remove the last remaining admin. This means no single admin (even a compromised one) can use `transfer_admin` to seize sole control of a multi-admin registry.
 - **Total loss of watcher monitoring via admin action.** `remove_watcher` and `clear_all_watchers` both refuse to drop the registered watcher count below `MIN_WATCHERS` (currently `1`). A malicious or compromised admin can still remove watchers down to that floor, but cannot fully halt the monitoring system through these entrypoints.
 - **Replay attacks.** Stellar's sequence number mechanism prevents replaying previously valid transactions.
+- **Unbounded registry growth.** `register_watcher` and `add_admin` enforce `MAX_WATCHERS`/`MAX_ADMINS` caps, bounding the worst-case cost of operations (like `clear_all_watchers`) that iterate the full list.
 
 ---
 
@@ -98,6 +101,10 @@ prevent a compromised admin from registering watchers, which stays immediate.
 **Vector:** An admin observes suspicious registry activity and wants to stop further damage before finishing the investigation.  
 **Outcome:** Any admin can call `pause`, which immediately rejects all state-mutating calls (on both `WatcherRegistry` and `AlertRegistry`) with `ContractError::Paused` while leaving all reads available. Once the compromised admin is identified and removed, an admin calls `unpause` to resume normal operation.
 
+### 5. Admin transfers to a typo'd or unowned address
+**Vector:** Admin calls `propose_admin_transfer` with an address they mistyped or don't control.  
+**Outcome:** No state change to the admin set — the proposal only takes effect once the named `new_admin` signs `accept_admin_transfer`. An unowned or unaccepted proposal can be cancelled by any existing admin via `cancel_admin_transfer`, so the contract is never locked out.
+
 ---
 
 ## Security Properties Summary
@@ -105,6 +112,8 @@ prevent a compromised admin from registering watchers, which stays immediate.
 | Property | Enforced by contract |
 |---|---|
 | Only admin can modify the registry | ✅ |
+| Admin transfer requires current admin auth to propose | ✅ |
+| Admin transfer requires new admin's own signature to complete | ✅ |
 | Admin transfer requires current admin auth | ✅ |
 | `transfer_admin` cannot strip other admins in a multi-admin set | ✅ |
 | Minimum watcher count enforced on removal | ✅ (`MIN_WATCHERS`) |
@@ -113,4 +122,6 @@ prevent a compromised admin from registering watchers, which stays immediate.
 | Admin key compromise protection | ⚠️ partial (opt-in time-lock on sensitive actions) |
 | Admin key compromise protection | ❌ (mitigated via `pause` + `remove_admin`, not prevented) |
 | Off-chain watcher behavior enforcement | ❌ |
+| Multi-sig / time-lock on admin actions | ❌ |
+| Bounded watcher/admin set size | ✅ (`MAX_WATCHERS`/`MAX_ADMINS`) |
 | Multi-sig / time-lock on admin actions | ⚠️ time-lock, opt-in and disabled by default |
