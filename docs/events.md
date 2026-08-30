@@ -149,6 +149,25 @@ Emitted when an alert's watched contract is changed via `update_target_contract`
 
 ---
 
+### `alert.bulk_off`
+
+Emitted once per call to `deactivate_all_alerts` when at least one of the
+caller's alerts was deactivated. Carries the total affected count rather than
+one event per alert, keeping the bulk operation's footprint constant.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("bulk_off")` |
+| Data | `(caller: Address, count: u32)` |
+
+> No event is emitted if `count` is `0` (e.g. the caller has no active alerts,
+> or the contract is paused).
+
+**Status:** ✅ implemented (`deactivate_all_alerts`)
+
+---
+
 ### `admin.init`
 
 Emitted when the admin role is first initialised.

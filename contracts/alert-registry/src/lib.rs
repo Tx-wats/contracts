@@ -1359,6 +1359,11 @@ impl AlertRegistry {
     /// The number of alerts that were deactivated.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("bulk_off"))` with data
+    /// `(caller: Address, count: u32)` when at least one alert was deactivated.
+    /// No event is emitted if `count` is `0`.
     pub fn deactivate_all_alerts(env: Env, caller: Address) -> u32 {
         caller.require_auth();
         if Self::is_paused(env.clone()) {
@@ -1393,6 +1398,12 @@ impl AlertRegistry {
                     count += 1;
                 }
             }
+        }
+        if count > 0 {
+            env.events().publish(
+                (symbol_short!("alert"), symbol_short!("bulk_off")),
+                (caller, count),
+            );
         }
         count
     }

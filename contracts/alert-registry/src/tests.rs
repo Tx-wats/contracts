@@ -1287,6 +1287,7 @@ fn test_deactivate_all_alerts_precise_behavior() {
     assert_eq!(client.get_active_alert_count(&owner2), 1);
 
     let count = client.deactivate_all_alerts(&owner1);
+    assert!(!env.events().all().is_empty());
     assert_eq!(count, 3);
     assert_eq!(client.get_alert_active(&Address::generate(&env), &id0), Some(false));
     assert_eq!(client.get_alert_active(&Address::generate(&env), &id1), Some(false));
