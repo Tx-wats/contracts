@@ -667,6 +667,7 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `DuplicateAlertId` | 11 | Internal invariant violation — an ID was already present in an index |
 | `NoPendingWebhook` | 12 | `confirm_webhook` called but no rotation is in progress |
 | `InvalidWatcherRegistry` | 13 | `set_watcher_registry` given an address that doesn't implement the `WatcherRegistry` interface |
+| `DuplicateRule` | 15 | The same rule descriptor appears more than once in `rules` |
 
 ---
 

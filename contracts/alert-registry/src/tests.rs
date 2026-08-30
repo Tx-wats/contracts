@@ -1391,6 +1391,64 @@ fn test_validate_rule_mint_and_invalid_descriptors() {
 }
 
 #[test]
+fn test_duplicate_rules_rejected() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Duplicate transfer rule rejected at registration.
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, "Dup Alert"),
+                &hash64(&env),
+                &vec![&env, str(&env, "rule:transfer"), str(&env, "rule:transfer")],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::DuplicateRule
+    );
+
+    // Duplicate mint rule rejected at registration.
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, "Dup Mint"),
+                &hash64(&env),
+                &vec![&env, str(&env, "rule:mint"), str(&env, "rule:mint")],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::DuplicateRule
+    );
+
+    // The two distinct descriptors together are still accepted.
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Both Rules"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer"), str(&env, "rule:mint")],
+    );
+    let cfg = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg.rules.len(), 2);
+
+    // Duplicates are also rejected when updating an alert's rules.
+    let dup_mint = vec![&env, str(&env, "rule:mint"), str(&env, "rule:mint")];
+    assert_eq!(
+        client
+            .try_update_alert(&owner, &id, &dup_mint, &true)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::DuplicateRule
+    );
+}
+
+#[test]
 fn test_update_target_contract_moves_indices() {
     let (env, client) = setup();
     let owner = Address::generate(&env);

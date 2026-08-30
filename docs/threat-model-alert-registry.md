@@ -55,6 +55,7 @@ The contract supports:
 - **Per-Owner Active Alert Ceiling**: The admin-configurable `per_owner_alert_limit` restricts the number of active alerts any single address can create, preventing storage spam and index bloating.
 - **Rule Count and Length Bounds**: Alert rule lists are capped at a maximum of 50 rules (`ContractError::TooManyRules`), and labels are restricted to a maximum of 128 bytes (`ContractError::LabelTooLong`).
 - **Rule Descriptor Validation**: `validate_rules` parses each rule descriptor and rejects unrecognized prefixes, preventing injection of unbounded or malformed rule strings.
+- **Rule Uniqueness**: `validate_rules` rejects duplicate descriptors (`ContractError::DuplicateRule`), so a single alert cannot store redundant copies of the same rule that would waste storage and skew rule-count-based limits.
 - **Saturating Pagination**: Pagination math in `get_contract_alerts_paginated` and `get_alerts_by_owner_paginated` uses saturating arithmetic to prevent integer overflow denial of service.
 
 ### 5. Unauthorized Read Access (Watcher-Gating Attack Surface)
@@ -100,7 +101,7 @@ The contract supports:
 
 ### 5. Attacker Injects Malformed Rule Descriptors
 - **Vector**: Caller supplies strings with arbitrary binary data, invalid prefixes, or excessive rule count.
-- **Outcome**: `validate_rules` limits count to <= 50 (`ContractError::TooManyRules`) and `validate_rule` rejects any descriptor not matching recognized prefixes (`ContractError::InvalidRuleDescriptor`).
+- **Outcome**: `validate_rules` limits count to <= 50 (`ContractError::TooManyRules`), rejects duplicate descriptors (`ContractError::DuplicateRule`), and `validate_rule` rejects any descriptor not matching recognized prefixes (`ContractError::InvalidRuleDescriptor`).
 
 ### 6. Admin Address Handover
 - **Vector**: Former admin or attacker attempts to call `transfer_admin` or `set_watcher_registry` after admin role transfer.

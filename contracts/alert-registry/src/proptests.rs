@@ -41,9 +41,11 @@ fn make_str(env: &Env, s: &str) -> SorobanString {
 }
 
 fn valid_rules(env: &Env, count: usize) -> SorobanVec<SorobanString> {
-    let count = count.min(10);
+    // Only two rule descriptors exist, and `validate_rules` rejects duplicates,
+    // so a valid rule set can contain at most two entries.
+    let unique = count.min(2);
     let mut v = SorobanVec::new(env);
-    for i in 0..count {
+    for i in 0..unique {
         let rule_str = if i % 2 == 0 {
             "rule:transfer"
         } else {
