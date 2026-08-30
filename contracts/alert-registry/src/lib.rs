@@ -461,6 +461,11 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("watchreg")),
+            (admin, watcher_registry),
+        );
         Ok(())
     }
 
@@ -757,6 +762,16 @@ impl AlertRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerIndex(config.owner.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::ContractIndex(config.target_contract.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_prop")),
@@ -806,6 +821,16 @@ impl AlertRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerIndex(config.owner.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::ContractIndex(config.target_contract.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_conf")),
@@ -1424,11 +1449,20 @@ impl AlertRegistry {
                         DEFAULT_TTL,
                         DEFAULT_TTL,
                     );
+                    env.storage().persistent().extend_ttl(
+                        &DataKey::ContractIndex(cfg.target_contract.clone()),
+                        DEFAULT_TTL,
+                        DEFAULT_TTL,
+                    );
                     count += 1;
                 }
             }
         }
         if count > 0 {
+            env.storage().persistent().extend_ttl(
+                &DataKey::OwnerIndex(caller.clone()),
+                DEFAULT_TTL,
+                DEFAULT_TTL,
             env.events().publish(
                 (symbol_short!("alert"), symbol_short!("bulk_off")),
                 (caller, count),
