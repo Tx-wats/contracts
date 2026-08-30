@@ -159,7 +159,7 @@ Emitted when the per-owner alert limit is changed.
 | Topic 1 | `Symbol("limit")` |
 | Data | `(admin: Address, limit: u32)` |
 
-**Status:** 🔲 planned (`set_per_owner_alert_limit`)
+**Status:** ✅ implemented (`set_per_owner_alert_limit`)
 
 ---
 

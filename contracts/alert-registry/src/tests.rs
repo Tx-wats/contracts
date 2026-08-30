@@ -201,6 +201,18 @@ fn test_initialize_emits_event() {
     assert!(!env.events().all().is_empty());
 }
 
+// set_per_owner_alert_limit emits an admin.limit event
+#[test]
+fn test_set_per_owner_alert_limit_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.set_per_owner_alert_limit(&admin, &5u32);
+
+    assert!(!env.events().all().is_empty());
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #10)")]
 fn test_admin_set_per_owner_alert_limit() {
