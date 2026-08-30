@@ -50,8 +50,8 @@ pub enum DataKey {
     OwnerIndex(Address),
     /// Stores the number of currently live (non-removed) alerts owned by a
     /// given address, maintained incrementally alongside [`DataKey::OwnerIndex`]
-    /// so [`AlertRegistry::get_active_alert_count`] never has to rescan the
-    /// owner's full index.
+    /// so [`AlertRegistry::get_non_removed_alert_count`] never has to rescan
+    /// the owner's full index.
     OwnerActiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
@@ -1586,8 +1586,10 @@ impl AlertRegistry {
     /// Get the total number of alerts ever registered.
     ///
     /// This is a **monotonic counter** — it only increases and is never
-    /// decremented when alerts are removed. Use [`get_active_alert_count`]
-    /// if you need the number of currently live alerts for a given owner.
+    /// decremented when alerts are removed. Use [`get_non_removed_alert_count`]
+    /// if you need the number of currently live (non-removed) alerts for a
+    /// given owner, or [`get_active_alert_count`] for the number that are
+    /// still active.
     #[must_use]
     pub fn get_alert_count(env: Env) -> u64 {
         env.storage()
@@ -1596,17 +1598,47 @@ impl AlertRegistry {
             .unwrap_or(0u64)
     }
 
-    /// Get the number of currently active (non-removed) alerts owned by `owner`.
+    /// Get the number of currently active alerts owned by `owner`.
     ///
     /// Unlike [`get_alert_count`], this reflects removals and only counts
-    /// alerts whose storage entries are still live.
+    /// alerts with `active == true` — deactivated-but-not-removed alerts are
+    /// excluded, so the result matches the `active` flag of the alerts
+    /// returned by [`Self::get_alerts_by_owner`].
+    ///
+    /// Scans the owner's [`DataKey::OwnerIndex`] and reads the cheap
+    /// [`DataKey::AlertActive`] flag for each entry, so it reflects both
+    /// removals and deactivations. If you only need the number of live
+    /// (non-removed) alerts regardless of the `active` flag, use
+    /// [`Self::get_non_removed_alert_count`], which is an O(1) lookup.
+    #[must_use]
+    pub fn get_active_alert_count(env: Env, owner: Address) -> u32 {
+        let ids = Self::owner_index(&env, &owner);
+        let mut count: u32 = 0;
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            if env
+                .storage()
+                .persistent()
+                .get::<DataKey, bool>(&DataKey::AlertActive(id))
+                == Some(true)
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Get the number of currently live (non-removed) alerts owned by `owner`.
+    ///
+    /// Unlike [`Self::get_active_alert_count`], this does **not** filter by
+    /// the `active` flag: deactivated-but-not-removed alerts still count.
     ///
     /// Backed by a running counter maintained incrementally by
     /// [`Self::push_owner_index`]/[`Self::remove_from_owner_index`], so this
     /// is an O(1) lookup regardless of how many alerts `owner` has ever
-    /// registered — it no longer rescans the owner's index on every call.
+    /// registered — it never rescans the owner's index.
     #[must_use]
-    pub fn get_active_alert_count(env: Env, owner: Address) -> u32 {
+    pub fn get_non_removed_alert_count(env: Env, owner: Address) -> u32 {
         Self::owner_active_count(&env, &owner)
     }
 
@@ -1686,7 +1718,7 @@ impl AlertRegistry {
 
     fn assert_per_owner_limit(env: &Env, owner: &Address) -> Result<(), ContractError> {
         let limit = Self::get_per_owner_alert_limit(env.clone());
-        if limit > 0 && Self::get_active_alert_count(env.clone(), owner.clone()) >= limit {
+        if limit > 0 && Self::get_non_removed_alert_count(env.clone(), owner.clone()) >= limit {
             return Err(ContractError::OwnerAlertLimitExceeded);
         }
         Ok(())
@@ -3950,11 +3982,11 @@ mod tests {
         );
     }
 
-    /// `get_active_alert_count` is O(1) regardless of how many alerts an
+    /// `get_non_removed_alert_count` is O(1) regardless of how many alerts an
     /// owner has ever registered — it reads a maintained counter instead of
     /// rescanning `OwnerIndex` (#39).
     #[test]
-    fn test_get_active_alert_count_instruction_cost_is_constant() {
+    fn test_get_non_removed_alert_count_instruction_cost_is_constant() {
         const N: u32 = 200;
 
         let (env, client) = setup();
@@ -3968,16 +4000,16 @@ mod tests {
         }
 
         let before = env.cost_estimate().budget().cpu_instruction_cost();
-        let count = client.get_active_alert_count(&owner);
+        let count = client.get_non_removed_alert_count(&owner);
         let after = env.cost_estimate().budget().cpu_instruction_cost();
         let cost = after.saturating_sub(before);
 
         assert_eq!(count, N);
         // An O(n) rescan at N=200 would cost far more than a single storage
-        // read; this bound would fail under the old scan-based implementation.
+        // read; this bound would fail under a scan-based implementation.
         assert!(
             cost < 200_000,
-            "get_active_alert_count cost {cost} at N={N} looks O(n), not O(1)"
+            "get_non_removed_alert_count cost {cost} at N={N} looks O(n), not O(1)"
         );
     }
 
