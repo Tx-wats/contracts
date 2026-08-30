@@ -1406,9 +1406,21 @@ impl AlertRegistry {
                         DEFAULT_TTL,
                         DEFAULT_TTL,
                     );
+                    env.storage().persistent().extend_ttl(
+                        &DataKey::ContractIndex(cfg.target_contract.clone()),
+                        DEFAULT_TTL,
+                        DEFAULT_TTL,
+                    );
                     count += 1;
                 }
             }
+        }
+        if count > 0 {
+            env.storage().persistent().extend_ttl(
+                &DataKey::OwnerIndex(caller.clone()),
+                DEFAULT_TTL,
+                DEFAULT_TTL,
+            );
         }
         count
     }

@@ -48,6 +48,7 @@ All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerActiveC
 | `propose_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
 | `confirm_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
 | `renew_alert_ttl` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` — data unchanged |
+| `deactivate_all_alerts` | `Alert(id)`, `AlertActive(id)` for each deactivated alert; `ContractIndex(target)` for each touched contract; `OwnerIndex(caller)` once, if at least one alert was deactivated |
 | `remove_alert` | `Alert(id)`, `AlertActive(id)` deleted; `OwnerIndex(owner)`, `OwnerActiveCount(owner)`, `ContractIndex(target)` updated and TTL-extended |
 
 Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owner`, paginated variants, `get_alert_count`) do **not** extend any TTL.

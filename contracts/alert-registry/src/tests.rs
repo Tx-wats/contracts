@@ -1037,6 +1037,58 @@ fn test_ten_alerts_same_owner_same_contract() {
     );
 }
 
+// deactivate_all_alerts must refresh OwnerIndex/ContractIndex TTLs, not just
+// Alert(id)/AlertActive(id), even though it iterates the owner's entire index.
+#[test]
+fn test_deactivate_all_alerts_refreshes_owner_and_contract_index_ttl() {
+    use crate::DataKey;
+    use soroban_sdk::testutils::storage::Persistent;
+
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::OwnerIndex(owner.clone()), 0, 0);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ContractIndex(target.clone()), 0, 0);
+    });
+
+    let count = client.deactivate_all_alerts(&owner);
+    assert_eq!(count, 1);
+
+    let owner_ttl = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&DataKey::OwnerIndex(owner.clone()))
+    });
+    let contract_ttl = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&DataKey::ContractIndex(target.clone()))
+    });
+
+    assert!(
+        owner_ttl > 0,
+        "OwnerIndex TTL must be refreshed by deactivate_all_alerts"
+    );
+    assert!(
+        contract_ttl > 0,
+        "ContractIndex TTL must be refreshed by deactivate_all_alerts"
+    );
+}
+
 // propose_webhook/confirm_webhook must refresh OwnerIndex/ContractIndex TTLs,
 // not just the Alert(id) key, so an alert that is only ever webhook-rotated
 // stays reachable via get_alerts_by_owner / get_alerts_for_contract.
