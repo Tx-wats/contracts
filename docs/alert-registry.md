@@ -374,13 +374,16 @@ If a `WatcherRegistry` is configured (via `set_watcher_registry`), `querier` mus
 
 Returns all alert configs registered for a given target contract, including both active and inactive entries. Use [`get_active_alerts_for_contract`](#get_active_alerts_for_contract) to filter to active-only.
 
+If a `WatcherRegistry` is configured (via `set_watcher_registry`), `querier` must be a registered watcher or the call returns `ContractError::NotAWatcher`.
+
 **Parameters**
 
 | Name | Type | Description |
 |---|---|---|
+| `querier` | `Address` | Address performing the query (checked against watcher registry if configured) |
 | `target_contract` | `Address` | Contract address to query |
 
-**Returns:** `Vec<AlertConfig>` — may be empty.
+**Returns:** `Result<Vec<AlertConfig>, ContractError>` — `Ok(vec)` on success, may be empty.
 
 ---
 

@@ -103,7 +103,7 @@ Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owne
 
 ## Implications
 
-- **Inactive alerts expire quickly.** An alert that is registered but never updated will be archived after ~8 minutes.
+- **Inactive alerts expire eventually.** An alert that is registered but never updated will be archived after `DEFAULT_TTL` (17,280 ledgers, ~24 hours).
 - **Watchers must keep alerts alive.** Any off-chain service relying on alert data should periodically call `update_alert` (or a dedicated bump function) to prevent expiry.
 - **Archived entries are not deleted.** They can be restored via `RestoreFootprintOp`, but this requires paying a fee and is not currently automated.
 
