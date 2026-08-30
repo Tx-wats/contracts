@@ -974,6 +974,26 @@ fn test_confirm_webhook_emits_event() {
     assert!(!env.events().all().is_empty());
 }
 
+// update_label emits a label event
+#[test]
+fn test_update_label_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.update_label(&owner, &id, &str(&env, "New Label"));
+
+    assert!(!env.events().all().is_empty());
+}
+
 // pending_webhook_hash is None on fresh registration
 #[test]
 fn test_pending_webhook_hash_none_on_registration() {

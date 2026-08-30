@@ -121,6 +121,20 @@ Emitted when an alert's TTL is extended via `bump_alert`.
 
 ---
 
+### `alert.label`
+
+Emitted when an alert's label is renamed via `update_label`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("label")` |
+| Data | `(id: u64, caller: Address)` |
+
+**Status:** ✅ implemented (`update_label`)
+
+---
+
 ### `admin.init`
 
 Emitted when the admin role is first initialised.

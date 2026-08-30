@@ -855,6 +855,9 @@ impl AlertRegistry {
     ///
     /// # Panics
     /// Panics if `label` exceeds 128 bytes.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("label"))` with data `(id: u64, caller: Address)`.
     pub fn update_label(
         env: Env,
         caller: Address,
@@ -895,6 +898,12 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("label")),
+            (config_id, caller),
+        );
+
         Ok(())
     }
 
