@@ -1409,6 +1409,10 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("retarget"))` with data
+    /// `(id: u64, old_target: Address, new_target: Address)`.
     pub fn update_target_contract(
         env: Env,
         caller: Address,
@@ -1440,6 +1444,11 @@ impl AlertRegistry {
         // Migrate the contract index
         Self::remove_from_contract_index(&env, &old_target, config_id);
         Self::push_contract_index(&env, &new_target, config_id)?;
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("retarget")),
+            (config_id, old_target, new_target),
+        );
 
         Ok(())
     }

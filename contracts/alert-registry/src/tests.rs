@@ -1200,6 +1200,26 @@ fn test_update_target_contract_moves_indices() {
 }
 
 #[test]
+fn test_update_target_contract_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target_a = Address::generate(&env);
+    let target_b = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target_a,
+        &str(&env, "Target Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.update_target_contract(&owner, &id, &target_b);
+
+    assert!(!env.events().all().is_empty());
+}
+
+#[test]
 fn test_get_alert_active_states_and_counts() {
     let (env, client) = setup();
     let owner = Address::generate(&env);

@@ -135,6 +135,20 @@ Emitted when an alert's label is renamed via `update_label`.
 
 ---
 
+### `alert.retarget`
+
+Emitted when an alert's watched contract is changed via `update_target_contract`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("retarget")` |
+| Data | `(id: u64, old_target: Address, new_target: Address)` |
+
+**Status:** ✅ implemented (`update_target_contract`)
+
+---
+
 ### `admin.init`
 
 Emitted when the admin role is first initialised.
