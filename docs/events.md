@@ -37,7 +37,7 @@ Emitted when an alert's rules or active flag are changed.
 | Topic 1 | `Symbol("update")` |
 | Data | `(id: u64, owner: Address, active: bool)` |
 
-**Status:** 🔲 planned (`update_alert`)
+**Status:** ✅ implemented (`update_alert`)
 
 ---
 
@@ -55,7 +55,7 @@ Emitted when an alert's webhook hash is rotated.
 > stored on-chain and can be read via `get_alert`.  Omitting it keeps the
 > event payload small and avoids redundancy.
 
-**Status:** 🔲 planned (`update_webhook`)
+**Status:** ✅ implemented (`update_webhook`)
 
 ---
 
@@ -192,7 +192,7 @@ Emitted when the admin role is first initialised.
 | Topic 1 | `Symbol("init")` |
 | Data | `(admin: Address)` |
 
-**Status:** 🔲 planned (`initialize`)
+**Status:** ✅ implemented (`initialize`)
 
 ---
 
@@ -220,7 +220,7 @@ Emitted when the per-owner alert limit is changed.
 | Topic 1 | `Symbol("limit")` |
 | Data | `(admin: Address, limit: u32)` |
 
-**Status:** 🔲 planned (`set_per_owner_alert_limit`)
+**Status:** ✅ implemented (`set_per_owner_alert_limit`)
 
 ---
 

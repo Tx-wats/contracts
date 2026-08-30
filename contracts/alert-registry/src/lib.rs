@@ -203,6 +203,11 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("ADMIN"), &admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("init")),
+            (admin,),
+        );
         Ok(())
     }
 
@@ -329,6 +334,11 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("LIMIT"), &limit);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("limit")),
+            (admin, limit),
+        );
         Ok(())
     }
 
@@ -633,6 +643,11 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("update")),
+            (config_id, config.owner.clone(), active),
+        );
         Ok(())
     }
 
@@ -684,6 +699,11 @@ impl AlertRegistry {
             &DataKey::ContractIndex(config.target_contract.clone()),
             DEFAULT_TTL,
             DEFAULT_TTL,
+        );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("webhook")),
+            (config_id, caller),
         );
         Ok(())
     }

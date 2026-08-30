@@ -92,6 +92,26 @@ fn test_update_alert() {
     assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:mint"));
 }
 
+// update_alert emits an alert.update event
+#[test]
+fn test_update_alert_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &false);
+
+    assert!(!env.events().all().is_empty());
+}
+
 // 3. Happy path — remove alert
 #[test]
 fn test_remove_alert() {
@@ -188,6 +208,29 @@ fn test_admin_remove_any_alert() {
 
     client.remove_alert_by_admin(&admin, &id);
     assert!(client.get_alert(&owner, &id).is_none());
+}
+
+// initialize emits an admin.init event on first initialization
+#[test]
+fn test_initialize_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    assert!(!env.events().all().is_empty());
+}
+
+// set_per_owner_alert_limit emits an admin.limit event
+#[test]
+fn test_set_per_owner_alert_limit_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.set_per_owner_alert_limit(&admin, &5u32);
+
+    assert!(!env.events().all().is_empty());
 }
 
 #[test]
@@ -464,6 +507,26 @@ fn test_update_webhook() {
         client.get_alert(&owner, &id).unwrap().webhook_hash,
         hash64c(&env, 'b')
     );
+}
+
+// update_webhook emits an alert.webhook event
+#[test]
+fn test_update_webhook_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64c(&env, 'a'),
+        &vec![&env],
+    );
+
+    client.update_webhook(&owner, &id, &hash64c(&env, 'b'));
+
+    assert!(!env.events().all().is_empty());
 }
 
 // 11. update_webhook unauthorized
