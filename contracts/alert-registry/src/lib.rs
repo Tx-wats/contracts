@@ -839,6 +839,67 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Abandon an in-progress webhook rotation, clearing the staged hash.
+    ///
+    /// Without this, the only way out of a staged rotation is to overwrite it
+    /// with another proposal or confirm it — there is no clean way to back
+    /// out. The live `webhook_hash` is never touched.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be the
+    /// alert owner.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NoPendingWebhook`] if no rotation is in
+    /// progress.
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("wh_cancel"))` with data `(id: u64, caller: Address)`.
+    pub fn cancel_webhook_proposal(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let mut config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+
+        Self::assert_owner(&config, &caller)?;
+
+        if config.pending_webhook_hash.is_none() {
+            return Err(ContractError::NoPendingWebhook);
+        }
+
+        config.pending_webhook_hash = None;
+        config.updated_at = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Alert(config_id), &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerIndex(config.owner.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::ContractIndex(config.target_contract.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("wh_cancel")),
+            (config_id, caller),
+        );
+        Ok(())
+    }
+
     /// Extend the TTL of an alert and its indexes without modifying any data.
     ///
     /// Unlike [`Self::bump_alert`], this is owner-authenticated and leaves
@@ -1399,6 +1460,64 @@ impl AlertRegistry {
             .storage()
             .persistent()
             .get(&DataKey::AlertActive(config_id)))
+    }
+
+    /// Read the owner of an alert without returning the full config.
+    ///
+    /// Thin wrapper over the stored [`AlertConfig`]: a separate owner-only
+    /// storage key is not warranted because the owner never changes
+    /// independently of the record (and `transfer_alert_ownership` rewrites
+    /// the record anyway), so the cheap-read win would be nil. Callers
+    /// checking only ownership no longer need to deserialize the config
+    /// themselves.
+    ///
+    /// Returns `None` if the alert does not exist or has expired.
+    ///
+    /// If a `WatcherRegistry` is configured, `querier` must be a registered
+    /// watcher or the call returns [`ContractError::NotAWatcher`].
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_alert_owner(
+        env: Env,
+        querier: Address,
+        config_id: u64,
+    ) -> Result<Option<Address>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get::<DataKey, AlertConfig>(&DataKey::Alert(config_id))
+            .map(|cfg| cfg.owner))
+    }
+
+    /// Read the owner of an alert without returning the full config.
+    ///
+    /// Thin wrapper over the stored [`AlertConfig`]: a separate owner-only
+    /// storage key is not warranted because the owner never changes
+    /// independently of the record (`transfer_alert_ownership` rewrites the
+    /// record anyway), so a second key would only add write cost. Callers
+    /// checking only ownership no longer need to deserialize the config
+    /// themselves.
+    ///
+    /// Returns `None` if the alert does not exist or has expired.
+    ///
+    /// If a `WatcherRegistry` is configured, `querier` must be a registered
+    /// watcher or the call returns [`ContractError::NotAWatcher`].
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_alert_owner(
+        env: Env,
+        querier: Address,
+        config_id: u64,
+    ) -> Result<Option<Address>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get::<DataKey, AlertConfig>(&DataKey::Alert(config_id))
+            .map(|cfg| cfg.owner))
     }
 
     /// Deactivate all alerts owned by `caller` in a single call.
@@ -4188,6 +4307,59 @@ mod tests {
         assert_eq!(client.get_alert_active(&owner, &id), Some(true));
         client.remove_alert(&owner, &id);
         assert!(client.get_alert_active(&owner, &id).is_none());
+    }
+
+    // 21a. get_alert_owner returns the owner after registration
+    #[test]
+    fn test_get_alert_owner_after_register() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        assert_eq!(
+            client.get_alert_owner(&owner, &id).unwrap(),
+            Some(owner)
+        );
+    }
+
+    // 21b. get_alert_owner reflects transfer_alert_ownership
+    #[test]
+    fn test_get_alert_owner_after_transfer() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        client.transfer_alert_ownership(&owner, &id, &new_owner);
+        assert_eq!(
+            client.get_alert_owner(&owner, &id).unwrap(),
+            Some(new_owner)
+        );
+    }
+
+    // 21c. get_alert_owner returns None for nonexistent ID
+    #[test]
+    fn test_get_alert_owner_nonexistent() {
+        let (env, client) = setup();
+        assert!(client
+            .get_alert_owner(&Address::generate(&env), &999u64)
+            .is_none());
     }
 
     // 22. deactivate_all_alerts returns 0 when owner has no alerts
