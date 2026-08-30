@@ -451,6 +451,11 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("watchreg")),
+            (admin, watcher_registry),
+        );
         Ok(())
     }
 

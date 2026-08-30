@@ -1037,6 +1037,26 @@ fn test_ten_alerts_same_owner_same_contract() {
     );
 }
 
+// set_watcher_registry emits an admin.watchreg event
+#[test]
+fn test_set_watcher_registry_emits_event() {
+    use watcher_registry::{WatcherRegistry, WatcherRegistryClient};
+
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let registry_id = env.register(WatcherRegistry, ());
+    let registry_client = WatcherRegistryClient::new(&env, &registry_id);
+    registry_client.initialize(&admin);
+    registry_client.register_watcher(&admin, &admin);
+
+    client.set_watcher_registry(&admin, &registry_id);
+
+    assert!(!env.events().all().is_empty());
+    assert_eq!(client.get_watcher_registry(), Some(registry_id));
+}
+
 #[test]
 fn test_is_watcher_gating_enabled_default_false() {
     let (_env, client) = setup();

@@ -163,6 +163,21 @@ Emitted when the per-owner alert limit is changed.
 
 ---
 
+### `admin.watchreg`
+
+Emitted when the `WatcherRegistry` contract address is configured, gating the
+read-side queries behind watcher authorization.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("watchreg")` |
+| Data | `(admin: Address, watcher_registry: Address)` |
+
+**Status:** ✅ implemented (`set_watcher_registry`)
+
+---
+
 ## WatcherRegistry
 
 ### `watcher.register`
