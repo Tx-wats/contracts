@@ -168,6 +168,20 @@ one event per alert, keeping the bulk operation's footprint constant.
 
 ---
 
+### `alert.renew`
+
+Emitted when an alert's TTL is renewed via `renew_alert_ttl`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("renew")` |
+| Data | `(id: u64, owner: Address)` |
+
+**Status:** ✅ implemented (`renew_alert_ttl`)
+
+---
+
 ### `admin.init`
 
 Emitted when the admin role is first initialised.

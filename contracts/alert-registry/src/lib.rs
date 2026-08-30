@@ -807,6 +807,9 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("renew"))` with data `(id: u64, owner: Address)`.
     pub fn renew_alert_ttl(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
@@ -837,6 +840,12 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("renew")),
+            (config_id, caller),
+        );
+
         Ok(())
     }
 

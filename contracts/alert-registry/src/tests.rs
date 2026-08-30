@@ -676,6 +676,26 @@ fn test_renew_alert_ttl_happy_path() {
     assert_eq!(after.created_at, before.created_at);
 }
 
+// renew_alert_ttl emits a renew event
+#[test]
+fn test_renew_alert_ttl_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.renew_alert_ttl(&owner, &id);
+
+    assert!(!env.events().all().is_empty());
+}
+
 // renew_alert_ttl — unauthorized caller is rejected
 #[test]
 fn test_renew_alert_ttl_unauthorized() {
