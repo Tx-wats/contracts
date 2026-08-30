@@ -509,6 +509,26 @@ fn test_update_webhook() {
     );
 }
 
+// update_webhook emits an alert.webhook event
+#[test]
+fn test_update_webhook_emits_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64c(&env, 'a'),
+        &vec![&env],
+    );
+
+    client.update_webhook(&owner, &id, &hash64c(&env, 'b'));
+
+    assert!(!env.events().all().is_empty());
+}
+
 // 11. update_webhook unauthorized
 #[test]
 fn test_update_webhook_unauthorized() {

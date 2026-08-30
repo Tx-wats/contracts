@@ -700,6 +700,11 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("webhook")),
+            (config_id, caller),
+        );
         Ok(())
     }
 

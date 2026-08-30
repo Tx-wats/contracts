@@ -55,7 +55,7 @@ Emitted when an alert's webhook hash is rotated.
 > stored on-chain and can be read via `get_alert`.  Omitting it keeps the
 > event payload small and avoids redundancy.
 
-**Status:** 🔲 planned (`update_webhook`)
+**Status:** ✅ implemented (`update_webhook`)
 
 ---
 
