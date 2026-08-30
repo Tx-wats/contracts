@@ -190,6 +190,17 @@ fn test_admin_remove_any_alert() {
     assert!(client.get_alert(&owner, &id).is_none());
 }
 
+// initialize emits an admin.init event on first initialization
+#[test]
+fn test_initialize_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    assert!(!env.events().all().is_empty());
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #10)")]
 fn test_admin_set_per_owner_alert_limit() {

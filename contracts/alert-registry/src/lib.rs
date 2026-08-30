@@ -203,6 +203,11 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("ADMIN"), &admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("init")),
+            (admin,),
+        );
         Ok(())
     }
 
