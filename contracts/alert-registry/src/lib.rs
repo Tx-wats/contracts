@@ -807,6 +807,9 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("renew"))` with data `(id: u64, owner: Address)`.
     pub fn renew_alert_ttl(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
@@ -837,6 +840,12 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("renew")),
+            (config_id, caller),
+        );
+
         Ok(())
     }
 
@@ -855,6 +864,9 @@ impl AlertRegistry {
     ///
     /// # Panics
     /// Panics if `label` exceeds 128 bytes.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("label"))` with data `(id: u64, caller: Address)`.
     pub fn update_label(
         env: Env,
         caller: Address,
@@ -895,6 +907,12 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("label")),
+            (config_id, caller),
+        );
+
         Ok(())
     }
 
@@ -1350,6 +1368,11 @@ impl AlertRegistry {
     /// The number of alerts that were deactivated.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("bulk_off"))` with data
+    /// `(caller: Address, count: u32)` when at least one alert was deactivated.
+    /// No event is emitted if `count` is `0`.
     pub fn deactivate_all_alerts(env: Env, caller: Address) -> u32 {
         caller.require_auth();
         if Self::is_paused(env.clone()) {
@@ -1385,6 +1408,12 @@ impl AlertRegistry {
                 }
             }
         }
+        if count > 0 {
+            env.events().publish(
+                (symbol_short!("alert"), symbol_short!("bulk_off")),
+                (caller, count),
+            );
+        }
         count
     }
 
@@ -1400,6 +1429,10 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("retarget"))` with data
+    /// `(id: u64, old_target: Address, new_target: Address)`.
     pub fn update_target_contract(
         env: Env,
         caller: Address,
@@ -1431,6 +1464,11 @@ impl AlertRegistry {
         // Migrate the contract index
         Self::remove_from_contract_index(&env, &old_target, config_id);
         Self::push_contract_index(&env, &new_target, config_id)?;
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("retarget")),
+            (config_id, old_target, new_target),
+        );
 
         Ok(())
     }
