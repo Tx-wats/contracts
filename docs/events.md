@@ -37,7 +37,7 @@ Emitted when an alert's rules or active flag are changed.
 | Topic 1 | `Symbol("update")` |
 | Data | `(id: u64, owner: Address, active: bool)` |
 
-**Status:** 🔲 planned (`update_alert`)
+**Status:** ✅ implemented (`update_alert`)
 
 ---
 
@@ -55,7 +55,7 @@ Emitted when an alert's webhook hash is rotated.
 > stored on-chain and can be read via `get_alert`.  Omitting it keeps the
 > event payload small and avoids redundancy.
 
-**Status:** 🔲 planned (`update_webhook`)
+**Status:** ✅ implemented (`update_webhook`)
 
 ---
 
@@ -121,6 +121,67 @@ Emitted when an alert's TTL is extended via `bump_alert`.
 
 ---
 
+### `alert.label`
+
+Emitted when an alert's label is renamed via `update_label`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("label")` |
+| Data | `(id: u64, caller: Address)` |
+
+**Status:** ✅ implemented (`update_label`)
+
+---
+
+### `alert.retarget`
+
+Emitted when an alert's watched contract is changed via `update_target_contract`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("retarget")` |
+| Data | `(id: u64, old_target: Address, new_target: Address)` |
+
+**Status:** ✅ implemented (`update_target_contract`)
+
+---
+
+### `alert.bulk_off`
+
+Emitted once per call to `deactivate_all_alerts` when at least one of the
+caller's alerts was deactivated. Carries the total affected count rather than
+one event per alert, keeping the bulk operation's footprint constant.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("bulk_off")` |
+| Data | `(caller: Address, count: u32)` |
+
+> No event is emitted if `count` is `0` (e.g. the caller has no active alerts,
+> or the contract is paused).
+
+**Status:** ✅ implemented (`deactivate_all_alerts`)
+
+---
+
+### `alert.renew`
+
+Emitted when an alert's TTL is renewed via `renew_alert_ttl`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("renew")` |
+| Data | `(id: u64, owner: Address)` |
+
+**Status:** ✅ implemented (`renew_alert_ttl`)
+
+---
+
 ### `admin.init`
 
 Emitted when the admin role is first initialised.
@@ -131,7 +192,7 @@ Emitted when the admin role is first initialised.
 | Topic 1 | `Symbol("init")` |
 | Data | `(admin: Address)` |
 
-**Status:** 🔲 planned (`initialize`)
+**Status:** ✅ implemented (`initialize`)
 
 ---
 
@@ -159,7 +220,7 @@ Emitted when the per-owner alert limit is changed.
 | Topic 1 | `Symbol("limit")` |
 | Data | `(admin: Address, limit: u32)` |
 
-**Status:** 🔲 planned (`set_per_owner_alert_limit`)
+**Status:** ✅ implemented (`set_per_owner_alert_limit`)
 
 ---
 

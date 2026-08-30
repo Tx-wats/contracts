@@ -38,7 +38,7 @@ Source: `contracts/alert-registry/src/lib.rs`
 
 ### TTL Behavior
 
-All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex`) are extended by **100 ledgers** (≈ 8 minutes at 5 s/ledger) on every write that touches them.
+All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex`) are extended by `DEFAULT_TTL` (**17,280 ledgers**, ≈ 24 hours at 5 s/ledger) on every write that touches them. `bump_alert` can extend an alert's TTL further, up to `MAX_TTL` (535,680 ledgers, ≈ 31 days).
 
 | Function | Keys Extended |
 |---|---|
@@ -55,7 +55,7 @@ Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owne
 
 The `NEXT_ID` instance key has no explicit TTL management — its lifetime is tied to the contract instance itself.
 
-> See [docs/ttl.md](ttl.md) for implications of the 100-ledger setting and recommended production values.
+> See [docs/ttl.md](ttl.md) for implications of the DEFAULT_TTL setting and recommended production values.
 
 ---
 
@@ -83,6 +83,6 @@ There are no persistent storage entries in WatcherRegistry.
 
 | Contract | Tier | Keys | TTL Managed By |
 |---|---|---|---|
-| AlertRegistry | Persistent | `Alert`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex` | Contract (`extend_ttl`, 100 ledgers) |
+| AlertRegistry | Persistent | `Alert`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex` | Contract (`extend_ttl`, DEFAULT_TTL = 17,280 ledgers) |
 | AlertRegistry | Instance | `NEXT_ID` | Network |
 | WatcherRegistry | Instance | `Admins`, `Watchers`, `W_CNT` | Network |
