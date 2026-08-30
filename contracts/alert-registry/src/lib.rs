@@ -742,6 +742,16 @@ impl AlertRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerIndex(config.owner.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::ContractIndex(config.target_contract.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_prop")),
@@ -791,6 +801,16 @@ impl AlertRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerIndex(config.owner.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::ContractIndex(config.target_contract.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_conf")),

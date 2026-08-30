@@ -45,8 +45,8 @@ All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerActiveC
 | `register_alert` | `Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `OwnerActiveCount(owner)`, `ContractIndex(target)` |
 | `update_alert` | `Alert(id)`, `AlertActive(id)` |
 | `update_webhook` | `Alert(id)` |
-| `propose_webhook` | `Alert(id)` |
-| `confirm_webhook` | `Alert(id)` |
+| `propose_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
+| `confirm_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
 | `renew_alert_ttl` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` — data unchanged |
 | `remove_alert` | `Alert(id)`, `AlertActive(id)` deleted; `OwnerIndex(owner)`, `OwnerActiveCount(owner)`, `ContractIndex(target)` updated and TTL-extended |
 
