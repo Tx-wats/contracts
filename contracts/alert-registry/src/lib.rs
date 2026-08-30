@@ -643,6 +643,11 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("update")),
+            (config_id, config.owner.clone(), active),
+        );
         Ok(())
     }
 

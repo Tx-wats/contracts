@@ -37,7 +37,7 @@ Emitted when an alert's rules or active flag are changed.
 | Topic 1 | `Symbol("update")` |
 | Data | `(id: u64, owner: Address, active: bool)` |
 
-**Status:** 🔲 planned (`update_alert`)
+**Status:** ✅ implemented (`update_alert`)
 
 ---
 
