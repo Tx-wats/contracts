@@ -92,6 +92,9 @@ pub enum ContractError {
     InvalidWatcherRegistry = 13,
     /// Returned when a state-mutating call is made while the contract is paused.
     Paused = 13,
+    /// Returned by `validate_rules` when the same rule descriptor appears more
+    /// than once in an alert's rule list.
+    DuplicateRule = 15,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -531,6 +534,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::GlobalAlertLimitExceeded`] if the registry is at the configured global alert-count ceiling.
     /// Returns [`ContractError::TooManyRules`] if `rules` exceeds the 50-rule maximum.
     /// Returns [`ContractError::InvalidRuleDescriptor`] if a rule is not a recognised descriptor.
+    /// Returns [`ContractError::DuplicateRule`] if the same rule descriptor appears more than once.
     pub fn register_alert(
         env: Env,
         owner: Address,
@@ -600,6 +604,7 @@ impl AlertRegistry {
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::TooManyRules`] if `rules` exceeds the 50-rule maximum.
     /// Returns [`ContractError::InvalidRuleDescriptor`] if a rule is not a recognised descriptor.
+    /// Returns [`ContractError::DuplicateRule`] if the same rule descriptor appears more than once.
     pub fn update_alert(
         env: Env,
         caller: Address,
@@ -1976,19 +1981,38 @@ impl AlertRegistry {
 
     /// Validates a vector of rule descriptors.
     ///
-    /// Ensures at most 50 rules are supplied and each rule matches a recognized prefix.
+    /// Ensures at most 50 rules are supplied, each rule matches a recognized
+    /// prefix, and no descriptor appears more than once.
     /// Exposed for testing, integration, and fuzz testing.
     /// # Errors
     /// Returns [`ContractError::TooManyRules`] if rules length exceeds 50.
     /// Returns [`ContractError::InvalidRuleDescriptor`] if any rule descriptor is invalid.
+    /// Returns [`ContractError::DuplicateRule`] if the same descriptor appears more than once.
     /// # Panics
     /// Panics if indexing into `rules` fails unexpectedly.
     pub fn validate_rules(env: &Env, rules: &Vec<String>) -> Result<(), ContractError> {
         if rules.len() > 50 {
             return Err(ContractError::TooManyRules);
         }
+        // With only two recognized descriptors, each may appear at most once.
+        let transfer = String::from_str(env, "rule:transfer");
+        let mint = String::from_str(env, "rule:mint");
+        let mut saw_transfer = false;
+        let mut saw_mint = false;
         for i in 0..rules.len() {
-            Self::validate_rule(env, &rules.get(i).unwrap())?;
+            let rule = rules.get(i).unwrap();
+            Self::validate_rule(env, &rule)?;
+            if rule == transfer {
+                if saw_transfer {
+                    return Err(ContractError::DuplicateRule);
+                }
+                saw_transfer = true;
+            } else if rule == mint {
+                if saw_mint {
+                    return Err(ContractError::DuplicateRule);
+                }
+                saw_mint = true;
+            }
         }
         Ok(())
     }

@@ -66,6 +66,10 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - **`update_alert` silently discarded rule validation.** It called
   `validate_rules` and dropped the returned `Result`, so an alert could be
   updated with rule descriptors that `register_alert` rejects. Now propagated.
+- **`validate_rules` accepted duplicate rule descriptors.** `["rule:transfer",
+  "rule:transfer"]` was stored silently, wasting storage and skewing
+  rule-count-based limits. Duplicates are now rejected with
+  `ContractError::DuplicateRule` in both `register_alert` and `update_alert`.
 - **`update_webhook` accepted webhook hashes of any length**, while
   `register_alert` required exactly 64 characters. Both now enforce the same rule.
 - **`replace_watcher` could drop the replacement watcher.** Corrected so the new
