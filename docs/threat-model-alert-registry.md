@@ -60,6 +60,7 @@ The contract supports:
 ### 5. Unauthorized Read Access (Watcher-Gating Attack Surface)
 - **Gated Query Access**: When `WatcherRegistry` is configured, read queries (`get_alerts_for_contract`, `get_alerts_by_owner`, `get_active_alerts_for_contract`, `get_alert`, `get_alert_active`, and paginated variants) cross-call `WatcherRegistry::is_watcher_authorized` with the `querier` address. Unauthorized queriers are rejected with `ContractError::NotAWatcher`.
 - **Fail-Closed Verification**: If watcher-gating is enabled and the querying address is not registered, alert data is withheld.
+- **Configuration-Time Address Validation**: `set_watcher_registry` probes the candidate address with a read-only `is_watcher_authorized` call *before* persisting it, rejecting a non-contract address or a contract that does not implement the `WatcherRegistry` interface with `InvalidWatcherRegistry`. This prevents a misconfigured address from being stored and later panicking inside `assert_watcher_if_configured` on every gated read — previously the failure surfaced only at query time rather than at configuration time.
 
 ### 6. Storage Expiry & Sync Drift
 - **Automatic TTL Extension**: Every state-modifying call automatically extends persistent storage TTLs by `DEFAULT_TTL` (~24 hours).
