@@ -15,7 +15,7 @@ Source: `contracts/alert-registry/src/lib.rs`
 | `DataKey::Alert(id: u64)` | Persistent | `AlertConfig` | A single alert configuration, keyed by its numeric ID |
 | `DataKey::AlertActive(id: u64)` | Persistent | `bool` | The `active` flag stored separately so it can be read without deserializing the full `AlertConfig` (see `get_alert_active`) |
 | `DataKey::OwnerIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs owned by a given address |
-| `DataKey::OwnerActiveCount(addr: Address)` | Persistent | `u32` | Running count of currently live (non-removed) alerts owned by `addr`, maintained incrementally alongside `OwnerIndex` so `get_active_alert_count` is O(1) instead of rescanning the index |
+| `DataKey::OwnerActiveCount(addr: Address)` | Persistent | `u32` | Running count of currently live (non-removed) alerts owned by `addr`, maintained incrementally alongside `OwnerIndex` so `get_non_removed_alert_count` is O(1) instead of rescanning the index. `get_active_alert_count` instead scans `OwnerIndex` and filters by the `AlertActive` flag, so deactivated-but-not-removed alerts are excluded |
 | `DataKey::ContractIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs watching a given contract address |
 | `symbol_short!("NEXT_ID")` | Instance | `u64` | Monotonic counter used to generate unique alert IDs |
 | `symbol_short!("ADMIN")` | Instance | `Address` | Optional admin address that may remove alerts and set owner limits |

@@ -652,9 +652,18 @@ fn run_state_machine(actions: Vec<AlertAction>) {
         for (i, owner) in owners.iter().take(3).enumerate() {
             let expected_active_count = model_alerts
                 .values()
-                .filter(|a| !a.removed && a.owner_idx == i)
+                .filter(|a| !a.removed && a.owner_idx == i && a.active)
                 .count() as u32;
             assert_eq!(client.get_active_alert_count(owner), expected_active_count);
+
+            let expected_non_removed_count = model_alerts
+                .values()
+                .filter(|a| !a.removed && a.owner_idx == i)
+                .count() as u32;
+            assert_eq!(
+                client.get_non_removed_alert_count(owner),
+                expected_non_removed_count
+            );
 
             let querier = Address::generate(&env);
             let on_chain_owner_alerts = client.get_alerts_by_owner(&querier, owner);

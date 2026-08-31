@@ -483,6 +483,47 @@ fn test_get_active_alert_count() {
     assert_eq!(client.get_active_alert_count(&owner), 1);
 }
 
+// get_active_alert_count filters out deactivated-but-not-removed alerts,
+// while get_non_removed_alert_count counts every live alert regardless of
+// the active flag.
+#[test]
+fn test_get_active_alert_count_excludes_deactivated() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id1 = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+    let id2 = client.register_alert(&owner, &target, &str(&env, "B"), &hash64(&env), &vec![&env]);
+    let id3 = client.register_alert(&owner, &target, &str(&env, "C"), &hash64(&env), &vec![&env]);
+
+    assert_eq!(client.get_active_alert_count(&owner), 3);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 3);
+
+    // Deactivate alert 2 — it is no longer active but still lives in storage.
+    client.update_alert(&owner, &id2, &vec![&env], &false);
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 3);
+
+    // Reactivating brings it back into the active count.
+    client.update_alert(&owner, &id2, &vec![&env], &true);
+    assert_eq!(client.get_active_alert_count(&owner), 3);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 3);
+
+    // Deactivate again, then remove. The alert was inactive when removed, so
+    // the active count is unaffected while the non-removed count drops.
+    client.update_alert(&owner, &id2, &vec![&env], &false);
+    client.remove_alert(&owner, &id2);
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 2);
+
+    // Removing an active alert drops both counts.
+    client.remove_alert(&owner, &id1);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 1);
+
+    let _ = id3;
+}
+
 // 10. update_webhook changes the hash
 #[test]
 fn test_update_webhook() {
