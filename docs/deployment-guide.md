@@ -98,6 +98,7 @@ This will:
 - Install the WASM bytecode onto Testnet.
 - Instantiate and initialize `AlertRegistry` and `WatcherRegistry` with the deployer/admin address.
 - Wire up watcher-gating on `AlertRegistry` by invoking `set_watcher_registry` pointing to `WatcherRegistry` (unless `--no-gating` is passed).
+- Instantiate and atomically initialize `AlertRegistry` and `WatcherRegistry` via `__constructor` (closing the deploy-then-initialize front-running window).
 - Print the newly assigned contract addresses and WASM hashes.
 
 ### Step 3: Verify Deployed WASM Hashes
