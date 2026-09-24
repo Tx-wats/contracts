@@ -1,13 +1,24 @@
 name: WASM Binary Size Check
 
+# Issue #286 — Limit push to main and prevent duplicate PR runs with concurrency
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
-    branches: ["**"]
+    branches: [main]
+
+# Issue #284 — Top-level least-privilege permissions
+permissions:
+  contents: read
+
+# Issue #286 — Cancel in-progress runs on new commits
+concurrency:
+  group: wasm-size-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   WASM_SIZE_LIMIT_KB: 60
+  STELLAR_CLI_VERSION: "28.0.0"
 
 jobs:
   wasm-size:
@@ -15,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
       # read rust-toolchain.toml. Parse the pin so that file stays the one source
@@ -32,6 +43,8 @@ jobs:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: wasm32-unknown-unknown
 
+      # Issue #285, #286 — Use prebuilt pinned Stellar CLI instead of building from source
+      - name: Install Stellar CLI
       # Issue #285 — Pin Stellar CLI version
       - name: Install Stellar CLI
         env:

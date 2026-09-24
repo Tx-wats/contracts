@@ -18,5 +18,9 @@ describe("WatcherRegistry package resolution (post-build)", () => {
     const esm = await import("../dist/index.js");
     expect(typeof esm.Client).toBe("function");
     expect(esm.networks).toBeDefined();
+    // Issue #279: precise network keys verification
+    expect(esm.networks.testnet).toBeDefined();
+    expect(esm.networks.mainnet).toBeDefined();
+    expect(esm.networks.testnet.contractId).toBe("CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J");
   });
 });
