@@ -518,10 +518,213 @@ fn test_regression_every_mutator_refreshes_all_alert_ttls() {
     );
 
     age(&env);
-    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+    client.accept_alert_transfer(&new_owner, &id);
     assert_eq!(
         alert_entry_ttls(&env, &client, id, &new_owner, &new_target),
         full,
-        "transfer_alert_ownership"
+        "accept_alert_transfer"
+    );
+}
+
+// ── #201: recipient must accept alert ownership transfers ────────────────────
+
+/// Register one alert for a fresh owner; returns `(env, client, owner, target, id)`.
+fn transfer_fixture() -> (Env, AlertRegistryClient<'static>, Address, Address, u64) {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Transferable"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    (env, client, owner, target, id)
+}
+
+/// Regression test for #201: proposing a transfer changes nothing until the
+/// recipient accepts, so alerts can no longer be pushed onto a victim's
+/// address (filling their quota and polluting their alert list).
+#[test]
+fn test_regression_alert_transfer_requires_recipient_acceptance() {
+    let (env, client, owner, _target, id) = transfer_fixture();
+    let victim = Address::generate(&env);
+
+    client.propose_alert_transfer(&owner, &id, &victim);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().owner, owner);
+    assert_eq!(client.get_alert_ids_by_owner(&victim).len(), 0);
+    assert_eq!(client.get_non_removed_alert_count(&victim), 0);
+
+    // Only the named recipient can accept.
+    let stranger = Address::generate(&env);
+    assert_eq!(
+        client
+            .try_accept_alert_transfer(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+
+    client.accept_alert_transfer(&victim, &id);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().owner, victim);
+    assert_eq!(client.get_alert_ids_by_owner(&victim), vec![&env, id]);
+    assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+    assert!(client.get_pending_alert_transfer(&id).is_none());
+}
+
+#[test]
+fn test_regression_alert_transfer_accept_requires_recipient_auth() {
+    let env = Env::default();
+    let contract_id = env.register(AlertRegistry, ());
+    let client = AlertRegistryClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    env.mock_all_auths();
+    let id = client.register_alert(
+        &owner,
+        &Address::generate(&env),
+        &str(&env, "Auth"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+
+    client.accept_alert_transfer(&new_owner, &id);
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(
+        auths[0].0, new_owner,
+        "accept must be authorised by the recipient"
+    );
+}
+
+#[test]
+fn test_regression_alert_transfer_reject_and_cancel() {
+    let (env, client, owner, _target, id) = transfer_fixture();
+    let recipient = Address::generate(&env);
+
+    // Recipient declines.
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    assert_eq!(
+        client
+            .try_reject_alert_transfer(&owner, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized,
+        "only the recipient can reject"
+    );
+    client.reject_alert_transfer(&recipient, &id);
+    assert!(client.get_pending_alert_transfer(&id).is_none());
+    assert_eq!(
+        client
+            .try_accept_alert_transfer(&recipient, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::NoPendingTransfer
+    );
+
+    // Owner withdraws.
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    client.cancel_alert_transfer(&owner, &id);
+    assert!(client.get_pending_alert_transfer(&id).is_none());
+    assert_eq!(
+        client
+            .try_cancel_alert_transfer(&owner, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::NoPendingTransfer
+    );
+    assert_eq!(client.get_alert(&owner, &id).unwrap().owner, owner);
+}
+
+#[test]
+fn test_regression_alert_transfer_expires() {
+    let (env, client, owner, _target, id) = transfer_fixture();
+    let recipient = Address::generate(&env);
+
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    let pending = client.get_pending_alert_transfer(&id).unwrap();
+    assert_eq!(
+        pending.expires_at_ledger,
+        env.ledger().sequence() + crate::ALERT_TRANSFER_EXPIRY_LEDGERS
+    );
+
+    // One ledger past the window it can no longer be accepted...
+    env.ledger()
+        .with_mut(|li| li.sequence_number = pending.expires_at_ledger + 1);
+    assert_eq!(
+        client
+            .try_accept_alert_transfer(&recipient, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::TransferExpired
+    );
+    assert_eq!(client.get_alert(&owner, &id).unwrap().owner, owner);
+
+    // ...and a fresh proposal restarts the window.
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    client.accept_alert_transfer(&recipient, &id);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().owner, recipient);
+}
+
+#[test]
+fn test_regression_alert_transfer_accepted_on_last_ledger() {
+    let (env, client, owner, _target, id) = transfer_fixture();
+    let recipient = Address::generate(&env);
+
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    let expires = client
+        .get_pending_alert_transfer(&id)
+        .unwrap()
+        .expires_at_ledger;
+    env.ledger().with_mut(|li| li.sequence_number = expires);
+    client.accept_alert_transfer(&recipient, &id);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().owner, recipient);
+}
+
+#[test]
+fn test_regression_pending_transfer_cleared_on_remove_and_retarget() {
+    let (env, client, owner, _target, id) = transfer_fixture();
+    let recipient = Address::generate(&env);
+
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    client.update_target_contract(&owner, &id, &Address::generate(&env));
+    assert!(
+        client.get_pending_alert_transfer(&id).is_none(),
+        "retargeting must clear the pending transfer"
+    );
+
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    client.remove_alert(&owner, &id);
+    assert!(
+        client.get_pending_alert_transfer(&id).is_none(),
+        "removing the alert must clear the pending transfer"
+    );
+}
+
+#[test]
+fn test_regression_alert_transfer_rejects_self_and_paused() {
+    let (env, client, owner, _target, id) = transfer_fixture();
+    assert_eq!(
+        client
+            .try_propose_alert_transfer(&owner, &id, &owner)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidTransferRecipient
+    );
+
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.initialize(&admin);
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    client.pause(&admin);
+    assert_eq!(
+        client
+            .try_accept_alert_transfer(&recipient, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Paused
     );
 }

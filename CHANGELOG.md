@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING (alert-registry)
+
+- **Alert ownership transfers now require the recipient's acceptance.**
+  `transfer_alert_ownership` let an owner push alerts onto any address, which a
+  griefer could use to fill a victim's per-owner quota and pollute their alert
+  list. It is replaced by `propose_alert_transfer` (owner) and
+  `accept_alert_transfer` (recipient signs), plus `reject_alert_transfer`,
+  `cancel_alert_transfer` and `get_pending_alert_transfer`. Proposals expire
+  after `ALERT_TRANSFER_EXPIRY_LEDGERS` (≈ 7 days) and are cleared when the alert
+  is removed or retargeted. New errors: `NoPendingTransfer` (18),
+  `TransferExpired` (19), `InvalidTransferRecipient` (20). (issue #201)
+
 ### Deprecated
 
 - **`WatcherRegistry::is_authorized` alias deprecated**: Deprecated in rustdoc, bindings, and documentation with scheduled removal in `v0.3.0`. Callers and examples have migrated to `is_watcher_authorized` (#252).

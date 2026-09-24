@@ -18,6 +18,7 @@ Generated from the `DataKey` enum and every `symbol_short!` key the contract rea
 | `DataKey::AlertActive(id: u64)` | Persistent | `bool` | The `active` flag stored separately so it can be read without deserializing the full `AlertConfig` (see `get_alert_active`) |
 | `DataKey::OwnerIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs owned by a given address |
 | `DataKey::OwnerLiveCount(addr: Address)` | Persistent | `u32` | Running count of currently live (non-removed) alerts owned by `addr`, deactivated alerts included. Renamed from `OwnerActiveCount` (the name wrongly implied an `active` filter); entries under the legacy key are migrated to the new key on first read. Maintained incrementally alongside `OwnerIndex` so `get_non_removed_alert_count` is O(1) instead of rescanning the index. `get_active_alert_count` instead scans `OwnerIndex` and filters by the `AlertActive` flag, so deactivated-but-not-removed alerts are excluded |
+| `DataKey::PendingTransfer(id: u64)` | Persistent | `PendingAlertTransfer` | Ownership transfer proposed by `propose_alert_transfer` and awaiting `accept_alert_transfer`: the recipient (`new_owner`) and the last ledger it can be accepted on (`expires_at_ledger`). Removed on accept, reject, cancel, alert removal, or retarget. Written with a TTL of `ALERT_TRANSFER_EXPIRY_LEDGERS` |
 | `DataKey::ContractIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs watching a given contract address |
 | `DataKey::NextId` | — | — | Declared in the enum but **not used**: the counter is stored under the `NEXT_ID` symbol key below |
 | `symbol_short!("NEXT_ID")` | Instance | `u64` | Monotonic counter used to generate unique alert IDs; also the value returned by `get_alert_count` |
@@ -52,7 +53,8 @@ Every mutator that rewrites an alert goes through `persist_alert`, which writes 
 | Function | Keys Extended |
 |---|---|
 | `register_alert`, `update_alert`, `update_webhook`, `update_label`, `propose_webhook`, `confirm_webhook`, `cancel_webhook_proposal`, `deactivate_alert_by_admin`, `renew_alert_ttl` | Full set, to `DEFAULT_TTL` |
-| `transfer_alert_ownership` | Full set with the new owner's `OwnerIndex`/`OwnerLiveCount`; the old owner's index and counter are rewritten and extended |
+| `accept_alert_transfer` | Full set with the new owner's `OwnerIndex`/`OwnerLiveCount`; the old owner's index and counter are rewritten and extended; `PendingTransfer(id)` removed |
+| `propose_alert_transfer` | Writes `PendingTransfer(id)` with a TTL of `ALERT_TRANSFER_EXPIRY_LEDGERS`; the alert's own entries are unchanged |
 | `update_target_contract` | Full set with the new target's `ContractIndex`; the old target's index is rewritten and extended |
 | `deactivate_all_alerts` | Full set for each deactivated alert |
 | `bump_alert` | Full set, to the requested TTL (capped at `MAX_TTL`) |

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING
+- `transferAlertOwnership` is removed. Ownership transfers are now two-step:
+  `proposeAlertTransfer({ caller, config_id, new_owner })` by the owner, then
+  `acceptAlertTransfer({ new_owner, config_id })` signed by the recipient. Also
+  added: `rejectAlertTransfer`, `cancelAlertTransfer` and
+  `getPendingAlertTransfer`. (#201)
+
 ### Changed — BREAKING (0.2.0)
 - `webhook_hash` / `new_webhook_hash` arguments and the `webhook_hash` /
   `pending_webhook_hash` fields of `AlertConfig` and `AlertInput` are now

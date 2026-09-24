@@ -106,7 +106,8 @@ extended when present; see `docs/storage.md`.)
 | `confirm_webhook`     | Full set, to `DEFAULT_TTL` |
 | `cancel_webhook_proposal` | Full set, to `DEFAULT_TTL` |
 | `deactivate_alert_by_admin` | Full set, to `DEFAULT_TTL` |
-| `transfer_alert_ownership` | Full set with the **new** owner's `OwnerIndex`/`OwnerLiveCount`, to `DEFAULT_TTL` |
+| `accept_alert_transfer` | Full set with the **new** owner's `OwnerIndex`/`OwnerLiveCount`, to `DEFAULT_TTL` |
+| `propose_alert_transfer` | `PendingTransfer(id)` only, to `ALERT_TRANSFER_EXPIRY_LEDGERS` |
 | `update_target_contract` | Full set with the **new** target's `ContractIndex`, to `DEFAULT_TTL`; the old target's index is rewritten and extended |
 | `deactivate_all_alerts` | Full set for each deactivated alert, to `DEFAULT_TTL` |
 | `renew_alert_ttl`     | Full set, to `DEFAULT_TTL` — data unchanged |

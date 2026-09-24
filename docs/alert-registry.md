@@ -292,25 +292,21 @@ Permanently removes an alert config. Only the original owner may call this.
 
 ---
 
-### `transfer_alert_ownership`
+### Alert ownership transfers
 
-Transfers ownership of an alert to a new address. Updates the `owner` field of the alert config and migrates the alert ID from the old owner's `OwnerIndex` to the new owner's. Only the current owner may call this.
+Ownership moves in two steps so nobody can be made the owner of alerts they did not agree to take (which would fill their per-owner quota and add webhooks they do not control to their alert list). The owner proposes, the recipient accepts. A proposal expires after `ALERT_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers, ≈ 7 days), and is cleared when the alert is removed or retargeted. `transfer_alert_ownership` was replaced by this flow in #201.
 
-**Requires auth:** `caller` (must match `owner` of the config)
+| Function | Auth | Effect | Errors |
+|---|---|---|---|
+| `propose_alert_transfer(caller, config_id, new_owner)` | `caller` (current owner) | Stores a `PendingAlertTransfer { new_owner, expires_at_ledger }`; replaces any earlier proposal. Ownership is unchanged. | `AlertNotFound`, `Unauthorized`, `InvalidTransferRecipient` (new owner is already the owner), `Paused` |
+| `accept_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Moves the alert to `new_owner`: updates `owner`, migrates the owner index and live counter, clears the proposal. | `AlertNotFound`, `NoPendingTransfer`, `Unauthorized` (not the named recipient), `TransferExpired`, `Paused` |
+| `reject_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Clears the proposal; the alert stays with its owner. | `NoPendingTransfer`, `Unauthorized` |
+| `cancel_alert_transfer(caller, config_id)` | `caller` (current owner) | Clears the proposal. | `AlertNotFound`, `Unauthorized`, `NoPendingTransfer` |
+| `get_pending_alert_transfer(config_id)` | none | Returns `Option<PendingAlertTransfer>`. An expired proposal is still returned (compare `expires_at_ledger` with the current ledger); it can only be cancelled or replaced. | — |
 
-**Parameters**
+A transfer can be accepted up to and including ledger `expires_at_ledger`.
 
-| Name | Type | Description |
-|---|---|---|
-| `caller` | `Address` | Must be the current alert owner |
-| `config_id` | `u64` | ID of the alert to transfer |
-| `new_owner` | `Address` | Address to become the new owner |
-
-**Returns:** nothing
-
-**Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
-
-**Events:** Emits `(Symbol("alert"), Symbol("transfer"))` with data `(id: u64, old_owner: Address, new_owner: Address)`.
+**Events:** `(Symbol("alert"), Symbol("xfer_prop"))` with `(id, owner, new_owner, expires_at_ledger)` on propose; `(Symbol("alert"), Symbol("transfer"))` with `(id, old_owner, new_owner)` on accept; `(Symbol("alert"), Symbol("xfer_rej"))` with `(id, new_owner)` on reject; `(Symbol("alert"), Symbol("xfer_can"))` with `(id, owner)` on cancel.
 
 ---
 
@@ -732,6 +728,9 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `NoPendingWebhook` | 12 | `confirm_webhook` called but no rotation is in progress |
 | `InvalidWatcherRegistry` | 13 | `set_watcher_registry` given an address that doesn't implement the `WatcherRegistry` interface |
 | `DuplicateRule` | 15 | The same rule descriptor appears more than once in `rules` |
+| `NoPendingTransfer` | 18 | `accept_alert_transfer`, `reject_alert_transfer` or `cancel_alert_transfer` called with no transfer pending |
+| `TransferExpired` | 19 | `accept_alert_transfer` called after the proposal's `expires_at_ledger` |
+| `InvalidTransferRecipient` | 20 | `propose_alert_transfer` named the current owner as the recipient |
 
 ---
 
