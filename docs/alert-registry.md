@@ -11,7 +11,7 @@ Contract that stores alert configurations on-chain, keyed by contract address.
 | Field | Type | Description |
 |---|---|---|
 | `label` | `String` | Human-readable name for the alert |
-| `webhook_hash` | `String` | SHA-256 hex digest of the webhook URL (privacy-preserving; see [Webhook Hash Scheme](#webhook-hash-scheme) below) |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the webhook URL, as 32 raw bytes (privacy-preserving; see [Webhook Hash Scheme](#webhook-hash-scheme) below) |
 | `rules` | `Vec<String>` | Serialized rule descriptors |
 | `owner` | `Address` | Address that owns this config |
 | `target_contract` | `Address` | Contract being watched |
@@ -19,7 +19,7 @@ Contract that stores alert configurations on-chain, keyed by contract address.
 | `updated_at` | `u64` | Ledger timestamp of last update |
 | `updated_ledger` | `u32` | Monotonic ledger sequence number of last update |
 | `active` | `bool` | Whether the alert is active |
-| `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
+| `pending_webhook_hash` | `Option<BytesN<32>>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
 ### `AlertInput`
 
@@ -30,21 +30,22 @@ Input record for [`batch_register_alert`](#batch_register_alert). Mirrors the ar
 | `owner` | `Address` | Address that will own and control this alert |
 | `target_contract` | `Address` | Contract address to watch |
 | `label` | `String` | Human-readable name for the alert |
-| `webhook_hash` | `String` | SHA-256 hex digest of the destination webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the destination webhook URL |
 | `rules` | `Vec<String>` | Serialized rule descriptors |
 
 ---
 
 ## Webhook Hash Scheme
 
-The `webhook_hash` field stores a **SHA-256 hex digest** of the destination webhook URL. The raw URL is never written on-chain, which prevents publicly exposing private endpoint addresses.
+The `webhook_hash` field stores the **SHA-256 digest** of the destination webhook URL as 32 raw bytes (`BytesN<32>`). Because the type fixes the length, the contract no longer validates it (#214). The raw URL is never written on-chain, which prevents publicly exposing private endpoint addresses.
 
 ### Algorithm
 
 | Property | Value |
 |---|---|
 | Hash function | SHA-256 |
-| Encoding | Lowercase hex string (64 characters) |
+| On-chain type | `BytesN<32>` (the raw digest, not its hex text) |
+| Passing it in | `stellar contract invoke` takes the 64-character hex digest printed below; SDKs pass the 32 bytes (e.g. a Node `Buffer`) |
 | Input | The raw webhook URL, UTF-8 encoded, no trailing newline |
 
 ### Computing the Hash
@@ -93,7 +94,7 @@ Off-chain watcher nodes store the original webhook URL locally and verify agains
 
 To rotate a webhook URL, two methods are available:
 - **Two-phase rotation (recommended)**: Use `propose_webhook` followed by `confirm_webhook` to safely stage and test the new endpoint before activating it without downtime. See [ADR 0001: Two-Phase Webhook Rotation](adr/0001-two-phase-webhook-rotation.md) for the security rationale and threat analysis.
-- **Direct rotation**: Use `update_webhook` with the new SHA-256 hex digest for immediate cutover.
+- **Direct rotation**: Use `update_webhook` with the new SHA-256 digest for immediate cutover.
 
 ---
 
@@ -129,7 +130,7 @@ Registers a new alert configuration for a target contract address.
 | `owner` | `Address` | Owner of the alert config |
 | `target_contract` | `Address` | Contract address to watch |
 | `label` | `String` | Human-readable label |
-| `webhook_hash` | `String` | SHA-256 hex digest of the webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the webhook URL |
 | `rules` | `Vec<String>` | Rule descriptors |
 
 **Returns:** `u64` — the new config ID
@@ -477,6 +478,8 @@ Updates only the label of an existing alert, leaving `rules` and `webhook_hash` 
 
 Updates the webhook hash for an existing alert. Use this to rotate webhook URLs without re-registering. Only the original owner may call this.
 
+The update takes effect immediately and **discards any rotation staged by `propose_webhook`** (`pending_webhook_hash` is reset to `None`), so a later `confirm_webhook` returns `NoPendingWebhook` instead of reverting this update.
+
 **Requires auth:** `caller` (must match `owner` of the config)
 
 **Parameters**
@@ -485,7 +488,7 @@ Updates the webhook hash for an existing alert. Use this to rotate webhook URLs 
 |---|---|---|
 | `caller` | `Address` | Must be the alert owner |
 | `config_id` | `u64` | ID of the alert to update |
-| `webhook_hash` | `String` | New hashed webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the new webhook URL |
 
 **Returns:** `Result<(), ContractError>`
 
@@ -507,7 +510,7 @@ Calling `propose_webhook` again before confirming overwrites the previous pendin
 |---|---|---|
 | `caller` | `Address` | Must be the alert owner |
 | `config_id` | `u64` | ID of the alert to update |
-| `new_webhook_hash` | `String` | SHA-256 hex digest of the new webhook URL |
+| `new_webhook_hash` | `BytesN<32>` | SHA-256 digest of the new webhook URL |
 
 **Returns:** `Result<(), ContractError>`
 
@@ -720,7 +723,7 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `AlreadyInitialized` | 3 | `initialize` was called more than once |
 | `NotInitialized` | 4 | Admin function called before `initialize` |
 | `NotAWatcher` | 5 | Watcher-gating is enabled and `querier` is not a registered watcher |
-| `InvalidWebhookHash` | 6 | Webhook hash is not exactly 64 characters |
+| `InvalidWebhookHash` | 6 | No longer returned: webhook hashes are `BytesN<32>`, so a wrong length cannot be constructed. Kept so the code is never reused. |
 | `LabelTooLong` | 7 | `label` exceeds 128 bytes |
 | `TooManyRules` | 8 | `rules` exceeds the 50-rule maximum |
 | `InvalidRuleDescriptor` | 9 | A rule is not a recognised descriptor (`rule:transfer`, `rule:mint`) |

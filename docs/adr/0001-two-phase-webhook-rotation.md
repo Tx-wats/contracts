@@ -21,8 +21,8 @@ We introduce a **two-phase webhook rotation mechanism** via two distinct entry p
 
 1. **`propose_webhook(caller, config_id, new_webhook_hash)` (Phase 1: Stage)**
    - Requires `caller` auth matching `config.owner`.
-   - Validates that `new_webhook_hash` is a valid 64-character ASCII hex string.
-   - Stores the new hash in `AlertConfig::pending_webhook_hash: Option<String>`.
+   - Takes `new_webhook_hash` as `BytesN<32>`, so only a 32-byte SHA-256 digest can be staged (the earlier 64-character hex string and its length check were replaced in #214).
+   - Stores the new hash in `AlertConfig::pending_webhook_hash: Option<BytesN<32>>`.
    - **Crucially leaves the active `webhook_hash` unchanged.** The existing webhook remains fully functional.
    - Emits an `(Symbol("alert"), Symbol("wh_prop"))` event containing `(config_id, caller)`.
    - Idempotent / Re-proposable: An owner can call `propose_webhook` again to overwrite a mistaken proposal before confirmation.
@@ -37,6 +37,7 @@ We introduce a **two-phase webhook rotation mechanism** via two distinct entry p
 
 3. **Legacy `update_webhook` Retention**
    - The direct `update_webhook` function is retained for backwards compatibility and emergency updates where single-step atomic cutover is explicitly required.
+   - A direct `update_webhook` supersedes any in-flight rotation: it clears `pending_webhook_hash`, so a subsequent `confirm_webhook` cannot promote the stale staged hash over the direct update (#216).
 
 ## Threat Analysis & Mitigations
 
@@ -57,4 +58,4 @@ We introduce a **two-phase webhook rotation mechanism** via two distinct entry p
 
 ### Tradeoffs
 - **Transaction Overhead**: Completing a two-phase rotation requires two on-chain transactions instead of one.
-- **Storage Overhead**: Adds an `Option<String>` field (`pending_webhook_hash`) to `AlertConfig` in persistent storage.
+- **Storage Overhead**: Adds an `Option<BytesN<32>>` field (`pending_webhook_hash`) to `AlertConfig` in persistent storage.

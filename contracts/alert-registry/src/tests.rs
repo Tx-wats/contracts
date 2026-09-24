@@ -12,15 +12,14 @@ fn setup() -> (Env, AlertRegistryClient<'static>) {
     (env, client)
 }
 
-/// A 64-character webhook hash of repeated `c` — `register_alert`,
-/// `update_webhook` and `propose_webhook` all require exactly 64 characters.
-fn hash64c(env: &Env, c: char) -> String {
-    let buf = [c as u8; 64];
-    String::from_str(env, core::str::from_utf8(&buf).unwrap())
+/// A webhook hash (32-byte SHA-256 digest) with every byte set to `c`;
+/// vary `c` when a test needs two hashes that must differ.
+fn hash64c(env: &Env, c: char) -> soroban_sdk::BytesN<32> {
+    soroban_sdk::BytesN::from_array(env, &[c as u8; 32])
 }
 
-/// The default valid 64-character webhook hash.
-fn hash64(env: &Env) -> String {
+/// The default webhook hash used by tests.
+fn hash64(env: &Env) -> soroban_sdk::BytesN<32> {
     hash64c(env, '0')
 }
 
@@ -1145,11 +1144,7 @@ fn test_ten_alerts_same_owner_same_contract() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
-    // webhook_hash must be exactly 64 characters
-    let webhook_hash = str(
-        &env,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    );
+    let webhook_hash = hash64c(&env, 'a');
     // 10 distinct labels
     let labels = [
         "Alert 0", "Alert 1", "Alert 2", "Alert 3", "Alert 4", "Alert 5", "Alert 6", "Alert 7",
@@ -2135,8 +2130,12 @@ fn test_batch_register_alert_rolls_back_on_validation_error() {
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    let mut bad = alert_input(&env, &owner, &target, "Bad");
-    bad.webhook_hash = str(&env, "too-short");
+    // A second owner: a repeated require_auth for the same address within one
+    // invocation aborts before validation runs, which would mask the error.
+    let other_owner = Address::generate(&env);
+    let mut bad = alert_input(&env, &other_owner, &target, "Bad");
+    // 129 bytes: one over the label limit.
+    bad.label = str(&env, &"a".repeat(129));
 
     let inputs = vec![
         &env,
@@ -2149,7 +2148,7 @@ fn test_batch_register_alert_rolls_back_on_validation_error() {
             .try_batch_register_alert(&inputs)
             .unwrap_err()
             .unwrap(),
-        ContractError::InvalidWebhookHash
+        ContractError::LabelTooLong
     );
     // The whole batch is rolled back, including the earlier valid item.
     assert_eq!(client.get_alert_count(), 0);

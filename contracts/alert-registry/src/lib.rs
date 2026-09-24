@@ -18,7 +18,7 @@ use soroban_sdk::{
 };
 
 contractmeta!(key = "Name", val = "AlertRegistry");
-contractmeta!(key = "Version", val = "0.1.0");
+contractmeta!(key = "Version", val = "0.2.0");
 
 // ── Storage keys ────────────────────────────────────────────────────────────
 
@@ -63,7 +63,12 @@ pub enum DataKey {
     /// given address, maintained incrementally alongside [`DataKey::OwnerIndex`]
     /// so [`AlertRegistry::get_non_removed_alert_count`] never has to rescan
     /// the owner's full index.
-    OwnerActiveCount(Address),
+    ///
+    /// "Live" means not removed: deactivated alerts still count. Use
+    /// [`AlertRegistry::get_active_alert_count`] for the `active`-filtered
+    /// number. Formerly `OwnerActiveCount`; entries written under that key are
+    /// migrated on first read (see `AlertRegistry::owner_live_count`).
+    OwnerLiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
     /// Monotonic counter used to generate unique alert IDs.
@@ -86,7 +91,9 @@ pub enum ContractError {
     /// Returned when a watcher registry is configured and the querying address
     /// is not a registered watcher.
     NotAWatcher = 5,
-    /// The webhook hash is not exactly 64 characters (a hex SHA-256 digest).
+    /// No longer returned. Webhook hashes are now typed `BytesN<32>`, so a
+    /// wrong-length hash cannot be constructed (#214). The variant is kept so
+    /// its discriminant is never reused for a different error.
     InvalidWebhookHash = 6,
     /// The label exceeds 128 bytes.
     LabelTooLong = 7,
@@ -133,15 +140,16 @@ pub enum ContractError {
 pub struct AlertConfig {
     /// Human-readable label for the alert.
     pub label: String,
-    /// SHA-256 hash of the webhook URL (the raw URL is never stored on-chain).
-    pub webhook_hash: String,
+    /// SHA-256 hash of the webhook URL (the raw URL is never stored on-chain),
+    /// as its 32 raw digest bytes.
+    pub webhook_hash: BytesN<32>,
     /// Staged replacement for `webhook_hash` during a two-phase rotation.
     ///
     /// Set by [`AlertRegistry::propose_webhook`] and promoted to `webhook_hash`
     /// by [`AlertRegistry::confirm_webhook`]. `None` when no rotation is in
     /// progress. Staging the change means a misconfigured endpoint never
     /// silently replaces a working one.
-    pub pending_webhook_hash: Option<String>,
+    pub pending_webhook_hash: Option<BytesN<32>>,
     /// List of rule identifiers that trigger this alert (e.g. `"rule:transfer"`).
     pub rules: Vec<String>,
     /// Address that owns and may mutate this alert.
@@ -171,8 +179,8 @@ pub struct AlertInput {
     pub target_contract: Address,
     /// Human-readable name for the alert.
     pub label: String,
-    /// SHA-256 hash of the destination webhook URL.
-    pub webhook_hash: String,
+    /// SHA-256 hash of the destination webhook URL, as its 32 raw digest bytes.
+    pub webhook_hash: BytesN<32>,
     /// Rule identifiers that should trigger the alert.
     pub rules: Vec<String>,
 }
@@ -576,13 +584,12 @@ impl AlertRegistry {
     /// * `owner` - Address that will own and control this alert.
     /// * `target_contract` - Contract address to watch.
     /// * `label` - Human-readable name for the alert.
-    /// * `webhook_hash` - SHA-256 hash of the destination webhook URL.
+    /// * `webhook_hash` - SHA-256 hash of the destination webhook URL, as its 32 raw digest bytes.
     /// * `rules` - Rule identifiers that should trigger the alert.
     ///
     /// # Returns
     /// The new alert's numeric ID.
     /// # Errors
-    /// Returns [`ContractError::InvalidWebhookHash`] if `webhook_hash` is not exactly 64 characters.
     /// Returns [`ContractError::LabelTooLong`] if `label` exceeds 128 bytes.
     /// Returns [`ContractError::OwnerAlertLimitExceeded`] if the owner is at the configured per-owner alert limit.
     /// Returns [`ContractError::ContractAlertLimitExceeded`] if the target contract is at the configured per-contract alert limit.
@@ -595,12 +602,9 @@ impl AlertRegistry {
         owner: Address,
         target_contract: Address,
         label: String,
-        webhook_hash: String,
+        webhook_hash: BytesN<32>,
         rules: Vec<String>,
     ) -> Result<u64, ContractError> {
-        if webhook_hash.len() != 64 {
-            return Err(ContractError::InvalidWebhookHash);
-        }
         owner.require_auth();
         Self::assert_not_paused(&env)?;
 
@@ -629,18 +633,9 @@ impl AlertRegistry {
             active: true,
         };
 
-        env.storage().persistent().set(&DataKey::Alert(id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AlertActive(id), &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::AlertActive(id), DEFAULT_TTL, DEFAULT_TTL);
         Self::push_owner_index(&env, &owner, id)?;
         Self::push_contract_index(&env, &target_contract, id)?;
+        Self::persist_alert(&env, id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("register")),
@@ -685,31 +680,7 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        // Keep the cheap AlertActive flag in sync with the full config.
-        env.storage()
-            .persistent()
-            .set(&DataKey::AlertActive(config_id), &active);
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("update")),
@@ -720,25 +691,25 @@ impl AlertRegistry {
 
     /// Update the webhook hash for an existing alert.
     ///
+    /// Takes effect immediately and discards any rotation staged by
+    /// [`AlertRegistry::propose_webhook`], so a later
+    /// [`AlertRegistry::confirm_webhook`] returns
+    /// [`ContractError::NoPendingWebhook`] instead of reverting this update.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must also be
     /// the original owner of the alert.
     /// # Errors
-    /// Returns [`ContractError::InvalidWebhookHash`] if `webhook_hash` is not exactly 64 characters.
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     pub fn update_webhook(
         env: Env,
         caller: Address,
         config_id: u64,
-        webhook_hash: String,
+        webhook_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
-
-        if webhook_hash.len() != 64 {
-            return Err(ContractError::InvalidWebhookHash);
-        }
 
         let mut config: AlertConfig = env
             .storage()
@@ -749,25 +720,13 @@ impl AlertRegistry {
         Self::assert_owner(&config, &caller)?;
 
         config.webhook_hash = webhook_hash;
+        // A direct update supersedes any in-flight rotation; otherwise a later
+        // confirm_webhook would promote the stale staged hash over this one.
+        config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("webhook")),
@@ -788,8 +747,6 @@ impl AlertRegistry {
     /// alert owner.
     ///
     /// # Errors
-    /// Returns [`ContractError::InvalidWebhookHash`] unless `webhook_hash` is
-    /// exactly 64 characters.
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
     ///
@@ -799,14 +756,10 @@ impl AlertRegistry {
         env: Env,
         caller: Address,
         config_id: u64,
-        webhook_hash: String,
+        webhook_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
-
-        if webhook_hash.len() != 64 {
-            return Err(ContractError::InvalidWebhookHash);
-        }
 
         let mut config: AlertConfig = env
             .storage()
@@ -819,22 +772,7 @@ impl AlertRegistry {
         // The live hash is deliberately left untouched until confirmation.
         config.pending_webhook_hash = Some(webhook_hash);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_prop")),
@@ -879,22 +817,7 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_conf")),
@@ -941,22 +864,7 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_cancel")),
@@ -996,24 +904,7 @@ impl AlertRegistry {
 
         Self::assert_owner(&config, &caller)?;
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::touch_alert(&env, config_id, &config, DEFAULT_TTL);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("renew")),
@@ -1064,22 +955,7 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("label")),
@@ -1173,20 +1049,7 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AlertActive(config_id), &false);
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("admin_off")),
@@ -1230,15 +1093,9 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-
         Self::remove_from_owner_index(&env, &old_owner, config_id);
         Self::push_owner_index(&env, &new_owner, config_id)?;
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("transfer")),
@@ -1351,26 +1208,7 @@ impl AlertRegistry {
             .get(&DataKey::Alert(config_id))
             .ok_or(ContractError::AlertNotFound)?;
 
-        env.storage().persistent().extend_ttl(
-            &DataKey::Alert(config_id),
-            effective_ttl,
-            effective_ttl,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            effective_ttl,
-            effective_ttl,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            effective_ttl,
-            effective_ttl,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract),
-            effective_ttl,
-            effective_ttl,
-        );
+        Self::touch_alert(&env, config_id, &config, effective_ttl);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("bump")),
@@ -1621,6 +1459,7 @@ impl AlertRegistry {
                 if cfg.active {
                     cfg.active = false;
                     cfg.updated_at = env.ledger().timestamp();
+                    Self::persist_alert(&env, id, &cfg);
                     cfg.updated_ledger = env.ledger().sequence();
                     env.storage().persistent().set(&DataKey::Alert(id), &cfg);
                     env.storage().persistent().extend_ttl(
@@ -1646,10 +1485,6 @@ impl AlertRegistry {
             }
         }
         if count > 0 {
-            env.storage().persistent().extend_ttl(
-                &DataKey::OwnerIndex(caller.clone()),
-                DEFAULT_TTL,
-                DEFAULT_TTL,
             env.events().publish(
                 (symbol_short!("alert"), symbol_short!("bulk_off")),
                 (caller, count),
@@ -1696,16 +1531,11 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-
-        // Migrate the contract index
+        // Migrate the contract index before persisting, so the refresh in
+        // persist_alert extends the new target's index.
         Self::remove_from_contract_index(&env, &old_target, config_id);
         Self::push_contract_index(&env, &new_target, config_id)?;
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("retarget")),
@@ -1903,7 +1733,7 @@ impl AlertRegistry {
     /// registered — it never rescans the owner's index.
     #[must_use]
     pub fn get_non_removed_alert_count(env: Env, owner: Address) -> u32 {
-        Self::owner_active_count(&env, &owner)
+        Self::owner_live_count(&env, &owner)
     }
 
     /// Get the number of live (non-removed, unexpired) alerts targeting
@@ -2027,6 +1857,47 @@ impl AlertRegistry {
         );
     }
 
+    /// Write `config` (and its cheap [`DataKey::AlertActive`] mirror) under
+    /// `config_id`, then refresh every entry the alert depends on via
+    /// [`AlertRegistry::touch_alert`].
+    ///
+    /// Every mutator that rewrites an alert goes through here, so the
+    /// config/`AlertActive` pair can never drift apart and no mutator can
+    /// forget one of the TTL extensions.
+    ///
+    /// The owner and contract indexes must already contain `config_id`, so
+    /// callers that move an alert between indexes update them first.
+    fn persist_alert(env: &Env, config_id: u64, config: &AlertConfig) {
+        let storage = env.storage().persistent();
+        storage.set(&DataKey::Alert(config_id), config);
+        storage.set(&DataKey::AlertActive(config_id), &config.active);
+        Self::touch_alert(env, config_id, config, DEFAULT_TTL);
+    }
+
+    /// Extend the TTL of an alert and of every entry it depends on to `ttl`
+    /// ledgers: [`DataKey::Alert`], [`DataKey::AlertActive`], the owner's
+    /// [`DataKey::OwnerIndex`] and [`DataKey::OwnerLiveCount`], and the
+    /// target's [`DataKey::ContractIndex`].
+    ///
+    /// The owner counter is only extended when present: it may still sit
+    /// under its pre-rename key (migrated lazily by `owner_live_count`) or
+    /// have expired, and extending a missing entry would abort the call.
+    fn touch_alert(env: &Env, config_id: u64, config: &AlertConfig, ttl: u32) {
+        let storage = env.storage().persistent();
+        storage.extend_ttl(&DataKey::Alert(config_id), ttl, ttl);
+        storage.extend_ttl(&DataKey::AlertActive(config_id), ttl, ttl);
+        storage.extend_ttl(&DataKey::OwnerIndex(config.owner.clone()), ttl, ttl);
+        storage.extend_ttl(
+            &DataKey::ContractIndex(config.target_contract.clone()),
+            ttl,
+            ttl,
+        );
+        let live_count_key = DataKey::OwnerLiveCount(config.owner.clone());
+        if storage.has(&live_count_key) {
+            storage.extend_ttl(&live_count_key, ttl, ttl);
+        }
+    }
+
     /// Atomically read and increment the global alert ID counter.
     ///
     /// Returns the current value before incrementing, so the first ID is `0`.
@@ -2059,20 +1930,45 @@ impl AlertRegistry {
     }
 
     /// Read the running per-owner live-alert counter, or `0` if unset.
-    fn owner_active_count(env: &Env, owner: &Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::OwnerActiveCount(owner.clone()))
-            .unwrap_or(0u32)
+    ///
+    /// Counters written before the `OwnerActiveCount` → `OwnerLiveCount`
+    /// rename live under the legacy key. On a miss the legacy entry is moved
+    /// to the new key (and deleted), so each owner is migrated exactly once
+    /// and no counter is lost across the upgrade.
+    fn owner_live_count(env: &Env, owner: &Address) -> u32 {
+        let storage = env.storage().persistent();
+        if let Some(count) = storage.get::<DataKey, u32>(&DataKey::OwnerLiveCount(owner.clone())) {
+            return count;
+        }
+
+        let legacy_key = Self::legacy_owner_active_count_key(env, owner);
+        match storage.get::<_, u32>(&legacy_key) {
+            Some(count) => {
+                storage.remove(&legacy_key);
+                Self::set_owner_live_count(env, owner, count);
+                count
+            }
+            None => 0,
+        }
+    }
+
+    /// Storage key the counter used before the rename: the encoding of the
+    /// former `DataKey::OwnerActiveCount(owner)` variant, i.e. the vector
+    /// `[Symbol("OwnerActiveCount"), owner]`.
+    fn legacy_owner_active_count_key(env: &Env, owner: &Address) -> (soroban_sdk::Symbol, Address) {
+        (
+            soroban_sdk::Symbol::new(env, "OwnerActiveCount"),
+            owner.clone(),
+        )
     }
 
     /// Persist the running per-owner live-alert counter with a refreshed TTL.
-    fn set_owner_active_count(env: &Env, owner: &Address, count: u32) {
+    fn set_owner_live_count(env: &Env, owner: &Address, count: u32) {
         env.storage()
             .persistent()
-            .set(&DataKey::OwnerActiveCount(owner.clone()), &count);
+            .set(&DataKey::OwnerLiveCount(owner.clone()), &count);
         env.storage().persistent().extend_ttl(
-            &DataKey::OwnerActiveCount(owner.clone()),
+            &DataKey::OwnerLiveCount(owner.clone()),
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
@@ -2095,8 +1991,8 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
-        let count = Self::owner_active_count(env, owner);
-        Self::set_owner_active_count(env, owner, count + 1);
+        let count = Self::owner_live_count(env, owner);
+        Self::set_owner_live_count(env, owner, count + 1);
         Ok(())
     }
 
@@ -2142,8 +2038,8 @@ impl AlertRegistry {
             DEFAULT_TTL,
         );
         if removed {
-            let count = Self::owner_active_count(env, owner);
-            Self::set_owner_active_count(env, owner, count.saturating_sub(1));
+            let count = Self::owner_live_count(env, owner);
+            Self::set_owner_live_count(env, owner, count.saturating_sub(1));
         }
     }
 
@@ -2285,15 +2181,14 @@ mod tests {
         vec, Env, FromVal, String, Symbol,
     };
 
-    /// A 64-character webhook hash of repeated `c` — `register_alert`,
-    /// `update_webhook` and `propose_webhook` all require exactly 64 characters.
-    fn hash64c(env: &Env, c: char) -> String {
-        let buf = [c as u8; 64];
-        String::from_str(env, core::str::from_utf8(&buf).unwrap())
+    /// A webhook hash (32-byte SHA-256 digest) with every byte set to `c`;
+    /// vary `c` when a test needs two hashes that must differ.
+    fn hash64c(env: &Env, c: char) -> BytesN<32> {
+        BytesN::from_array(env, &[c as u8; 32])
     }
 
     /// The default valid 64-character webhook hash.
-    fn hash64(env: &Env) -> String {
+    fn hash64(env: &Env) -> BytesN<32> {
         hash64c(env, '0')
     }
 

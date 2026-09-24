@@ -23,8 +23,8 @@ and is suitable for use as a reference implementation.
   preventing instruction-limit overruns for owners with many alerts.
 - **Monotonic ID counter** — a `u64` counter in instance storage generates
   unique, sequential alert IDs without requiring external coordination.
-- **Privacy-preserving webhook storage** — only the SHA-256 hex digest of the
-  webhook URL is stored on-chain; the raw URL never appears in contract state.
+- **Privacy-preserving webhook storage** — only the 32-byte SHA-256 digest
+  (`BytesN<32>`) of the webhook URL is stored on-chain; the raw URL never appears in contract state.
 - **Rule descriptor validation** — the contract validates each rule string
   against a known allowlist (`rule:transfer`, `rule:mint`) before accepting it,
   preventing garbage data from entering the registry.
@@ -54,7 +54,8 @@ bash ../../scripts/deploy.sh --network testnet
 ## Invoke via Stellar CLI
 
 ```bash
-# Register an alert
+# Register an alert. webhook_hash is BytesN<32>: pass the 64-char hex
+# SHA-256 digest of the URL, e.g. from `printf %s "$URL" | sha256sum`.
 stellar contract invoke \
   --id <CONTRACT_ID> --source <OWNER_IDENTITY> --network testnet \
   -- register_alert \

@@ -45,11 +45,11 @@ The contract supports:
 ### 2. Webhook Endpoint Hijacking & Blackholing (Two-Phase Rotation)
 - **Staged Transitions (`propose_webhook` / `confirm_webhook`)**: Staging the new webhook hash in `pending_webhook_hash` leaves the active `webhook_hash` undisturbed until explicit confirmation. This prevents temporary or permanent notification blackouts during endpoint migrations.
 - **Typo / Misconfiguration Correction**: An owner can overwrite `pending_webhook_hash` with subsequent `propose_webhook` calls prior to `confirm_webhook`, mitigating irreversible fat-finger errors.
-- **Strict Format Validation**: Both single-step and two-phase rotation enforce exact 64-character hex length requirements (`validate_webhook_hash`), rejecting malformed digests with `ContractError::InvalidWebhookHash`.
+- **Fixed-Width Digest Type**: `webhook_hash` and `pending_webhook_hash` are `BytesN<32>`, so every entry point can only receive a 32-byte digest; a truncated, padded or non-hex value cannot be constructed, and no runtime format check is needed (#214).
 - **Public Audit Trail**: Rotation lifecycle transitions emit dedicated events (`alert.wh_prop` and `alert.wh_conf`) on-chain.
 
 ### 3. Destination Endpoint Privacy
-- **Digest-Only On-Chain Storage**: Raw webhook URLs (which may contain internal hostnames, ports, private paths, or token parameters) are never stored or passed on-chain. Only 64-character SHA-256 hex digests are accepted.
+- **Digest-Only On-Chain Storage**: Raw webhook URLs (which may contain internal hostnames, ports, private paths, or token parameters) are never stored or passed on-chain. Only 32-byte SHA-256 digests (`BytesN<32>`) are accepted.
 
 ### 4. Denial-of-Service & Resource Exhaustion
 - **Per-Owner Active Alert Ceiling**: The admin-configurable `per_owner_alert_limit` restricts the number of active alerts any single address can create, preventing storage spam and index bloating.
@@ -117,8 +117,8 @@ The contract supports:
 | **Alert Owner Authorization** | `caller.require_auth()` + `config.owner == caller` | ✅ Enforced |
 | **Admin Function Authorization** | `admin.require_auth()` + stored `ADMIN` match | ✅ Enforced |
 | **Two-Phase Webhook Staging** | `pending_webhook_hash` separation from `webhook_hash` | ✅ Enforced |
-| **Webhook Hash Integrity** | 64-char lowercase hex check (`validate_webhook_hash`) | ✅ Enforced |
-| **Webhook URL Privacy** | Only SHA-256 hex digest accepted and stored on-chain | ✅ Enforced |
+| **Webhook Hash Integrity** | `BytesN<32>` type: only a 32-byte digest can be passed | ✅ Enforced |
+| **Webhook URL Privacy** | Only the 32-byte SHA-256 digest is accepted and stored on-chain | ✅ Enforced |
 | **Watcher Read Access Gating** | Cross-contract check via `WatcherRegistryClient` | ✅ Enforced (when enabled) |
 | **Per-Owner Spam Throttling** | `get_active_alert_count_for_owner` <= `LIMIT` check | ✅ Enforced (when configured) |
 | **Rule Descriptor Validation** | Bounded list (<= 50) + recognized prefix check | ✅ Enforced |

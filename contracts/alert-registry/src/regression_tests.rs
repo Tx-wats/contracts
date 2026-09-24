@@ -15,9 +15,13 @@ fn setup() -> (Env, AlertRegistryClient<'static>) {
     (env, client)
 }
 
-fn hash64(env: &Env) -> String {
-    let buf = [b'0'; 64];
-    String::from_str(env, core::str::from_utf8(&buf).unwrap())
+fn hash64(env: &Env) -> soroban_sdk::BytesN<32> {
+    hash64c(env, '0')
+}
+
+/// A webhook hash (32-byte SHA-256 digest) with every byte set to `c`.
+fn hash64c(env: &Env, c: char) -> soroban_sdk::BytesN<32> {
+    soroban_sdk::BytesN::from_array(env, &[c as u8; 32])
 }
 
 fn str(env: &Env, s: &str) -> String {
@@ -105,7 +109,9 @@ fn test_regression_missing_remove_alert_body() {
 /// Regression test for historical bug:
 /// `update_webhook accepted webhook hashes of any length, while register_alert required exactly 64 characters.`
 ///
-/// Ensures that `update_webhook` enforces 64-character length validation identically to `register_alert`.
+/// Since #214 every entry point takes the hash as `BytesN<32>`, so a
+/// wrong-length hash can no longer be constructed at all. What remains to
+/// check is that the 32 digest bytes are stored and returned unchanged.
 #[test]
 fn test_regression_update_webhook_accepted_invalid_length_hashes() {
     let (env, client) = setup();
@@ -120,48 +126,19 @@ fn test_regression_update_webhook_accepted_invalid_length_hashes() {
         &vec![&env, str(&env, "rule:transfer")],
     );
 
-    // Too short (63 chars)
-    let short_hash = str(
-        &env,
-        "123456789012345678901234567890123456789012345678901234567890123",
-    );
-    let res_short = client.try_update_webhook(&owner, &id, &short_hash);
+    let digest: [u8; 32] = core::array::from_fn(|i| i as u8);
+    let new_hash = soroban_sdk::BytesN::from_array(&env, &digest);
     assert_eq!(
-        res_short.unwrap_err().unwrap(),
-        ContractError::InvalidWebhookHash
-    );
-
-    // Too long (65 chars)
-    let long_hash = str(
-        &env,
-        "12345678901234567890123456789012345678901234567890123456789012345",
-    );
-    let res_long = client.try_update_webhook(&owner, &id, &long_hash);
-    assert_eq!(
-        res_long.unwrap_err().unwrap(),
-        ContractError::InvalidWebhookHash
-    );
-
-    // Empty hash
-    let empty_hash = str(&env, "");
-    let res_empty = client.try_update_webhook(&owner, &id, &empty_hash);
-    assert_eq!(
-        res_empty.unwrap_err().unwrap(),
-        ContractError::InvalidWebhookHash
-    );
-
-    // Valid 64-char hash succeeds
-    let valid_hash = str(
-        &env,
-        "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-    );
-    assert_eq!(
-        client.try_update_webhook(&owner, &id, &valid_hash).unwrap(),
+        client.try_update_webhook(&owner, &id, &new_hash).unwrap(),
         Ok(())
     );
     assert_eq!(
-        client.get_alert(&owner, &id).unwrap().webhook_hash,
-        valid_hash
+        client
+            .get_alert(&owner, &id)
+            .unwrap()
+            .webhook_hash
+            .to_array(),
+        digest
     );
 }
 
@@ -319,5 +296,232 @@ fn test_regression_renew_alert_ttl_preserves_updated_at() {
     assert_eq!(
         cfg_after_renew.updated_at, 1000,
         "renew_alert_ttl must NOT modify updated_at"
+    );
+}
+
+/// Regression test for #216:
+/// `update_webhook left a stale pending hash that later overwrote it.`
+///
+/// `propose_webhook(B)`, then `update_webhook(C)`, then `confirm_webhook()` used
+/// to promote the stale `B` over the direct update to `C`. A direct update now
+/// discards the staged rotation, so the confirm has nothing to promote.
+#[test]
+fn test_regression_update_webhook_clears_stale_pending_hash() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Rotating Alert"),
+        &hash64c(&env, 'a'),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
+    client.update_webhook(&owner, &id, &hash64c(&env, 'c'));
+
+    let cfg = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg.webhook_hash, hash64c(&env, 'c'));
+    assert!(
+        cfg.pending_webhook_hash.is_none(),
+        "update_webhook must discard the staged rotation"
+    );
+
+    assert_eq!(
+        client
+            .try_confirm_webhook(&owner, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::NoPendingWebhook
+    );
+    assert_eq!(
+        client.get_alert(&owner, &id).unwrap().webhook_hash,
+        hash64c(&env, 'c'),
+        "the direct update must survive a later confirm attempt"
+    );
+}
+
+/// Mirror of the pre-#212 key layout, used to seed storage exactly as a
+/// contract deployed before the `OwnerActiveCount` → `OwnerLiveCount` rename
+/// would have left it.
+#[soroban_sdk::contracttype]
+enum LegacyDataKey {
+    OwnerActiveCount(Address),
+}
+
+/// Regression test for #212:
+/// renaming `DataKey::OwnerActiveCount` to `OwnerLiveCount` changes the
+/// on-chain key encoding, so counters written by the old build must be
+/// migrated rather than silently reset to zero (which would let an owner
+/// exceed the per-owner alert limit).
+#[test]
+fn test_regression_owner_live_count_migrates_legacy_key() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Pre-upgrade Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    // Rewind the counter to how the old build stored it: under the legacy key only.
+    env.as_contract(&client.address, || {
+        let storage = env.storage().persistent();
+        storage.remove(&crate::DataKey::OwnerLiveCount(owner.clone()));
+        storage.set(&LegacyDataKey::OwnerActiveCount(owner.clone()), &5u32);
+    });
+
+    assert_eq!(client.get_non_removed_alert_count(&owner), 5);
+
+    env.as_contract(&client.address, || {
+        let storage = env.storage().persistent();
+        assert!(
+            !storage.has(&LegacyDataKey::OwnerActiveCount(owner.clone())),
+            "the legacy entry must be removed once migrated"
+        );
+        assert_eq!(
+            storage.get::<_, u32>(&crate::DataKey::OwnerLiveCount(owner.clone())),
+            Some(5)
+        );
+    });
+
+    // Later writes build on the migrated value rather than restarting at zero.
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Post-upgrade Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(client.get_non_removed_alert_count(&owner), 6);
+}
+
+/// Remaining TTL of each entry an alert depends on, in the order
+/// `Alert`, `AlertActive`, `OwnerIndex`, `OwnerLiveCount`, `ContractIndex`.
+fn alert_entry_ttls(
+    env: &Env,
+    client: &AlertRegistryClient,
+    id: u64,
+    owner: &Address,
+    target: &Address,
+) -> [u32; 5] {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    env.as_contract(&client.address, || {
+        let storage = env.storage().persistent();
+        [
+            storage.get_ttl(&crate::DataKey::Alert(id)),
+            storage.get_ttl(&crate::DataKey::AlertActive(id)),
+            storage.get_ttl(&crate::DataKey::OwnerIndex(owner.clone())),
+            storage.get_ttl(&crate::DataKey::OwnerLiveCount(owner.clone())),
+            storage.get_ttl(&crate::DataKey::ContractIndex(target.clone())),
+        ]
+    })
+}
+
+/// Regression test for #213:
+/// every mutator used to hand-copy its own `extend_ttl` calls, and each TTL
+/// bug so far was one copy drifting from the rest. All mutators now go
+/// through `persist_alert`/`touch_alert`, so after any of them every entry
+/// the alert depends on must be back at the full `DEFAULT_TTL`.
+#[test]
+fn test_regression_every_mutator_refreshes_all_alert_ttls() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let new_target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "TTL Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    let full = [crate::DEFAULT_TTL; 5];
+    assert_eq!(alert_entry_ttls(&env, &client, id, &owner, &target), full);
+
+    // Each step ages every entry, runs one mutator, and expects a full refresh.
+    let age = |env: &Env| env.ledger().with_mut(|li| li.sequence_number += 1_000);
+
+    age(&env);
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &true);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "update_alert"
+    );
+
+    age(&env);
+    client.update_label(&owner, &id, &str(&env, "Renamed"));
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "update_label"
+    );
+
+    age(&env);
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "propose_webhook"
+    );
+
+    age(&env);
+    client.confirm_webhook(&owner, &id);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "confirm_webhook"
+    );
+
+    age(&env);
+    client.update_webhook(&owner, &id, &hash64c(&env, 'c'));
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "update_webhook"
+    );
+
+    age(&env);
+    client.renew_alert_ttl(&owner, &id);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "renew_alert_ttl"
+    );
+
+    age(&env);
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "deactivate_alert_by_admin"
+    );
+
+    age(&env);
+    client.update_target_contract(&owner, &id, &new_target);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &new_target),
+        full,
+        "update_target_contract"
+    );
+
+    age(&env);
+    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &new_owner, &new_target),
+        full,
+        "transfer_alert_ownership"
     );
 }

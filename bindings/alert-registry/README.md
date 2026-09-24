@@ -13,6 +13,7 @@ npm install @tx-wat/alert-registry-bindings
 ## Usage
 
 ```typescript
+import { createHash } from 'node:crypto';
 import { Contract, networks } from '@tx-wat/alert-registry-bindings';
 import { SorobanRpc, Keypair } from '@stellar/stellar-sdk';
 
@@ -31,7 +32,8 @@ const result = await contract.register_alert({
   owner: keypair.publicKey(),
   target_contract: 'CONTRACT_ADDRESS_TO_WATCH',
   label: 'My Alert',
-  webhook_hash: 'sha256_hash_of_webhook_url',
+  // BytesN<32>: the 32 raw SHA-256 digest bytes of the webhook URL (not hex).
+  webhook_hash: createHash('sha256').update('https://example.com/hook').digest(),
   rules: ['rule:transfer', 'rule:mint'],
 }, {
   keypair,

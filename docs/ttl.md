@@ -88,22 +88,31 @@ the alert's content.
 
 ## When Does the TTL Reset?
 
-The TTL is extended on every mutating call that touches the entry:
+Every mutating call refreshes the **whole set** of entries an alert depends on
+through a single internal helper, `touch_alert`:
+`Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `OwnerLiveCount(owner)`, `ContractIndex(target)`.
+Mutators that rewrite the alert call `persist_alert`, which writes the config
+and its `AlertActive` flag and then calls `touch_alert` with `DEFAULT_TTL`, so
+no mutator can extend one entry and forget another. (`OwnerLiveCount` is only
+extended when present; see `docs/storage.md`.)
 
 | Function              | Entries extended |
 |-----------------------|-----------------|
-| `register_alert`      | `Alert(id)`, `AlertActive(id)`, `OwnerIndex`, `ContractIndex` |
-| `update_alert`        | `Alert(id)`, `OwnerIndex`, `ContractIndex` |
-| `update_webhook`      | `Alert(id)`, `OwnerIndex`, `ContractIndex` |
-| `update_label`        | `Alert(id)`, `OwnerIndex`, `ContractIndex` |
-| `update_target_contract` | `Alert(id)`, old and new `ContractIndex` |
-| `bump_alert`          | `Alert(id)`, `AlertActive(id)`, `OwnerIndex`, `ContractIndex` |
-| `renew_alert_ttl`     | `Alert(id)`, `OwnerIndex`, `ContractIndex` — data unchanged |
-| `propose_webhook`     | `Alert(id)`, `OwnerIndex`, `ContractIndex` |
-| `confirm_webhook`     | `Alert(id)`, `OwnerIndex`, `ContractIndex` |
-| `deactivate_all_alerts` | `Alert(id)`, `AlertActive(id)` for each deactivated alert; `ContractIndex` for each touched contract; `OwnerIndex` once, if at least one alert was deactivated |
-| `remove_alert`        | Entry is deleted (no TTL needed) |
-| `remove_alert_by_admin` | Entry is deleted (no TTL needed) |
+| `register_alert`      | Full set, to `DEFAULT_TTL` |
+| `update_alert`        | Full set, to `DEFAULT_TTL` |
+| `update_webhook`      | Full set, to `DEFAULT_TTL` |
+| `update_label`        | Full set, to `DEFAULT_TTL` |
+| `propose_webhook`     | Full set, to `DEFAULT_TTL` |
+| `confirm_webhook`     | Full set, to `DEFAULT_TTL` |
+| `cancel_webhook_proposal` | Full set, to `DEFAULT_TTL` |
+| `deactivate_alert_by_admin` | Full set, to `DEFAULT_TTL` |
+| `transfer_alert_ownership` | Full set with the **new** owner's `OwnerIndex`/`OwnerLiveCount`, to `DEFAULT_TTL` |
+| `update_target_contract` | Full set with the **new** target's `ContractIndex`, to `DEFAULT_TTL`; the old target's index is rewritten and extended |
+| `deactivate_all_alerts` | Full set for each deactivated alert, to `DEFAULT_TTL` |
+| `renew_alert_ttl`     | Full set, to `DEFAULT_TTL` — data unchanged |
+| `bump_alert`          | Full set, to the requested TTL (capped at `MAX_TTL`) — data unchanged |
+| `remove_alert`        | Entry is deleted (no TTL needed); owner/contract indexes and `OwnerLiveCount` are rewritten and extended |
+| `remove_alert_by_admin` | Same as `remove_alert` |
 
 Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owner`) do **not** extend the TTL.
 
@@ -123,11 +132,13 @@ For production use, the TTL should be increased significantly. Common choices:
 | Standard alerts | 120,960 | ~7 days |
 | Long-lived alerts | 535,680 | ~31 days |
 
-To change the TTL, update the `extend_ttl` calls in `contracts/alert-registry/src/lib.rs`:
+To change the TTL, update `DEFAULT_TTL` in `contracts/alert-registry/src/lib.rs`.
+Every mutator refreshes alert entries through `persist_alert` / `touch_alert`,
+so the constant is the single place to change:
 
 ```rust
 // Example: extend to ~7 days
-env.storage().persistent().extend_ttl(&DataKey::Alert(id), 120_960, 120_960);
+pub const DEFAULT_TTL: u32 = 120_960;
 ```
 
 ## Further Reading
