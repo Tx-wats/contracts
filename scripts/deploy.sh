@@ -17,9 +17,15 @@ echo "==> Checking Stellar CLI..."
 stellar --version
 
 if [[ "$NETWORK" == "testnet" ]]; then
-  echo "==> Funding account on testnet..."
-  stellar keys generate --overwrite "$IDENTITY" --network "$NETWORK" 2>/dev/null || true
-  stellar keys fund "$IDENTITY" --network "$NETWORK"
+  echo "==> Checking testnet key..."
+  if ! stellar keys address "$IDENTITY" &>/dev/null; then
+    echo "==> Generating missing identity $IDENTITY on testnet..."
+    stellar keys generate "$IDENTITY" --network "$NETWORK"
+  else
+    echo "==> Using existing identity $IDENTITY"
+  fi
+  echo "==> Ensuring account is funded on testnet..."
+  stellar keys fund "$IDENTITY" --network "$NETWORK" 2>/dev/null || true
 fi
 
 build_contract "${ALL_CONTRACTS[@]}"
@@ -42,6 +48,17 @@ echo "Alert Registry deployed: $ALERT_ID"
 echo "==> Deploying Watcher Registry..."
 WATCHER_ID=$(stellar contract deploy \
   --wasm "$WATCHER_WASM" \
+  --source "$IDENTITY" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE")
+echo "Watcher Registry deployed: $WATCHER_ID"
+
+ADMIN_ADDRESS="${ADMIN_ADDRESS:-$(stellar keys address "$IDENTITY")}"
+
+echo "==> Initializing Watcher Registry..."
+stellar contract invoke \
+  --id "$WATCHER_ID" \
   --source "$IDENTITY" \
   --network "$NETWORK" \
   --rpc-url "$RPC_URL" \

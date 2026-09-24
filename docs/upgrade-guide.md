@@ -68,6 +68,30 @@ An upgrade can rewrite every rule the contract enforces, so it is treated as a
 sensitive admin action: while a timelock delay is configured, `upgrade` returns
 `TimelockRequired` and must go through the queue.
 
+### Using `scripts/upgrade.sh`
+
+The upgrade script supports two-phase timelocked upgrades directly:
+
+```bash
+# Step 1: Upload new WASM and propose upgrade behind timelock
+./scripts/upgrade.sh \
+  --contract watcher-registry \
+  --contract-id <CONTRACT_ID> \
+  --network testnet \
+  --propose
+
+# Step 2: Once the required timelock delay in ledgers has passed, execute:
+./scripts/upgrade.sh \
+  --contract watcher-registry \
+  --contract-id <CONTRACT_ID> \
+  --network testnet \
+  --execute
+```
+
+If `scripts/upgrade.sh` is invoked without `--propose` on a `watcher-registry` contract with a non-zero timelock delay, it will automatically detect the delay and propose the action.
+
+### Manual Invocations via `stellar-cli`
+
 ```bash
 # Queue it — records ready_at and emits admin.propose
 stellar contract invoke --id <CONTRACT_ID> ... -- propose_admin_action \
