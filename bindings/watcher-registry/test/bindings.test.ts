@@ -51,6 +51,7 @@ describe("WatcherRegistry bindings", () => {
   it("exposes expected read methods on the Client prototype", () => {
     const client = new Client(testnetConfig);
     // Read-only methods (no auth required)
+    expect(typeof client.is_watcher_authorized).toBe("function");
     expect(typeof client.is_authorized).toBe("function");
     expect(typeof client.get_watchers).toBe("function");
     expect(typeof client.get_admins).toBe("function");

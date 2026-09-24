@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`WatcherRegistry::is_authorized` alias deprecated**: Deprecated in rustdoc, bindings, and documentation with scheduled removal in `v0.3.0`. Callers and examples have migrated to `is_watcher_authorized` (#252).
 ### Changed — BREAKING (alert-registry 0.2.0)
 
 - **`webhook_hash` is now `BytesN<32>` instead of a 64-character hex

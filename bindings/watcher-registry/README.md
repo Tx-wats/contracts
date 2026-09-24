@@ -34,7 +34,7 @@ const client = new Client({
 });
 
 // Check if a watcher is authorized (read-only, no signing needed)
-const result = await client.is_authorized({
+const result = await client.is_watcher_authorized({
   watcher: "GABC...XYZ",
 });
 console.log("authorized:", result.result);
@@ -65,7 +65,8 @@ class. The method signatures mirror the Soroban contract interface exactly.
 | `initialize(admin)` | `admin` | Initialize the registry (once only) |
 | `register_watcher(admin, watcher)` | `admin` | Authorize a watcher address |
 | `remove_watcher(admin, watcher)` | `admin` | Revoke a watcher address |
-| `is_authorized(watcher)` | — | Check if an address is authorized |
+| `is_watcher_authorized(watcher)` | — | Check if an address is authorized |
+| `is_authorized(watcher)` | — | *(Deprecated, removal in v0.3.0)* Alias for `is_watcher_authorized` |
 | `get_watchers()` | — | Return all authorized watcher addresses |
 | `add_admin(caller, new_admin)` | `caller` (admin) | Add a new admin |
 | `remove_admin(caller, target_admin)` | `caller` (admin) | Remove an admin |

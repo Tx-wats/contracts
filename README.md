@@ -60,6 +60,7 @@ flowchart TD
     Admin["Admin"] -->|"register_watcher / remove_watcher"| WR
 
     W -->|"is_watcher_authorized(watcher)"| WR
+    W -->|"get_alerts_for_contract(target)"| AR
     W -->|"get_alerts_for_contract(querier, target)"| AR
     AR -->|"is_watcher_authorized(querier)\n(on-chain, when gating enabled)"| WR
     Horizon["Horizon API"] -->|"GET /accounts/{id}/transactions"| W
@@ -521,6 +522,13 @@ stellar contract invoke \
   --id <WATCHER_REGISTRY_CONTRACT_ID> \
   --network testnet \
   -- is_watcher_authorized \
+  --watcher <WATCHER_ADDRESS>
+
+# Check authorization (deprecated alias, scheduled for removal in v0.3.0)
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- is_authorized \
   --watcher <WATCHER_ADDRESS>
 
 # Get all authorized watcher addresses
