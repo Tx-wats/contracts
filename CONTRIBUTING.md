@@ -212,7 +212,11 @@ Because these triggers are decoupled, releases must follow the sequence below in
 
 1. **Prepare Release**
    - Ensure all target PRs are merged to `main`.
-   - Update `CHANGELOG.md` by moving items from `[Unreleased]` to a new version header `[X.Y.Z] - YYYY-MM-DD`.
+   - Update `CHANGELOG.md` by moving items from `[Unreleased]` to a new version header `[X.Y.Z] - YYYY-MM-DD`,
+     then add a `[X.Y.Z]: https://github.com/Tx-wats/contracts/compare/vPREV...vX.Y.Z` link and point
+     `[Unreleased]` at `compare/vX.Y.Z...HEAD`. The release workflows run
+     `scripts/check-changelog-release.sh` first and fail if the tag has no such section;
+     run it locally with `bash scripts/check-changelog-release.sh vX.Y.Z`.
    - Commit and push changes to `main`.
 
 2. **Create and Push Git Tag**

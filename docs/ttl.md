@@ -55,14 +55,15 @@ Callers can extend the TTL of any alert up to the **protocol maximum of
 
 ```rust
 // Extend alert 42 to the maximum lifetime (~31 days)
-alert_client.bump_alert(&42u64, &535_680u32);
-
-// Or pass u32::MAX — it is silently clamped to MAX_TTL
-alert_client.bump_alert(&42u64, &u32::MAX);
+alert_client.bump_alert(&42u64, &MAX_TTL);
 ```
 
+Request at most `MAX_TTL`. The current build caps larger values at `MAX_TTL`,
+but whether they should be capped or rejected is still open (#28), so callers
+should not rely on the capping.
+
 The function:
-1. Clamps the requested TTL to `MAX_TTL` (535 680 ledgers).
+1. Caps the requested TTL at `MAX_TTL` (535 680 ledgers).
 2. Extends `Alert`, `AlertActive`, `OwnerIndex`, and `ContractIndex` entries.
 3. Emits an `("alert", "bump")` event with `(id, effective_ttl)`.
 
