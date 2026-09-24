@@ -94,8 +94,10 @@ bash scripts/deploy.sh
 ```
 
 This will:
-- Compile `alert-registry` and `watcher-registry` to optimized `wasm32-unknown-unknown` binaries.
+- Compile `alert-registry` and `watcher-registry` to optimized `wasm32-unknown-unknown` binaries using single-crate `--locked` builds.
 - Install the WASM bytecode onto Testnet.
+- Instantiate and initialize `AlertRegistry` and `WatcherRegistry` with the deployer/admin address.
+- Wire up watcher-gating on `AlertRegistry` by invoking `set_watcher_registry` pointing to `WatcherRegistry` (unless `--no-gating` is passed).
 - Instantiate and atomically initialize `AlertRegistry` and `WatcherRegistry` via `__constructor` (closing the deploy-then-initialize front-running window).
 - Print the newly assigned contract addresses and WASM hashes.
 
@@ -146,3 +148,33 @@ git push
 ## 5. Mainnet Deployments
 
 Mainnet contracts are permanent and do not reset. Follow the release procedure outlined in [`docs/compatibility.md`](compatibility.md) and [`CONTRIBUTING.md`](../CONTRIBUTING.md) when deploying to mainnet.
+
+### Required Secrets & Identity Provisioning
+
+Production mainnet deployments via the automated workflow ([`.github/workflows/deploy-mainnet.yml`](../.github/workflows/deploy-mainnet.yml)) run under the protected GitHub environment **`mainnet-production`**.
+
+The following secret must be configured in repository settings:
+
+| Secret Name | Scope / Environment | Description |
+|---|---|---|
+| `MAINNET_DEPLOYER_SECRET` | `mainnet-production` | Secret Stellar private key (starts with `S...`) for the production deployer account. |
+
+The workflow provisions this key securely into the runner's Stellar keystore before execution:
+```bash
+stellar keys add deployer --secret-key <<< "$MAINNET_DEPLOYER_SECRET"
+```
+
+### Upgrades on Mainnet
+
+Contract upgrades on mainnet are performed using `scripts/upgrade.sh`:
+- Bytecode is uploaded using `stellar contract upload` (replacing the deprecated `contract install`).
+- The script checks and displays both current on-chain WASM hash and new WASM hash.
+- To prevent accidental production upgrades, interactive confirmation is required, or `--yes` must be provided explicitly:
+```bash
+./scripts/upgrade.sh \
+  --contract alert-registry \
+  --contract-id <MAINNET_ALERT_CONTRACT_ID> \
+  --network mainnet \
+  --yes
+```
+

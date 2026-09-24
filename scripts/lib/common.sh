@@ -14,15 +14,20 @@ parse_args() {
   NETWORK="${NETWORK:-testnet}"
   CONTRACT="${CONTRACT:-}"
   CONTRACT_ID="${CONTRACT_ID:-}"
+  NO_GATING="${NO_GATING:-false}"
+  ASSUME_YES="${ASSUME_YES:-false}"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --network)     NETWORK="${2:?--network needs a value}";         shift 2 ;;
       --contract)    CONTRACT="${2:?--contract needs a value}";       shift 2 ;;
       --contract-id) CONTRACT_ID="${2:?--contract-id needs a value}"; shift 2 ;;
+      --no-gating)   NO_GATING=true;                                  shift 1 ;;
+      --yes|-y)      ASSUME_YES=true;                                 shift 1 ;;
       *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
   done
+  export NETWORK CONTRACT CONTRACT_ID NO_GATING ASSUME_YES
 }
 
 # Exit unless --contract and --contract-id were both given, and --contract

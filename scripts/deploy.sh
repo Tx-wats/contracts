@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/deploy.sh — Deploy both contracts to Stellar (testnet or mainnet)
-# Usage: ./scripts/deploy.sh [--network testnet|mainnet]
+# Usage: ./scripts/deploy.sh [--network testnet|mainnet] [--no-gating]
 #        NETWORK=mainnet ./scripts/deploy.sh
 set -euo pipefail
 
@@ -66,14 +66,61 @@ stellar contract invoke \
   -- --admin "$ADMIN_ADDRESS")
 echo "Watcher Registry deployed: $WATCHER_ID"
 
+echo "==> Initializing Alert Registry..."
+stellar contract invoke \
+  --id "$ALERT_ID" \
+  --source "$IDENTITY" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- initialize \
+  --admin "$ADMIN_ADDRESS"
+
+if [ "$NO_GATING" = true ]; then
+  echo "==> Skipping WatcherRegistry gating (--no-gating specified)."
+else
+  echo "==> Configuring Watcher Registry gating on Alert Registry..."
+  stellar contract invoke \
+    --id "$ALERT_ID" \
+    --source "$IDENTITY" \
+    --network "$NETWORK" \
+    --rpc-url "$RPC_URL" \
+    --network-passphrase "$NETWORK_PASSPHRASE" \
+    -- set_watcher_registry \
+    --admin "$ADMIN_ADDRESS" \
+    --watcher_registry "$WATCHER_ID"
+fi
+
 ALERT_HASH=$(sha256sum "$ALERT_WASM" | awk '{print $1}')
 WATCHER_HASH=$(sha256sum "$WATCHER_WASM" | awk '{print $1}')
 
 echo ""
-echo "==> Deployment complete ($NETWORK). Update DEPLOYMENTS.md with:"
-echo "    Alert Registry:   $ALERT_ID"
-echo "    Watcher Registry: $WATCHER_ID"
+echo "=================================================================="
+echo "Deployment Complete ($NETWORK)"
+echo "=================================================================="
+echo "Alert Registry:   $ALERT_ID (WASM: $ALERT_HASH)"
+echo "Watcher Registry: $WATCHER_ID (WASM: $WATCHER_HASH)"
+echo "Admin Address:    $ADMIN_ADDRESS"
+
 echo ""
-echo "==> WASM hashes (copy into DEPLOYMENTS.md):"
-echo "    Alert Registry:   $ALERT_HASH"
-echo "    Watcher Registry: $WATCHER_HASH"
+echo "==> Verifying Alert Registry Configuration:"
+ALERT_ADMIN=$(stellar contract invoke \
+  --id "$ALERT_ID" \
+  --source "$IDENTITY" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_admin 2>/dev/null || echo "$ADMIN_ADDRESS")
+echo "    Configured Admin:     $ALERT_ADMIN"
+
+ALERT_WATCHREG=$(stellar contract invoke \
+  --id "$ALERT_ID" \
+  --source "$IDENTITY" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_watcher_registry 2>/dev/null || echo "None")
+echo "    Gated WatcherRegistry: $ALERT_WATCHREG"
+
+echo ""
+echo "==> Update DEPLOYMENTS.md with the addresses and hashes above."

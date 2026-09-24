@@ -61,6 +61,18 @@ jobs:
             | sudo tar -xz -C /usr/local/bin stellar
           stellar --version
 
+      # Issue #287 — Provision Mainnet Deployer Key from secret
+      - name: Provision Mainnet Deployer Key
+        env:
+          MAINNET_DEPLOYER_SECRET: ${{ secrets.MAINNET_DEPLOYER_SECRET }}
+        run: |
+          if [ -z "$MAINNET_DEPLOYER_SECRET" ]; then
+            echo "Error: MAINNET_DEPLOYER_SECRET secret is not set in mainnet-production environment" >&2
+            exit 1
+          fi
+          echo "Provisioning deployer identity from secret..."
+          stellar keys add deployer --secret-key <<< "$MAINNET_DEPLOYER_SECRET"
+
       - name: Deploy contracts
         id: deploy
         env:
