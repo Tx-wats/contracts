@@ -366,3 +366,62 @@ fn test_regression_update_webhook_clears_stale_pending_hash() {
         "the direct update must survive a later confirm attempt"
     );
 }
+
+/// Mirror of the pre-#212 key layout, used to seed storage exactly as a
+/// contract deployed before the `OwnerActiveCount` → `OwnerLiveCount` rename
+/// would have left it.
+#[soroban_sdk::contracttype]
+enum LegacyDataKey {
+    OwnerActiveCount(Address),
+}
+
+/// Regression test for #212:
+/// renaming `DataKey::OwnerActiveCount` to `OwnerLiveCount` changes the
+/// on-chain key encoding, so counters written by the old build must be
+/// migrated rather than silently reset to zero (which would let an owner
+/// exceed the per-owner alert limit).
+#[test]
+fn test_regression_owner_live_count_migrates_legacy_key() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Pre-upgrade Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    // Rewind the counter to how the old build stored it: under the legacy key only.
+    env.as_contract(&client.address, || {
+        let storage = env.storage().persistent();
+        storage.remove(&crate::DataKey::OwnerLiveCount(owner.clone()));
+        storage.set(&LegacyDataKey::OwnerActiveCount(owner.clone()), &5u32);
+    });
+
+    assert_eq!(client.get_non_removed_alert_count(&owner), 5);
+
+    env.as_contract(&client.address, || {
+        let storage = env.storage().persistent();
+        assert!(
+            !storage.has(&LegacyDataKey::OwnerActiveCount(owner.clone())),
+            "the legacy entry must be removed once migrated"
+        );
+        assert_eq!(
+            storage.get::<_, u32>(&crate::DataKey::OwnerLiveCount(owner.clone())),
+            Some(5)
+        );
+    });
+
+    // Later writes build on the migrated value rather than restarting at zero.
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Post-upgrade Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(client.get_non_removed_alert_count(&owner), 6);
+}

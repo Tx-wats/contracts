@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale `B` over the direct update to `C`. `update_webhook` now clears
   `pending_webhook_hash`, so the later confirm returns `NoPendingWebhook`.
   (issue #216)
+- **`DataKey::OwnerActiveCount` renamed to `OwnerLiveCount`.** The counter
+  (and its `owner_active_count` helpers, now `owner_live_count`) counts
+  non-removed alerts, deactivated ones included, which the old name
+  contradicted. The rename changes the on-chain key encoding, so counters
+  stored under the legacy key are migrated to the new key on first read and
+  the legacy entry is deleted. (issue #212)
 
 ### Fixed — bindings & docs
 

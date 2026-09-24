@@ -64,7 +64,12 @@ pub enum DataKey {
     /// given address, maintained incrementally alongside [`DataKey::OwnerIndex`]
     /// so [`AlertRegistry::get_non_removed_alert_count`] never has to rescan
     /// the owner's full index.
-    OwnerActiveCount(Address),
+    ///
+    /// "Live" means not removed: deactivated alerts still count. Use
+    /// [`AlertRegistry::get_active_alert_count`] for the `active`-filtered
+    /// number. Formerly `OwnerActiveCount`; entries written under that key are
+    /// migrated on first read (see `AlertRegistry::owner_live_count`).
+    OwnerLiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
     /// Monotonic counter used to generate unique alert IDs.
@@ -1803,7 +1808,7 @@ impl AlertRegistry {
     /// registered — it never rescans the owner's index.
     #[must_use]
     pub fn get_non_removed_alert_count(env: Env, owner: Address) -> u32 {
-        Self::owner_active_count(&env, &owner)
+        Self::owner_live_count(&env, &owner)
     }
 
     /// Get the number of live (non-removed, unexpired) alerts targeting
@@ -1959,20 +1964,42 @@ impl AlertRegistry {
     }
 
     /// Read the running per-owner live-alert counter, or `0` if unset.
-    fn owner_active_count(env: &Env, owner: &Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::OwnerActiveCount(owner.clone()))
-            .unwrap_or(0u32)
+    ///
+    /// Counters written before the `OwnerActiveCount` → `OwnerLiveCount`
+    /// rename live under the legacy key. On a miss the legacy entry is moved
+    /// to the new key (and deleted), so each owner is migrated exactly once
+    /// and no counter is lost across the upgrade.
+    fn owner_live_count(env: &Env, owner: &Address) -> u32 {
+        let storage = env.storage().persistent();
+        if let Some(count) = storage.get::<DataKey, u32>(&DataKey::OwnerLiveCount(owner.clone())) {
+            return count;
+        }
+
+        let legacy_key = Self::legacy_owner_active_count_key(env, owner);
+        match storage.get::<_, u32>(&legacy_key) {
+            Some(count) => {
+                storage.remove(&legacy_key);
+                Self::set_owner_live_count(env, owner, count);
+                count
+            }
+            None => 0,
+        }
+    }
+
+    /// Storage key the counter used before the rename: the encoding of the
+    /// former `DataKey::OwnerActiveCount(owner)` variant, i.e. the vector
+    /// `[Symbol("OwnerActiveCount"), owner]`.
+    fn legacy_owner_active_count_key(env: &Env, owner: &Address) -> (soroban_sdk::Symbol, Address) {
+        (soroban_sdk::Symbol::new(env, "OwnerActiveCount"), owner.clone())
     }
 
     /// Persist the running per-owner live-alert counter with a refreshed TTL.
-    fn set_owner_active_count(env: &Env, owner: &Address, count: u32) {
+    fn set_owner_live_count(env: &Env, owner: &Address, count: u32) {
         env.storage()
             .persistent()
-            .set(&DataKey::OwnerActiveCount(owner.clone()), &count);
+            .set(&DataKey::OwnerLiveCount(owner.clone()), &count);
         env.storage().persistent().extend_ttl(
-            &DataKey::OwnerActiveCount(owner.clone()),
+            &DataKey::OwnerLiveCount(owner.clone()),
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
@@ -1995,8 +2022,8 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
-        let count = Self::owner_active_count(env, owner);
-        Self::set_owner_active_count(env, owner, count + 1);
+        let count = Self::owner_live_count(env, owner);
+        Self::set_owner_live_count(env, owner, count + 1);
         Ok(())
     }
 
@@ -2042,8 +2069,8 @@ impl AlertRegistry {
             DEFAULT_TTL,
         );
         if removed {
-            let count = Self::owner_active_count(env, owner);
-            Self::set_owner_active_count(env, owner, count.saturating_sub(1));
+            let count = Self::owner_live_count(env, owner);
+            Self::set_owner_live_count(env, owner, count.saturating_sub(1));
         }
     }
 
