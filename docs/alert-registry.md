@@ -273,6 +273,25 @@ Deactivates any alert by ID without deleting its record. Unlike `remove_alert_by
 **Events:** Emits `(Symbol("alert"), Symbol("admin_off"))` with data `(id: u64, admin: Address)`.
 
 ---
+### `deactivate_all_alerts`
+
+Deactivates every active alert owned by `caller` in one call, leaving the records and indexes in place (same effect as `update_alert(..., active = false)` on each). Expired or already-removed entries are skipped.
+
+**Requires auth:** `caller`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Owner whose alerts are deactivated |
+
+**Returns:** `Result<u32, ContractError>` — the number of alerts deactivated (`0` if none were active)
+
+**Errors:** Returns `ContractError::Paused` while the contract is paused. (Before #204 it returned `0`, which was indistinguishable from an owner with no active alerts.)
+
+**Events:** Emits `(Symbol("alert"), Symbol("bulk_off"))` with data `(caller: Address, count: u32)` when at least one alert was deactivated; no event when the count is `0`.
+
+---
 ### `remove_alert`
 
 Permanently removes an alert config. Only the original owner may call this.

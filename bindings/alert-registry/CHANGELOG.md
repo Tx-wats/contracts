@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING
+- `deactivateAllAlerts({ caller })` now resolves to `Result<u32>` instead of a
+  bare `u32`: it fails with `Paused` while the contract is paused instead of
+  returning `0`. (#204)
+
 ### Changed — BREAKING (0.2.0)
 - `webhook_hash` / `new_webhook_hash` arguments and the `webhook_hash` /
   `pending_webhook_hash` fields of `AlertConfig` and `AlertInput` are now

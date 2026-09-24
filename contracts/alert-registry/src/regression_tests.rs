@@ -525,3 +525,42 @@ fn test_regression_every_mutator_refreshes_all_alert_ttls() {
         "transfer_alert_ownership"
     );
 }
+
+/// Regression test for #204:
+/// `deactivate_all_alerts` returned a plain `0` while paused, which callers
+/// could not tell apart from "owner had no active alerts". It now returns
+/// `Err(Paused)` like every other mutator and leaves the alerts untouched.
+#[test]
+fn test_regression_deactivate_all_alerts_rejects_while_paused() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Paused Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.pause(&admin);
+    assert_eq!(
+        client
+            .try_deactivate_all_alerts(&owner)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Paused
+    );
+    assert!(
+        client.get_alert(&owner, &id).unwrap().active,
+        "a rejected call must not deactivate anything"
+    );
+
+    client.unpause(&admin);
+    assert_eq!(client.deactivate_all_alerts(&owner), 1);
+    assert!(!client.get_alert(&owner, &id).unwrap().active);
+}
+

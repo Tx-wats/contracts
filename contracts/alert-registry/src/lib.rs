@@ -1437,17 +1437,21 @@ impl AlertRegistry {
     /// Requires a valid Stellar auth signature from `caller`.
     ///
     /// # Returns
-    /// The number of alerts that were deactivated.
+    /// The number of alerts that were deactivated (`0` if the owner had no
+    /// active alerts).
+    ///
+    /// # Errors
+    /// Returns [`ContractError::Paused`] while the contract is paused, like
+    /// every other mutator, so a paused call is never mistaken for an owner
+    /// with nothing to deactivate.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("bulk_off"))` with data
     /// `(caller: Address, count: u32)` when at least one alert was deactivated.
     /// No event is emitted if `count` is `0`.
-    pub fn deactivate_all_alerts(env: Env, caller: Address) -> u32 {
+    pub fn deactivate_all_alerts(env: Env, caller: Address) -> Result<u32, ContractError> {
         caller.require_auth();
-        if Self::is_paused(env.clone()) {
-            return 0;
-        }
+        Self::assert_not_paused(&env)?;
         let ids = Self::owner_index(&env, &caller);
         let mut count: u32 = 0;
         for id in ids.iter() {
@@ -1490,7 +1494,7 @@ impl AlertRegistry {
                 (caller, count),
             );
         }
-        count
+        Ok(count)
     }
 
     /// Move an alert to watch a different target contract.

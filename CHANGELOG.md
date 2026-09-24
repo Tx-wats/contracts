@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **`deactivate_all_alerts` silently returned `0` when paused.** Callers could
+  not tell a paused contract from an owner with no active alerts. It now
+  returns `Result<u32, ContractError>` and fails with `Paused`, like every other
+  mutator (the generated Rust client still unwraps to `u32`; use
+  `try_deactivate_all_alerts` to observe the error). (issue #204)
 - **`update_webhook` left a stale pending hash that later overwrote it.**
   `propose_webhook(B)` → `update_webhook(C)` → `confirm_webhook()` promoted the
   stale `B` over the direct update to `C`. `update_webhook` now clears
