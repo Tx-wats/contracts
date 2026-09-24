@@ -27,7 +27,7 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: wasm32-unknown-unknown
-          components: clippy, rustfmt, llvm-tools-preview
+          components: clippy, rustfmt
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -36,8 +36,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ steps.rust.outputs.channel }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ steps.rust.outputs.channel }}-
 
       # Issue #99 — WASM build verification
       # --locked enforces the committed Cargo.lock so CI cannot silently resolve
@@ -63,8 +63,8 @@ jobs:
       - name: Check doc comments
         run: bash scripts/check-docs.sh
 
-      # Issue #121 — README snippets must call functions (and pass arguments)
-      # that exist in the compiled contract spec. Uses the WASM built above.
+      # Issue #121 & #285 — README snippets must call functions (and pass arguments)
+      # that exist in the compiled contract spec. Pinned Stellar CLI version.
       - name: Install Stellar CLI
         env:
           STELLAR_CLI_VERSION: "28.0.0"
@@ -76,9 +76,11 @@ jobs:
       - name: Check README snippets against contract spec
         run: bash scripts/check-readme-snippets.sh
 
-  # Issue #107 — MSRV verification
+  # Issue #107, #281 — MSRV verification
   msrv:
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.88"
 
     steps:
       - uses: actions/checkout@v7
@@ -89,6 +91,9 @@ jobs:
           toolchain: "1.88"
           targets: wasm32-unknown-unknown
 
+      - name: Verify rustc version
+        run: rustc --version
+
       - name: Cache cargo registry
         uses: actions/cache@v6
         with:
@@ -96,17 +101,40 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-msrv-
 
       - name: Check workspace (MSRV)
         run: cargo check --workspace --locked
 
-      # Issue #111 — Verify events documentation matches source emissions
+  # Issue #111, #282 — Verify events documentation matches source emissions
+  docs-check:
+    name: Check events documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
       - name: Check events documentation
         run: bash scripts/check-events-doc.sh
 
-      # Issue #103 — Code coverage reporting
+  # Issue #103, #282 — Code coverage reporting on pinned toolchain with llvm-tools-preview
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve pinned toolchain
+        id: rust
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: llvm-tools-preview
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
@@ -119,21 +147,22 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
-      # Issue #104 — Shell script linting
+
+  # Issue #104, #282 — Shell script linting
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
       - name: Shellcheck
         run: shellcheck scripts/*.sh
 
   # Issue #105 — Dependency vulnerability scanning.
-  #
-  # cargo-audit's current release needs a newer rustc than the toolchain pinned
-  # in rust-toolchain.toml, so installing it against the pin fails. `cargo audit`
-  # only reads Cargo.lock and never compiles this workspace, so it runs in its
-  # own job on stable — independent of the MSRV the contracts are built with.
   audit:
     runs-on: ubuntu-latest
 
     # rust-toolchain.toml applies to any cargo run from this checkout, so it
-    # would pull the audit back onto the pinned 1.85 even after installing
+    # would pull the audit back onto the pinned toolchain even after installing
     # stable. RUSTUP_TOOLCHAIN overrides the file for this job only.
     env:
       RUSTUP_TOOLCHAIN: stable
