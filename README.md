@@ -26,7 +26,7 @@ cargo build --release --target wasm32-unknown-unknown
 cargo test
 
 # Generate TypeScript bindings
-make bindings
+make bindings-all
 ```
 
 ## TypeScript Bindings
@@ -40,7 +40,7 @@ Bindings are published to npm as `@tx-wat/alert-registry-bindings` by the
 tagged. Until the first tagged release, generate them locally:
 
 ```bash
-make bindings
+make bindings-alert
 ```
 
 ## Architecture
@@ -658,7 +658,7 @@ automatically from the compiled WASM on every release using
 npm install @tx-wat/watcher-registry @stellar/stellar-sdk
 ```
 
-> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings` from the repository root.
+> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings-all` from the repository root.
 
 ```typescript
 import { Client, networks } from "@tx-wat/watcher-registry";
