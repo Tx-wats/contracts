@@ -17,6 +17,7 @@ Contract that stores alert configurations on-chain, keyed by contract address.
 | `target_contract` | `Address` | Contract being watched |
 | `created_at` | `u64` | Ledger timestamp at creation |
 | `updated_at` | `u64` | Ledger timestamp of last update |
+| `updated_ledger` | `u32` | Monotonic ledger sequence number of last update |
 | `active` | `bool` | Whether the alert is active |
 | `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
@@ -155,9 +156,22 @@ Updates the rules and active status of an existing alert. Only the original owne
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
 
 ---
+### `__constructor`
+
+Atomic constructor executed during deployment via `stellar contract deploy -- --admin <ADDRESS>`. Sets up the initial admin in the same transaction as deployment, closing the front-running window.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Address to assign as initial admin |
+
+**Returns:** nothing
+
+---
 ### `initialize`
 
-Initializes an optional admin for the contract. Can only be called once.
+Initializes an optional admin for the contract. Retained for backwards compatibility. If the contract was initialized at deployment via `__constructor`, calling `initialize` returns `ContractError::AlreadyInitialized`.
 
 **Parameters**
 
@@ -526,7 +540,7 @@ Step 2 of the two-step webhook rotation flow. Promotes `pending_webhook_hash` to
 
 ### `renew_alert_ttl`
 
-Extends the TTL of an alert and its index entries without modifying any data. This is the recommended way to keep an alert alive without changing `updated_at` (which would cause it to appear in incremental-sync results via `get_alerts_modified_since`).
+Extends the TTL of an alert and its index entries without modifying any data. This is the recommended way to keep an alert alive without changing `updated_at` or `updated_ledger` (which would cause it to appear in incremental-sync results via `get_alerts_modified_since` or `get_alerts_modified_since_ledger`).
 
 **Requires auth:** `caller` (must match `owner` of the config)
 
@@ -578,6 +592,53 @@ If a `WatcherRegistry` is configured, `querier` must be a registered watcher or 
 | `limit` | `u32` | Maximum number of results to return |
 
 **Returns:** `Result<Vec<AlertConfig>, ContractError>` — may be empty.
+
+---
+
+### `get_alerts_modified_since`
+
+Returns all alert configs whose `updated_at` timestamp is greater than or equal to `since`.
+
+Enables incremental sync for watcher nodes by passing the ledger timestamp of the last sync.
+
+> **Note:** Because multiple ledgers can close within the same timestamp second, timestamp-based synchronization may produce duplicates (with `since = T`) or miss changes across ledgers closed in the same second (with `since = T + 1`). For strictly monotonic, unambiguous sync, use [`get_alerts_modified_since_ledger`](#get_alerts_modified_since_ledger).
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `since` | `u64` | Ledger timestamp (inclusive lower bound, pass `0` for all) |
+| `offset` | `u32` | Number of alert IDs to skip from the start of ID space |
+| `limit` | `u32` | Maximum number of IDs to scan |
+
+**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_at >= since`.
+
+---
+
+### `get_alerts_modified_since_ledger`
+
+Returns all alert configs whose `updated_ledger` sequence number is greater than or equal to `since_ledger`.
+
+Provides unambiguous **incremental sync** for watcher nodes keyed on monotonic ledger sequence numbers rather than timestamps. Because several ledgers can share the same close-time second, sequence numbers eliminate duplicate delivery and missed updates.
+
+#### Recommended Sync Loop
+
+1. Initialize `cursor_ledger = 0` (or the last-synced ledger sequence).
+2. On each polling cycle:
+   - Call `get_alerts_modified_since_ledger(since_ledger = cursor_ledger, offset, limit)`.
+   - Paginate by advancing `offset += limit` until an empty page or fewer than `limit` items are returned.
+   - For each returned alert, update local state and record the highest ledger sequence seen: `max_ledger = max(max_ledger, alert.updated_ledger)`.
+   - After finishing the scan, update the cursor for the next cycle: `cursor_ledger = max_ledger + 1` (or `current_ledger + 1` if no alerts were returned).
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `since_ledger` | `u32` | Ledger sequence number (inclusive lower bound, pass `0` for all) |
+| `offset` | `u32` | Number of alert IDs to skip from the start of ID space |
+| `limit` | `u32` | Maximum number of IDs to scan |
+
+**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_ledger >= since_ledger`.
 
 ---
 

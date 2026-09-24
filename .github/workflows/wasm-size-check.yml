@@ -45,6 +45,10 @@ jobs:
 
       # Issue #285, #286 — Use prebuilt pinned Stellar CLI instead of building from source
       - name: Install Stellar CLI
+      # Issue #285 — Pin Stellar CLI version
+      - name: Install Stellar CLI
+        env:
+          STELLAR_CLI_VERSION: "28.0.0"
         run: |
           curl -sSfL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
             | sudo tar -xz -C /usr/local/bin stellar
