@@ -37,6 +37,7 @@ We introduce a **two-phase webhook rotation mechanism** via two distinct entry p
 
 3. **Legacy `update_webhook` Retention**
    - The direct `update_webhook` function is retained for backwards compatibility and emergency updates where single-step atomic cutover is explicitly required.
+   - A direct `update_webhook` supersedes any in-flight rotation: it clears `pending_webhook_hash`, so a subsequent `confirm_webhook` cannot promote the stale staged hash over the direct update (#216).
 
 ## Threat Analysis & Mitigations
 

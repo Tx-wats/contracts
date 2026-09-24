@@ -699,6 +699,11 @@ impl AlertRegistry {
 
     /// Update the webhook hash for an existing alert.
     ///
+    /// Takes effect immediately and discards any rotation staged by
+    /// [`AlertRegistry::propose_webhook`], so a later
+    /// [`AlertRegistry::confirm_webhook`] returns
+    /// [`ContractError::NoPendingWebhook`] instead of reverting this update.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must also be
     /// the original owner of the alert.
@@ -728,6 +733,9 @@ impl AlertRegistry {
         Self::assert_owner(&config, &caller)?;
 
         config.webhook_hash = webhook_hash;
+        // A direct update supersedes any in-flight rotation; otherwise a later
+        // confirm_webhook would promote the stale staged hash over this one.
+        config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
 
         env.storage()

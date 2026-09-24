@@ -463,6 +463,8 @@ Updates only the label of an existing alert, leaving `rules` and `webhook_hash` 
 
 Updates the webhook hash for an existing alert. Use this to rotate webhook URLs without re-registering. Only the original owner may call this.
 
+The update takes effect immediately and **discards any rotation staged by `propose_webhook`** (`pending_webhook_hash` is reset to `None`), so a later `confirm_webhook` returns `NoPendingWebhook` instead of reverting this update.
+
 **Requires auth:** `caller` (must match `owner` of the config)
 
 **Parameters**

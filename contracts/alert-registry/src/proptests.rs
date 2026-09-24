@@ -369,6 +369,8 @@ fn run_state_machine(actions: Vec<AlertAction>) {
                     } else {
                         assert_eq!(res.unwrap(), Ok(()));
                         alert.webhook_hash_char = hash_char;
+                        // A direct update discards any staged rotation (#216).
+                        alert.pending_webhook_hash_char = None;
                         alert.updated_at = current_time;
                     }
                 }

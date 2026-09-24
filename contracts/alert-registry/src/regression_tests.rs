@@ -16,7 +16,11 @@ fn setup() -> (Env, AlertRegistryClient<'static>) {
 }
 
 fn hash64(env: &Env) -> String {
-    let buf = [b'0'; 64];
+    hash64c(env, '0')
+}
+
+fn hash64c(env: &Env, c: char) -> String {
+    let buf = [c as u8; 64];
     String::from_str(env, core::str::from_utf8(&buf).unwrap())
 }
 
@@ -319,5 +323,46 @@ fn test_regression_renew_alert_ttl_preserves_updated_at() {
     assert_eq!(
         cfg_after_renew.updated_at, 1000,
         "renew_alert_ttl must NOT modify updated_at"
+    );
+}
+
+/// Regression test for #216:
+/// `update_webhook left a stale pending hash that later overwrote it.`
+///
+/// `propose_webhook(B)`, then `update_webhook(C)`, then `confirm_webhook()` used
+/// to promote the stale `B` over the direct update to `C`. A direct update now
+/// discards the staged rotation, so the confirm has nothing to promote.
+#[test]
+fn test_regression_update_webhook_clears_stale_pending_hash() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Rotating Alert"),
+        &hash64c(&env, 'a'),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
+    client.update_webhook(&owner, &id, &hash64c(&env, 'c'));
+
+    let cfg = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg.webhook_hash, hash64c(&env, 'c'));
+    assert!(
+        cfg.pending_webhook_hash.is_none(),
+        "update_webhook must discard the staged rotation"
+    );
+
+    assert_eq!(
+        client.try_confirm_webhook(&owner, &id).unwrap_err().unwrap(),
+        ContractError::NoPendingWebhook
+    );
+    assert_eq!(
+        client.get_alert(&owner, &id).unwrap().webhook_hash,
+        hash64c(&env, 'c'),
+        "the direct update must survive a later confirm attempt"
     );
 }
