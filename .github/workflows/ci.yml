@@ -57,6 +57,12 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      # Issue #122 — Every hand-written public item must be documented
+      # (missing_docs) and every intra-doc link must resolve
+      # (rustdoc::broken_intra_doc_links).
+      - name: Check doc comments
+        run: bash scripts/check-docs.sh
+
       # Issue #121 — README snippets must call functions (and pass arguments)
       # that exist in the compiled contract spec. Uses the WASM built above.
       - name: Install Stellar CLI
