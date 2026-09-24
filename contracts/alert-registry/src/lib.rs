@@ -128,6 +128,8 @@ pub struct AlertConfig {
     pub created_at: u64,
     /// Ledger timestamp of the most recent update.
     pub updated_at: u64,
+    /// Monotonic ledger sequence number of the most recent update.
+    pub updated_ledger: u32,
     /// Whether the alert is currently active.
     pub active: bool,
 }
@@ -570,6 +572,7 @@ impl AlertRegistry {
             target_contract: target_contract.clone(),
             created_at: now,
             updated_at: now,
+            updated_ledger: env.ledger().sequence(),
             active: true,
         };
 
@@ -627,6 +630,7 @@ impl AlertRegistry {
         config.rules = rules;
         config.active = active;
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -693,6 +697,7 @@ impl AlertRegistry {
 
         config.webhook_hash = webhook_hash;
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -819,6 +824,7 @@ impl AlertRegistry {
         config.webhook_hash = pending;
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -880,6 +886,7 @@ impl AlertRegistry {
 
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -908,8 +915,8 @@ impl AlertRegistry {
     /// Extend the TTL of an alert and its indexes without modifying any data.
     ///
     /// Unlike [`Self::bump_alert`], this is owner-authenticated and leaves
-    /// `updated_at` alone, so renewing storage never looks like an edit to
-    /// downstream consumers polling `get_alerts_modified_since`.
+    /// `updated_at` and `updated_ledger` alone, so renewing storage never looks like an edit to
+    /// downstream consumers polling `get_alerts_modified_since` or `get_alerts_modified_since_ledger`.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be the
@@ -1001,6 +1008,7 @@ impl AlertRegistry {
 
         config.label = label;
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -1109,6 +1117,7 @@ impl AlertRegistry {
 
         config.active = false;
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -1165,6 +1174,7 @@ impl AlertRegistry {
         let old_owner = config.owner.clone();
         config.owner = new_owner.clone();
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -1559,6 +1569,7 @@ impl AlertRegistry {
                 if cfg.active {
                     cfg.active = false;
                     cfg.updated_at = env.ledger().timestamp();
+                    cfg.updated_ledger = env.ledger().sequence();
                     env.storage().persistent().set(&DataKey::Alert(id), &cfg);
                     env.storage().persistent().extend_ttl(
                         &DataKey::Alert(id),
@@ -1631,6 +1642,7 @@ impl AlertRegistry {
         let old_target = config.target_contract.clone();
         config.target_contract = new_target.clone();
         config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
@@ -1672,6 +1684,11 @@ impl AlertRegistry {
     /// entry has therefore expired) are silently omitted.
     ///
     /// # Note
+    /// Because multiple ledgers can share the same close-time second, timestamp-based
+    /// synchronization may produce duplicates or miss changes across ledgers closed in
+    /// the same second. For unambiguous monotonic synchronization, prefer
+    /// [`Self::get_alerts_modified_since_ledger`].
+    ///
     /// The scan cost of a single call is bounded by `limit`, not by the total
     /// size of the registry, so callers should page through with a bounded
     /// `limit` (see [`get_global_alert_limit`] for an admin-settable ceiling
@@ -1700,6 +1717,77 @@ impl AlertRegistry {
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
             {
                 if cfg.updated_at >= since {
+                    out.push_back(cfg);
+                }
+            }
+        }
+        out
+    }
+
+    /// Return all alert configs whose `updated_ledger` sequence number is greater
+    /// than or equal to `since_ledger`.
+    ///
+    /// This provides unambiguous **incremental sync** for watcher nodes keyed on
+    /// the monotonic ledger sequence number rather than timestamps. Because several
+    /// ledgers can share the same close-time second, timestamp-based polling with
+    /// `since = T` gets duplicates while `since = T + 1` can miss changes occurring in
+    /// later ledgers closed within the same second. Monotonic ledger sequences eliminate
+    /// this ambiguity.
+    ///
+    /// # Recommended Sync Loop
+    /// 1. Initialize `cursor_ledger = 0` (or the last-synced ledger sequence).
+    /// 2. For each polling cycle:
+    ///    a. Call `get_alerts_modified_since_ledger(env, cursor_ledger, offset, limit)`
+    ///       paginating by advancing `offset += limit` until an empty page or fewer than
+    ///       `limit` items are returned.
+    ///    b. For each returned alert, update local state and track the highest ledger
+    ///       seen: `max_ledger = max(max_ledger, alert.updated_ledger)`.
+    ///    c. After finishing the registry scan, advance the cursor:
+    ///       `cursor_ledger = max(cursor_ledger, max_ledger.saturating_add(1))`.
+    ///
+    /// # Arguments
+    /// * `since_ledger` - Monotonic ledger sequence number (inclusive lower bound). Pass `0`
+    ///   to retrieve every alert that is currently stored.
+    /// * `offset` - Number of IDs to skip from the start of the ID space.
+    /// * `limit` - Maximum number of IDs to scan starting at `offset`.
+    ///
+    /// # Returns
+    /// A `Vec<AlertConfig>` containing every live alert in the ID range
+    /// `[offset, offset + limit)` (clamped to the current alert count) with
+    /// `updated_ledger >= since_ledger`. Alerts that have been removed are silently omitted.
+    ///
+    /// # Note
+    /// The scan cost of a single call is bounded by `limit`, not by the total
+    /// size of the registry, so callers should page through with a bounded
+    /// `limit` (see [`get_global_alert_limit`] for an admin-settable ceiling
+    /// on total registry size) rather than requesting the whole ID space in
+    /// one call.
+    #[must_use]
+    pub fn get_alerts_modified_since_ledger(
+        env: Env,
+        since_ledger: u32,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<AlertConfig> {
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("NEXT_ID"))
+            .unwrap_or(0u64);
+
+        let range_start = u64::from(offset).min(total);
+        let range_end = u64::from(offset)
+            .saturating_add(u64::from(limit))
+            .min(total);
+
+        let mut out: Vec<AlertConfig> = vec![&env];
+        for id in range_start..range_end {
+            if let Some(cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
+            {
+                if cfg.updated_ledger >= since_ledger {
                     out.push_back(cfg);
                 }
             }
@@ -3755,6 +3843,77 @@ mod tests {
         assert_eq!(results_after.len(), 0);
     }
 
+    // 24. get_alerts_modified_since_ledger returns all alerts when since_ledger == 0
+    #[test]
+    fn test_get_alerts_modified_since_ledger_zero_returns_all() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        client.register_alert(&owner, &target, &str(&env, "B"), &hash64(&env), &vec![&env]);
+
+        let results = client.get_alerts_modified_since_ledger(&0u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 2);
+    }
+
+    // 25. get_alerts_modified_since_ledger returns empty vec on empty registry
+    #[test]
+    fn test_get_alerts_modified_since_ledger_empty_registry() {
+        let (_env, client) = setup();
+        let results = client.get_alerts_modified_since_ledger(&0u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 0);
+    }
+
+    // 26. Filters out alerts whose updated_ledger is before since_ledger (unambiguous multi-ledger sync)
+    #[test]
+    fn test_get_alerts_modified_since_ledger_filters_by_sequence() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        // Multiple ledgers in the same close-time second (timestamp 1000)
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+            li.sequence_number = 50;
+        });
+        client.register_alert(&owner, &target, &str(&env, "L50"), &hash64(&env), &vec![&env]);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+            li.sequence_number = 51;
+        });
+        client.register_alert(&owner, &target, &str(&env, "L51"), &hash64(&env), &vec![&env]);
+
+        // Querying with since_ledger = 51 returns only the second alert
+        let results = client.get_alerts_modified_since_ledger(&51u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results.get(0).unwrap().label, str(&env, "L51"));
+    }
+
+    // 27. since_ledger boundary value exactly equal is included; +1 excludes it
+    #[test]
+    fn test_get_alerts_modified_since_ledger_boundary_inclusive() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        env.ledger().with_mut(|li| li.sequence_number = 75);
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "BoundarySeq"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        let results = client.get_alerts_modified_since_ledger(&75u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 1);
+
+        let results_after = client.get_alerts_modified_since_ledger(&76u32, &0u32, &u32::MAX);
+        assert_eq!(results_after.len(), 0);
+    }
+
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
 
     #[test]
@@ -4879,6 +5038,7 @@ mod tests {
         assert_eq!(after.target_contract, before.target_contract);
         assert_eq!(after.created_at, before.created_at);
         assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.updated_ledger, before.updated_ledger);
         assert_eq!(after.active, before.active);
     }
 

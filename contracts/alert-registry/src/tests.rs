@@ -777,6 +777,7 @@ fn test_renew_alert_ttl_happy_path() {
     assert_eq!(after.rules, before.rules);
     assert_eq!(after.active, before.active);
     assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(after.updated_ledger, before.updated_ledger);
     assert_eq!(after.created_at, before.created_at);
 }
 
@@ -1664,6 +1665,196 @@ fn test_get_alerts_modified_since_precision() {
     assert_eq!(res_3001.len(), 0);
 
     let _ = id1;
+}
+
+#[test]
+fn test_get_alerts_modified_since_ledger_precision() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Simulate multiple ledgers sharing the same close-time second (timestamp 1000)
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence_number = 100;
+    });
+    let id0 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A0"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    // Next ledger closed in same second
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence_number = 101;
+    });
+    let id1 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A1"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    // Next ledger closed in same second
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1000;
+        li.sequence_number = 102;
+    });
+    let id2 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A2"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    // Initial sequence checks
+    let cfg0 = client.get_alert(&owner, &id0).unwrap();
+    assert_eq!(cfg0.updated_ledger, 100);
+    let cfg1 = client.get_alert(&owner, &id1).unwrap();
+    assert_eq!(cfg1.updated_ledger, 101);
+    let cfg2 = client.get_alert(&owner, &id2).unwrap();
+    assert_eq!(cfg2.updated_ledger, 102);
+
+    // With timestamp-based query, since=1000 returns all 3, but since=1001 returns none
+    assert_eq!(client.get_alerts_modified_since(&1000, &0u32, &u32::MAX).len(), 3);
+    assert_eq!(client.get_alerts_modified_since(&1001, &0u32, &u32::MAX).len(), 0);
+
+    // Monotonic ledger-based query has no ambiguity:
+    // since_ledger = 0 returns all 3
+    let res_0 = client.get_alerts_modified_since_ledger(&0, &0u32, &u32::MAX);
+    assert_eq!(res_0.len(), 3);
+
+    // since_ledger = 100 returns all 3
+    let res_100 = client.get_alerts_modified_since_ledger(&100, &0u32, &u32::MAX);
+    assert_eq!(res_100.len(), 3);
+
+    // since_ledger = 101 returns id1 and id2
+    let res_101 = client.get_alerts_modified_since_ledger(&101, &0u32, &u32::MAX);
+    assert_eq!(res_101.len(), 2);
+    assert_eq!(res_101.get(0).unwrap().label, str(&env, "A1"));
+    assert_eq!(res_101.get(1).unwrap().label, str(&env, "A2"));
+
+    // since_ledger = 102 returns only id2
+    let res_102 = client.get_alerts_modified_since_ledger(&102, &0u32, &u32::MAX);
+    assert_eq!(res_102.len(), 1);
+    assert_eq!(res_102.get(0).unwrap().label, str(&env, "A2"));
+
+    // since_ledger = 103 returns 0
+    let res_103 = client.get_alerts_modified_since_ledger(&103, &0u32, &u32::MAX);
+    assert_eq!(res_103.len(), 0);
+
+    // Now update id0 at ledger sequence 200
+    env.ledger().with_mut(|li| {
+        li.timestamp = 2000;
+        li.sequence_number = 200;
+    });
+    client.update_webhook(&owner, &id0, &hash64c(&env, 'z'));
+
+    let cfg0_after = client.get_alert(&owner, &id0).unwrap();
+    assert_eq!(cfg0_after.updated_ledger, 200);
+
+    // Now since_ledger = 105 returns only id0 (updated at ledger 200)
+    let res_105 = client.get_alerts_modified_since_ledger(&105, &0u32, &u32::MAX);
+    assert_eq!(res_105.len(), 1);
+    assert_eq!(res_105.get(0).unwrap().label, str(&env, "A0"));
+
+    // Pagination test: offset 0, limit 1
+    let page1 = client.get_alerts_modified_since_ledger(&0, &0, &1);
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page1.get(0).unwrap().label, str(&env, "A0"));
+
+    let page2 = client.get_alerts_modified_since_ledger(&0, &1, &1);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2.get(0).unwrap().label, str(&env, "A1"));
+
+    // Removed alerts are excluded
+    client.remove_alert(&owner, &id1);
+    let res_after_remove = client.get_alerts_modified_since_ledger(&0, &0u32, &u32::MAX);
+    assert_eq!(res_after_remove.len(), 2);
+    assert_eq!(res_after_remove.get(0).unwrap().label, str(&env, "A0"));
+    assert_eq!(res_after_remove.get(1).unwrap().label, str(&env, "A2"));
+}
+
+#[test]
+fn test_updated_ledger_tracked_on_all_mutations() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let new_target = Address::generate(&env);
+
+    env.ledger().with_mut(|li| li.sequence_number = 10);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Test"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 10);
+
+    // update_alert
+    env.ledger().with_mut(|li| li.sequence_number = 20);
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:transfer")], &true);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 20);
+
+    // update_label
+    env.ledger().with_mut(|li| li.sequence_number = 30);
+    client.update_label(&owner, &id, &str(&env, "New Label"));
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 30);
+
+    // update_webhook
+    env.ledger().with_mut(|li| li.sequence_number = 40);
+    client.update_webhook(&owner, &id, &hash64c(&env, 'w'));
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 40);
+
+    // propose_webhook (does not change updated_ledger or updated_at)
+    env.ledger().with_mut(|li| li.sequence_number = 50);
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'p'));
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 40);
+
+    // confirm_webhook
+    env.ledger().with_mut(|li| li.sequence_number = 60);
+    client.confirm_webhook(&owner, &id);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 60);
+
+    // propose and cancel_webhook_proposal
+    env.ledger().with_mut(|li| li.sequence_number = 70);
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'q'));
+    env.ledger().with_mut(|li| li.sequence_number = 80);
+    client.cancel_webhook_proposal(&owner, &id);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 80);
+
+    // update_target_contract
+    env.ledger().with_mut(|li| li.sequence_number = 90);
+    client.update_target_contract(&owner, &id, &new_target);
+    assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 90);
+
+    // transfer_alert_ownership
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    assert_eq!(client.get_alert(&new_owner, &id).unwrap().updated_ledger, 100);
+
+    // deactivate_alert_by_admin
+    env.ledger().with_mut(|li| li.sequence_number = 110);
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert_eq!(client.get_alert(&new_owner, &id).unwrap().updated_ledger, 110);
+
+    // deactivate_all_alerts
+    env.ledger().with_mut(|li| li.sequence_number = 120);
+    client.update_alert(&new_owner, &id, &vec![&env], &true);
+    assert_eq!(client.get_alert(&new_owner, &id).unwrap().updated_ledger, 120);
+    env.ledger().with_mut(|li| li.sequence_number = 130);
+    client.deactivate_all_alerts(&new_owner);
+    assert_eq!(client.get_alert(&new_owner, &id).unwrap().updated_ledger, 130);
 }
 
 #[test]

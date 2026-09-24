@@ -33,6 +33,7 @@ Source: `contracts/alert-registry/src/lib.rs`
 | `target_contract` | `Address` | Contract address being watched |
 | `created_at` | `u64` | Ledger timestamp at registration |
 | `updated_at` | `u64` | Ledger timestamp of the most recent update |
+| `updated_ledger` | `u32` | Monotonic ledger sequence number of the most recent update |
 | `active` | `bool` | Whether the alert is currently active |
 | `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
