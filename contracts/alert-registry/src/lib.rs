@@ -614,18 +614,9 @@ impl AlertRegistry {
             active: true,
         };
 
-        env.storage().persistent().set(&DataKey::Alert(id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AlertActive(id), &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::AlertActive(id), DEFAULT_TTL, DEFAULT_TTL);
         Self::push_owner_index(&env, &owner, id)?;
         Self::push_contract_index(&env, &target_contract, id)?;
+        Self::persist_alert(&env, id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("register")),
@@ -669,31 +660,7 @@ impl AlertRegistry {
         config.active = active;
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        // Keep the cheap AlertActive flag in sync with the full config.
-        env.storage()
-            .persistent()
-            .set(&DataKey::AlertActive(config_id), &active);
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("update")),
@@ -743,22 +710,7 @@ impl AlertRegistry {
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("webhook")),
@@ -810,22 +762,7 @@ impl AlertRegistry {
         // The live hash is deliberately left untouched until confirmation.
         config.pending_webhook_hash = Some(webhook_hash);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_prop")),
@@ -869,22 +806,7 @@ impl AlertRegistry {
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_conf")),
@@ -930,22 +852,7 @@ impl AlertRegistry {
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("wh_cancel")),
@@ -982,24 +889,7 @@ impl AlertRegistry {
 
         Self::assert_owner(&config, &caller)?;
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::touch_alert(&env, config_id, &config, DEFAULT_TTL);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("renew")),
@@ -1049,22 +939,7 @@ impl AlertRegistry {
         config.label = label;
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("label")),
@@ -1157,20 +1032,7 @@ impl AlertRegistry {
         config.active = false;
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AlertActive(config_id), &false);
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("admin_off")),
@@ -1213,15 +1075,9 @@ impl AlertRegistry {
         config.owner = new_owner.clone();
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-
         Self::remove_from_owner_index(&env, &old_owner, config_id);
         Self::push_owner_index(&env, &new_owner, config_id)?;
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("transfer")),
@@ -1334,26 +1190,7 @@ impl AlertRegistry {
             .get(&DataKey::Alert(config_id))
             .ok_or(ContractError::AlertNotFound)?;
 
-        env.storage().persistent().extend_ttl(
-            &DataKey::Alert(config_id),
-            effective_ttl,
-            effective_ttl,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::AlertActive(config_id),
-            effective_ttl,
-            effective_ttl,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerIndex(config.owner.clone()),
-            effective_ttl,
-            effective_ttl,
-        );
-        env.storage().persistent().extend_ttl(
-            &DataKey::ContractIndex(config.target_contract),
-            effective_ttl,
-            effective_ttl,
-        );
+        Self::touch_alert(&env, config_id, &config, effective_ttl);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("bump")),
@@ -1604,34 +1441,12 @@ impl AlertRegistry {
                 if cfg.active {
                     cfg.active = false;
                     cfg.updated_at = env.ledger().timestamp();
-                    env.storage().persistent().set(&DataKey::Alert(id), &cfg);
-                    env.storage().persistent().extend_ttl(
-                        &DataKey::Alert(id),
-                        DEFAULT_TTL,
-                        DEFAULT_TTL,
-                    );
-                    env.storage()
-                        .persistent()
-                        .set(&DataKey::AlertActive(id), &false);
-                    env.storage().persistent().extend_ttl(
-                        &DataKey::AlertActive(id),
-                        DEFAULT_TTL,
-                        DEFAULT_TTL,
-                    );
-                    env.storage().persistent().extend_ttl(
-                        &DataKey::ContractIndex(cfg.target_contract.clone()),
-                        DEFAULT_TTL,
-                        DEFAULT_TTL,
-                    );
+                    Self::persist_alert(&env, id, &cfg);
                     count += 1;
                 }
             }
         }
         if count > 0 {
-            env.storage().persistent().extend_ttl(
-                &DataKey::OwnerIndex(caller.clone()),
-                DEFAULT_TTL,
-                DEFAULT_TTL,
             env.events().publish(
                 (symbol_short!("alert"), symbol_short!("bulk_off")),
                 (caller, count),
@@ -1677,16 +1492,11 @@ impl AlertRegistry {
         config.target_contract = new_target.clone();
         config.updated_at = env.ledger().timestamp();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Alert(config_id), &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Alert(config_id), DEFAULT_TTL, DEFAULT_TTL);
-
-        // Migrate the contract index
+        // Migrate the contract index before persisting, so the refresh in
+        // persist_alert extends the new target's index.
         Self::remove_from_contract_index(&env, &old_target, config_id);
         Self::push_contract_index(&env, &new_target, config_id)?;
+        Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("retarget")),
@@ -1932,6 +1742,47 @@ impl AlertRegistry {
         );
     }
 
+    /// Write `config` (and its cheap [`DataKey::AlertActive`] mirror) under
+    /// `config_id`, then refresh every entry the alert depends on via
+    /// [`AlertRegistry::touch_alert`].
+    ///
+    /// Every mutator that rewrites an alert goes through here, so the
+    /// config/`AlertActive` pair can never drift apart and no mutator can
+    /// forget one of the TTL extensions.
+    ///
+    /// The owner and contract indexes must already contain `config_id`, so
+    /// callers that move an alert between indexes update them first.
+    fn persist_alert(env: &Env, config_id: u64, config: &AlertConfig) {
+        let storage = env.storage().persistent();
+        storage.set(&DataKey::Alert(config_id), config);
+        storage.set(&DataKey::AlertActive(config_id), &config.active);
+        Self::touch_alert(env, config_id, config, DEFAULT_TTL);
+    }
+
+    /// Extend the TTL of an alert and of every entry it depends on to `ttl`
+    /// ledgers: [`DataKey::Alert`], [`DataKey::AlertActive`], the owner's
+    /// [`DataKey::OwnerIndex`] and [`DataKey::OwnerLiveCount`], and the
+    /// target's [`DataKey::ContractIndex`].
+    ///
+    /// The owner counter is only extended when present: it may still sit
+    /// under its pre-rename key (migrated lazily by `owner_live_count`) or
+    /// have expired, and extending a missing entry would abort the call.
+    fn touch_alert(env: &Env, config_id: u64, config: &AlertConfig, ttl: u32) {
+        let storage = env.storage().persistent();
+        storage.extend_ttl(&DataKey::Alert(config_id), ttl, ttl);
+        storage.extend_ttl(&DataKey::AlertActive(config_id), ttl, ttl);
+        storage.extend_ttl(&DataKey::OwnerIndex(config.owner.clone()), ttl, ttl);
+        storage.extend_ttl(
+            &DataKey::ContractIndex(config.target_contract.clone()),
+            ttl,
+            ttl,
+        );
+        let live_count_key = DataKey::OwnerLiveCount(config.owner.clone());
+        if storage.has(&live_count_key) {
+            storage.extend_ttl(&live_count_key, ttl, ttl);
+        }
+    }
+
     /// Atomically read and increment the global alert ID counter.
     ///
     /// Returns the current value before incrementing, so the first ID is `0`.
@@ -1990,7 +1841,10 @@ impl AlertRegistry {
     /// former `DataKey::OwnerActiveCount(owner)` variant, i.e. the vector
     /// `[Symbol("OwnerActiveCount"), owner]`.
     fn legacy_owner_active_count_key(env: &Env, owner: &Address) -> (soroban_sdk::Symbol, Address) {
-        (soroban_sdk::Symbol::new(env, "OwnerActiveCount"), owner.clone())
+        (
+            soroban_sdk::Symbol::new(env, "OwnerActiveCount"),
+            owner.clone(),
+        )
     }
 
     /// Persist the running per-owner live-alert counter with a refreshed TTL.

@@ -357,7 +357,10 @@ fn test_regression_update_webhook_clears_stale_pending_hash() {
     );
 
     assert_eq!(
-        client.try_confirm_webhook(&owner, &id).unwrap_err().unwrap(),
+        client
+            .try_confirm_webhook(&owner, &id)
+            .unwrap_err()
+            .unwrap(),
         ContractError::NoPendingWebhook
     );
     assert_eq!(
@@ -424,4 +427,128 @@ fn test_regression_owner_live_count_migrates_legacy_key() {
         &vec![&env, str(&env, "rule:transfer")],
     );
     assert_eq!(client.get_non_removed_alert_count(&owner), 6);
+}
+
+/// Remaining TTL of each entry an alert depends on, in the order
+/// `Alert`, `AlertActive`, `OwnerIndex`, `OwnerLiveCount`, `ContractIndex`.
+fn alert_entry_ttls(
+    env: &Env,
+    client: &AlertRegistryClient,
+    id: u64,
+    owner: &Address,
+    target: &Address,
+) -> [u32; 5] {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    env.as_contract(&client.address, || {
+        let storage = env.storage().persistent();
+        [
+            storage.get_ttl(&crate::DataKey::Alert(id)),
+            storage.get_ttl(&crate::DataKey::AlertActive(id)),
+            storage.get_ttl(&crate::DataKey::OwnerIndex(owner.clone())),
+            storage.get_ttl(&crate::DataKey::OwnerLiveCount(owner.clone())),
+            storage.get_ttl(&crate::DataKey::ContractIndex(target.clone())),
+        ]
+    })
+}
+
+/// Regression test for #213:
+/// every mutator used to hand-copy its own `extend_ttl` calls, and each TTL
+/// bug so far was one copy drifting from the rest. All mutators now go
+/// through `persist_alert`/`touch_alert`, so after any of them every entry
+/// the alert depends on must be back at the full `DEFAULT_TTL`.
+#[test]
+fn test_regression_every_mutator_refreshes_all_alert_ttls() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let new_target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "TTL Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    let full = [crate::DEFAULT_TTL; 5];
+    assert_eq!(alert_entry_ttls(&env, &client, id, &owner, &target), full);
+
+    // Each step ages every entry, runs one mutator, and expects a full refresh.
+    let age = |env: &Env| env.ledger().with_mut(|li| li.sequence_number += 1_000);
+
+    age(&env);
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &true);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "update_alert"
+    );
+
+    age(&env);
+    client.update_label(&owner, &id, &str(&env, "Renamed"));
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "update_label"
+    );
+
+    age(&env);
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "propose_webhook"
+    );
+
+    age(&env);
+    client.confirm_webhook(&owner, &id);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "confirm_webhook"
+    );
+
+    age(&env);
+    client.update_webhook(&owner, &id, &hash64c(&env, 'c'));
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "update_webhook"
+    );
+
+    age(&env);
+    client.renew_alert_ttl(&owner, &id);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "renew_alert_ttl"
+    );
+
+    age(&env);
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &target),
+        full,
+        "deactivate_alert_by_admin"
+    );
+
+    age(&env);
+    client.update_target_contract(&owner, &id, &new_target);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &owner, &new_target),
+        full,
+        "update_target_contract"
+    );
+
+    age(&env);
+    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    assert_eq!(
+        alert_entry_ttls(&env, &client, id, &new_owner, &new_target),
+        full,
+        "transfer_alert_ownership"
+    );
 }

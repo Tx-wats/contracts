@@ -46,15 +46,15 @@ Generated from the `DataKey` enum and every `symbol_short!` key the contract rea
 
 All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerLiveCount`, `ContractIndex`) are extended by `DEFAULT_TTL` (**17,280 ledgers**, ≈ 24 hours at 5 s/ledger) on every write that touches them. `bump_alert` can extend an alert's TTL further, up to `MAX_TTL` (535,680 ledgers, ≈ 31 days).
 
+Every mutator that rewrites an alert goes through `persist_alert`, which writes `Alert(id)` and `AlertActive(id)` and then calls `touch_alert` to extend the alert's full set of entries: `Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `OwnerLiveCount(owner)`, `ContractIndex(target)`. `renew_alert_ttl` and `bump_alert` call `touch_alert` directly without rewriting data. `OwnerLiveCount(owner)` is only extended when present (it may not yet be migrated from the legacy `OwnerActiveCount` key, or may have expired). See [docs/ttl.md](ttl.md) for the per-function table.
+
 | Function | Keys Extended |
 |---|---|
-| `register_alert` | `Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `OwnerLiveCount(owner)`, `ContractIndex(target)` |
-| `update_alert` | `Alert(id)`, `AlertActive(id)` |
-| `update_webhook` | `Alert(id)` |
-| `propose_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
-| `confirm_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
-| `renew_alert_ttl` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` — data unchanged |
-| `deactivate_all_alerts` | `Alert(id)`, `AlertActive(id)` for each deactivated alert; `ContractIndex(target)` for each touched contract; `OwnerIndex(caller)` once, if at least one alert was deactivated |
+| `register_alert`, `update_alert`, `update_webhook`, `update_label`, `propose_webhook`, `confirm_webhook`, `cancel_webhook_proposal`, `deactivate_alert_by_admin`, `renew_alert_ttl` | Full set, to `DEFAULT_TTL` |
+| `transfer_alert_ownership` | Full set with the new owner's `OwnerIndex`/`OwnerLiveCount`; the old owner's index and counter are rewritten and extended |
+| `update_target_contract` | Full set with the new target's `ContractIndex`; the old target's index is rewritten and extended |
+| `deactivate_all_alerts` | Full set for each deactivated alert |
+| `bump_alert` | Full set, to the requested TTL (capped at `MAX_TTL`) |
 | `remove_alert` | `Alert(id)`, `AlertActive(id)` deleted; `OwnerIndex(owner)`, `OwnerLiveCount(owner)`, `ContractIndex(target)` updated and TTL-extended |
 
 Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owner`, paginated variants, `get_alert_count`) do **not** extend any TTL.

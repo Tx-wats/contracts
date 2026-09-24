@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contradicted. The rename changes the on-chain key encoding, so counters
   stored under the legacy key are migrated to the new key on first read and
   the legacy entry is deleted. (issue #212)
+- **Duplicated TTL boilerplate replaced by `persist_alert` / `touch_alert`.**
+  About fifteen mutators hand-copied their own `extend_ttl` calls, and every
+  TTL bug so far was one copy drifting from the others. Mutators now write
+  through `persist_alert` (config + `AlertActive`, then a full refresh), and
+  `renew_alert_ttl` / `bump_alert` call `touch_alert`, which extends `Alert`,
+  `AlertActive`, `OwnerIndex`, `OwnerLiveCount` and `ContractIndex` together.
+  A regression test checks every mutator leaves all five entries at the full
+  TTL. (issue #213)
 
 ### Fixed — bindings & docs
 
