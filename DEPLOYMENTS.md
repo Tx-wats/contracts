@@ -82,6 +82,8 @@ The testnet contracts are deployed and administered by the identity configured v
 
 ## Deployment History
 
-| Date | Network | Contract | Address | WASM Hash | Notes |
-|---|---|---|---|---|---|
-| — | — | — | — | — | Initial placeholder |
+> **Tooling Note:** Deployments and build optimizations use Stellar CLI pinned to `v28.0.0` (Issue #285).
+
+| Date | Network | Contract | Address | WASM Hash | CLI Version | Notes |
+|---|---|---|---|---|---|---|
+| — | — | — | — | — | — | Initial placeholder |

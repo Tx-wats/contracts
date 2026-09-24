@@ -33,13 +33,16 @@ build_contract "${ALL_CONTRACTS[@]}"
 ALERT_WASM="$(wasm_path alert-registry)"
 WATCHER_WASM="$(wasm_path watcher-registry)"
 
+ADMIN_ADDRESS=$(stellar keys address "$IDENTITY")
+
 echo "==> Deploying Alert Registry..."
 ALERT_ID=$(stellar contract deploy \
   --wasm "$ALERT_WASM" \
   --source "$IDENTITY" \
   --network "$NETWORK" \
   --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE")
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- --admin "$ADMIN_ADDRESS")
 echo "Alert Registry deployed: $ALERT_ID"
 
 echo "==> Deploying Watcher Registry..."
@@ -60,8 +63,8 @@ stellar contract invoke \
   --network "$NETWORK" \
   --rpc-url "$RPC_URL" \
   --network-passphrase "$NETWORK_PASSPHRASE" \
-  -- initialize \
-  --admin "$ADMIN_ADDRESS"
+  -- --admin "$ADMIN_ADDRESS")
+echo "Watcher Registry deployed: $WATCHER_ID"
 
 ALERT_HASH=$(sha256sum "$ALERT_WASM" | awk '{print $1}')
 WATCHER_HASH=$(sha256sum "$WATCHER_WASM" | awk '{print $1}')
