@@ -560,6 +560,7 @@ The contract defines a single error enum ([`lib.rs`](../contracts/watcher-regist
 | `NotInitialized` | `3` | every admin-gated entrypoint, `get_admins`, `get_admin` | A privileged call or admin read happened before `initialize`. |
 | `LastAdmin` | `4` | `remove_admin` | Removing this admin would leave the registry with no admins, permanently locking it. |
 | `WatcherNotFound` | `5` | `replace_watcher` | `old_watcher` is not currently registered, so there is nothing to replace. |
+| `DelayTooLarge` | `12` | `set_timelock_delay`, `propose_admin_action` | Configured or proposed timelock delay exceeds `MAX_TIMELOCK_DELAY` (518,400 ledgers ≈ 30 days). |
 
 See [Error handling: raw vs `try_` calls](#error-handling-raw-vs-try_-calls) for how these surface through the generated SDK client.
 **Returns:** `Result<Address, ContractError>` — `NotInitialized` if the contract has not been initialized.
