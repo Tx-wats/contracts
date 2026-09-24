@@ -32,9 +32,23 @@ behaviour described in [testing.md](./testing.md).
 
 ## Functions
 
+### `__constructor`
+
+Atomic constructor executed during deployment via `stellar contract deploy -- --admin <ADDRESS>`. Sets up the bootstrap admin in the same transaction as deployment, closing the front-running window where an attacker could invoke `initialize` before the deployer.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Initial (bootstrap) admin of the registry |
+
+**Events:** `("admin", "init")` with data `(admin: Address)`
+
+---
+
 ### `initialize`
 
-Initializes the registry with a single bootstrap admin. Can only be called once.
+Initializes the registry with a single bootstrap admin. Retained for backwards compatibility. If the contract was initialized at deployment via `__constructor`, calling `initialize` returns `ContractError::AlreadyInitialized`.
 
 **Requires auth:** `admin`
 

@@ -188,7 +188,22 @@ pub struct WatcherRegistry;
 
 #[contractimpl]
 impl WatcherRegistry {
+    /// Atomic constructor called during contract deployment to initialize the bootstrap admin.
+    ///
+    /// Running atomically with deployment prevents front-running the initialization window.
+    pub fn __constructor(env: Env, admin: Address) {
+        let admins: Vec<Address> = vec![&env, admin.clone()];
+        env.storage().instance().set(&DataKey::Admins, &admins);
+
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("init")), admin);
+    }
+
     /// Initialize the registry with a single bootstrap admin. Can only be called once.
+    ///
+    /// Kept for backwards compatibility. If the contract was initialized
+    /// via [`Self::__constructor`] during deployment, calling this again returns
+    /// [`ContractError::AlreadyInitialized`].
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
