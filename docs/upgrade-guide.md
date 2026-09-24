@@ -85,7 +85,7 @@ Any admin can call `cancel_admin_action` during the window. See
 
 - Read a few entries back (`get_admins`, `get_watchers`, `get_alert`) and
   confirm they decode as expected.
-- Regenerate the TypeScript bindings (`make bindings`) if the interface changed.
+- Regenerate the TypeScript bindings (`make bindings-all`) if the interface changed.
 - Record the new WASM hash in [DEPLOYMENTS.md](../DEPLOYMENTS.md).
 
 ## Rollback

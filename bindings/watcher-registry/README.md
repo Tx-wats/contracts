@@ -14,7 +14,7 @@ and published automatically on every GitHub release.
 npm install @tx-wat/watcher-registry @stellar/stellar-sdk
 ```
 
-> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings` from the repository root.
+> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings-watcher` from the repository root.
 
 ## Usage
 

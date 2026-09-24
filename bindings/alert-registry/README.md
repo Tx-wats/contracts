@@ -8,7 +8,7 @@ TypeScript bindings for the AlertRegistry Soroban smart contract.
 npm install @tx-wat/alert-registry-bindings
 ```
 
-> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings` from the repository root.
+> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings-alert` from the repository root.
 
 ## Usage
 
