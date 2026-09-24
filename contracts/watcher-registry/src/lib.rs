@@ -1,4 +1,14 @@
+//! `WatcherRegistry` — Soroban contract that stores the set of authorized
+//! watcher node addresses and the admins allowed to manage it.
+//!
+//! See `docs/watcher-registry.md` for the function reference.
 #![no_std]
+// Doc coverage is enforced by scripts/check-docs.sh in CI rather than by
+// `#![warn(missing_docs)]` here: Soroban's contract macros generate
+// undocumented public items, which clippy's `-D warnings` would turn into
+// errors. Intra-doc links inside `#[contractimpl]` must use the full type path
+// (not `Self::`) because the macro copies method docs into generated modules.
+#![warn(rustdoc::broken_intra_doc_links)]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec, Address,
@@ -15,12 +25,16 @@ const MAX_ADMINS: u32 = 50;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
+/// Errors returned by `WatcherRegistry` entry points.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
+    /// `initialize` was called on an already initialized registry.
     AlreadyInitialized = 1,
+    /// The caller is not an admin (or not the address this call requires).
     Unauthorized = 2,
+    /// An admin-only call was made before `initialize` set an admin.
     NotInitialized = 3,
     /// Returned when trying to remove the last admin, which would lock the contract.
     LastAdmin = 4,
@@ -182,7 +196,22 @@ pub struct WatcherRegistry;
 
 #[contractimpl]
 impl WatcherRegistry {
+    /// Atomic constructor called during contract deployment to initialize the bootstrap admin.
+    ///
+    /// Running atomically with deployment prevents front-running the initialization window.
+    pub fn __constructor(env: Env, admin: Address) {
+        let admins: Vec<Address> = vec![&env, admin.clone()];
+        env.storage().instance().set(&DataKey::Admins, &admins);
+
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("init")), admin);
+    }
+
     /// Initialize the registry with a single bootstrap admin. Can only be called once.
+    ///
+    /// Kept for backwards compatibility. If the contract was initialized
+    /// via [`Self::__constructor`] during deployment, calling this again returns
+    /// [`ContractError::AlreadyInitialized`].
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
@@ -210,7 +239,7 @@ impl WatcherRegistry {
     /// The admin set is capped at [`MAX_ADMINS`] entries.
     ///
     /// Sensitive: when a timelock delay is configured this must be queued via
-    /// [`Self::propose_admin_action`] instead of called directly.
+    /// [`WatcherRegistry::propose_admin_action`] instead of called directly.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be an
@@ -297,13 +326,13 @@ impl WatcherRegistry {
 
     /// Propose transferring the sole admin role to a new address (any existing
     /// admin may call this). The transfer does not take effect until
-    /// `new_admin` calls [`accept_admin_transfer`] with their own signature —
+    /// `new_admin` calls [`WatcherRegistry::accept_admin_transfer`] with their own signature —
     /// this prevents a typo'd or unowned address from permanently locking the
     /// contract.
     ///
     /// This replaces any previously pending proposal. This replaces the
     /// **entire** admin set with a single new admin once accepted. Use
-    /// [`add_admin`] + [`remove_admin`] if you want to rotate one member of a
+    /// [`WatcherRegistry::add_admin`] + [`WatcherRegistry::remove_admin`] if you want to rotate one member of a
     /// multi-admin set without losing the others.
     ///
     /// Transfer the caller's own admin slot to a new address (any existing
@@ -312,8 +341,8 @@ impl WatcherRegistry {
     /// This replaces **only the caller's own entry** in the admin set with
     /// `new_admin` — every other admin's membership is left untouched. In a
     /// multi-admin set this means no single admin can unilaterally strip the
-    /// others; each admin can only hand off their own slot. Use [`add_admin`]
-    /// + [`remove_admin`] if you need finer-grained control over another
+    /// others; each admin can only hand off their own slot. Use [`WatcherRegistry::add_admin`]
+    /// + [`WatcherRegistry::remove_admin`] if you need finer-grained control over another
     /// admin's membership (which itself requires that admin's own consent to
     /// remove, aside from the last-admin guard).
     ///
@@ -323,7 +352,7 @@ impl WatcherRegistry {
     /// Emits an `("admin", "transfer")` event recording both the old and new admin.
     ///
     /// Sensitive: when a timelock delay is configured this must be queued via
-    /// [`Self::propose_admin_action`] instead of called directly.
+    /// [`WatcherRegistry::propose_admin_action`] instead of called directly.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -354,7 +383,7 @@ impl WatcherRegistry {
         Ok(())
     }
 
-    /// Accept a pending admin transfer proposed via [`propose_admin_transfer`].
+    /// Accept a pending admin transfer proposed via [`WatcherRegistry::propose_admin_transfer`].
     ///
     /// Requires `new_admin`'s own signature, proving key control before the
     /// admin set is replaced. Emits an `("admin", "transfer")` event.
@@ -412,7 +441,7 @@ impl WatcherRegistry {
         Ok(())
     }
 
-    /// Cancel a pending admin transfer proposed via [`propose_admin_transfer`]
+    /// Cancel a pending admin transfer proposed via [`WatcherRegistry::propose_admin_transfer`]
     /// (any existing admin may call this).
     ///
     /// # Auth
@@ -486,10 +515,10 @@ impl WatcherRegistry {
 
     /// Register multiple authorized watcher nodes in a single call (any admin may call this).
     ///
-    /// Equivalent to calling [`register_watcher`] once per address, but rewrites
+    /// Equivalent to calling [`WatcherRegistry::register_watcher`] once per address, but rewrites
     /// the watcher list once for the whole batch instead of once per address.
     /// Already-registered addresses are skipped (idempotent), matching
-    /// [`register_watcher`]'s semantics. Emits one `("watcher", "register")`
+    /// [`WatcherRegistry::register_watcher`]'s semantics. Emits one `("watcher", "register")`
     /// event per newly-added watcher.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
@@ -691,7 +720,7 @@ impl WatcherRegistry {
         false
     }
 
-    /// Alias for [`is_watcher_authorized`] kept for backwards compatibility.
+    /// Alias for [`WatcherRegistry::is_watcher_authorized`] kept for backwards compatibility.
     #[must_use]
     pub fn is_authorized(env: Env, watcher: Address) -> bool {
         Self::is_watcher_authorized(env, watcher)
@@ -703,11 +732,11 @@ impl WatcherRegistry {
     /// a `("watcher", "remove")` event so dependent systems can revoke trust
     /// for every affected address. Refused outright when [`MIN_WATCHERS`] is
     /// greater than zero and the registry is non-empty, since clearing would
-    /// necessarily drop the count below that threshold; use [`remove_watcher`]
+    /// necessarily drop the count below that threshold; use [`WatcherRegistry::remove_watcher`]
     /// for selective removal instead.
     ///
     /// Sensitive: when a timelock delay is configured this must be queued via
-    /// [`Self::propose_admin_action`] instead of called directly.
+    /// [`WatcherRegistry::propose_admin_action`] instead of called directly.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -749,10 +778,10 @@ impl WatcherRegistry {
 
     /// Remove up to `max_count` registered watchers in a single admin call.
     ///
-    /// Batched fallback for [`clear_all_watchers`] — with a large enough
+    /// Batched fallback for [`WatcherRegistry::clear_all_watchers`] — with a large enough
     /// watcher set, clearing everything and emitting one event per watcher in
     /// a single transaction can exceed per-transaction resource/event
-    /// limits. Call this repeatedly until [`get_watcher_count`] returns 0 to
+    /// limits. Call this repeatedly until [`WatcherRegistry::get_watcher_count`] returns 0 to
     /// clear an arbitrarily large watcher set.
     ///
     /// Watchers are removed from the front of the list. Each removed watcher
@@ -843,11 +872,11 @@ impl WatcherRegistry {
     /// equally privileged (see the admin model doc on [`WatcherRegistry`]).
     /// The address returned here is an implementation detail of the
     /// underlying `Vec` and is **not guaranteed to stay the same** across
-    /// calls: [`remove_admin`] shifts remaining entries, so the address at
+    /// calls: [`WatcherRegistry::remove_admin`] shifts remaining entries, so the address at
     /// index 0 can change identity without warning.
     ///
-    /// Kept for backwards compatibility. Prefer [`get_admins`] when you need
-    /// the full admin set, or [`is_admin`] to check a specific address.
+    /// Kept for backwards compatibility. Prefer [`WatcherRegistry::get_admins`] when you need
+    /// the full admin set, or [`WatcherRegistry::is_admin`] to check a specific address.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     /// # Errors
@@ -860,7 +889,7 @@ impl WatcherRegistry {
 
     /// Check if an address is a current admin.
     ///
-    /// Unlike [`get_admins`], this does not require the caller to fetch and
+    /// Unlike [`WatcherRegistry::get_admins`], this does not require the caller to fetch and
     /// scan the entire admin set client-side.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
@@ -873,7 +902,7 @@ impl WatcherRegistry {
             }
         }
         false
-    /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
+    /// Pause the contract, rejecting all state-mutating calls until [`WatcherRegistry::unpause`] is called.
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
     /// compromised — mutations can be frozen while the incident is investigated.
@@ -892,7 +921,7 @@ impl WatcherRegistry {
         Ok(())
     }
 
-    /// Resume normal operation after a [`Self::pause`].
+    /// Resume normal operation after a [`WatcherRegistry::pause`].
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be an
     /// existing admin.
@@ -936,7 +965,7 @@ impl WatcherRegistry {
     /// `docs/upgrade-guide.md`.
     ///
     /// Sensitive: when a timelock delay is configured this must be queued as
-    /// [`AdminAction::Upgrade`] via [`Self::propose_admin_action`] instead of
+    /// [`AdminAction::Upgrade`] via [`WatcherRegistry::propose_admin_action`] instead of
     /// called directly — otherwise an upgrade would be a way around the delay.
     ///
     /// # Auth
@@ -982,7 +1011,7 @@ impl WatcherRegistry {
     /// A delay of `0` (the default) keeps those entrypoints callable directly.
     /// Once a non-zero delay is configured they return
     /// [`ContractError::TimelockRequired`] and must go through
-    /// [`Self::propose_admin_action`] / [`Self::execute_admin_action`] instead.
+    /// [`WatcherRegistry::propose_admin_action`] / [`WatcherRegistry::execute_admin_action`] instead.
     ///
     /// The delay can only be **raised** through this entrypoint. Lowering or
     /// disabling it is itself a sensitive action and must be proposed as

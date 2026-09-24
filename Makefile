@@ -1,5 +1,5 @@
-.PHONY: build test lint fmt check-events deploy-testnet bindings clean shellcheck
-.PHONY: build test lint fmt check-events deploy-testnet verify upgrade audit bindings clean
+.PHONY: build test lint fmt check-events shellcheck deploy-testnet verify upgrade audit \
+	bindings bindings-watcher bindings-alert bindings-all clean
 
 build:
 	cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
@@ -17,7 +17,7 @@ check-events:
 	bash scripts/check-events-doc.sh
 
 shellcheck:
-	shellcheck scripts/*.sh
+	shellcheck -x scripts/*.sh scripts/lib/*.sh
 
 deploy-testnet:
 	bash scripts/deploy.sh
@@ -36,17 +36,36 @@ upgrade:
 audit:
 	cargo audit
 
-# Generate TypeScript bindings for WatcherRegistry.
-# Requires: stellar CLI on PATH and a prior `make build`.
-# Usage: CONTRACT_ID=CXXX... make bindings
-bindings: build
+# Generate TypeScript bindings. Requires: stellar CLI on PATH.
+# Usage: CONTRACT_ID=CXXX... make bindings-watcher
+#        [ALERT_CONTRACT_ID=CXXX...] make bindings-alert
+#        WATCHER_CONTRACT_ID=CXXX... ALERT_CONTRACT_ID=CYYY... make bindings-all
+# `make bindings` is kept as an alias for bindings-watcher.
+WATCHER_CONTRACT_ID ?= $(CONTRACT_ID)
+
+bindings: bindings-watcher
+
+bindings-watcher: build
 	stellar contract bindings typescript \
 		--wasm target/wasm32-unknown-unknown/release/watcher_registry.wasm \
-		--contract-id $(CONTRACT_ID) \
+		--contract-id $(WATCHER_CONTRACT_ID) \
 		--output-dir bindings/watcher-registry \
 		--overwrite
 	cd bindings/watcher-registry && npm install && npm run build
 
+# The alert package generates into its own dist/ (see its package.json), so
+# only override the contract ID when one is given; otherwise use its pinned ID.
+bindings-alert: build
+	cd bindings/alert-registry && npm install && \
+		$(if $(ALERT_CONTRACT_ID),stellar contract bindings typescript \
+			--wasm ../../target/wasm32-unknown-unknown/release/alert_registry.wasm \
+			--contract-id $(ALERT_CONTRACT_ID) \
+			--output-dir ./dist \
+			--overwrite,npm run build)
+
+bindings-all: bindings-watcher bindings-alert
+
 clean:
 	cargo clean
 	rm -rf bindings/watcher-registry/dist bindings/watcher-registry/node_modules
+	rm -rf bindings/alert-registry/dist bindings/alert-registry/node_modules

@@ -32,9 +32,23 @@ behaviour described in [testing.md](./testing.md).
 
 ## Functions
 
+### `__constructor`
+
+Atomic constructor executed during deployment via `stellar contract deploy -- --admin <ADDRESS>`. Sets up the bootstrap admin in the same transaction as deployment, closing the front-running window where an attacker could invoke `initialize` before the deployer.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Initial (bootstrap) admin of the registry |
+
+**Events:** `("admin", "init")` with data `(admin: Address)`
+
+---
+
 ### `initialize`
 
-Initializes the registry with a single bootstrap admin. Can only be called once.
+Initializes the registry with a single bootstrap admin. Retained for backwards compatibility. If the contract was initialized at deployment via `__constructor`, calling `initialize` returns `ContractError::AlreadyInitialized`.
 
 **Requires auth:** `admin`
 
@@ -106,27 +120,75 @@ Removing an address that is not currently an admin still succeeds and still emit
 
 ---
 
-### `transfer_admin`
+### Admin transfer: `propose_admin_transfer` / `accept_admin_transfer` / `cancel_admin_transfer`
 
-Replaces the **entire** admin set with a single new admin. Any existing admin may call this. Use `add_admin` + `remove_admin` to rotate one member of a multi-admin set without dropping the others.
+Hands the admin role to a new address in two steps, replacing the **entire** admin set with that single address once the new admin accepts. The acceptance step requires the new admin's own signature, so a typo'd or unowned address can never lock the contract. To rotate one member of a multi-admin set without dropping the others, use `add_admin` + `remove_admin` instead.
+
+> These semantics follow the two-step "replace the whole set" design (matching `AdminAction::TransferAdmin`). The contract source still contains a spliced-in "hand off only my own slot" variant; see #187.
+
+**Flow**
+
+1. An existing admin calls `propose_admin_transfer(admin, new_admin)`. The proposal is stored under `DataKey::PendingAdminTransfer`; the admin set is unchanged. A new proposal overwrites any earlier one.
+2. `new_admin` calls `accept_admin_transfer(new_admin)`. The admin set becomes `[new_admin]` and the pending proposal is cleared.
+3. Until it is accepted, any existing admin may call `cancel_admin_transfer(admin)` to discard the proposal.
+
+#### `propose_admin_transfer`
 
 **Requires auth:** `admin` (must be an existing admin)
 
-**Parameters**
-
 | Name | Type | Description |
 |---|---|---|
-| `admin` | `Address` | An existing admin authorizing the transfer |
-| `new_admin` | `Address` | Address to become the sole admin |
+| `admin` | `Address` | Existing admin proposing the transfer |
+| `new_admin` | `Address` | Address proposed to become the sole admin |
 
-**Returns:** nothing
+**Returns:** `Result<(), ContractError>`
 
-**Events:** `("admin", "transfer")` with data `(admin: Address, new_admin: Address)`
+**Events:** `("admin", "propose")` with data `(admin: Address, new_admin: Address)`
 
 **Errors:**
 
 - `NotInitialized` if the contract has not been initialized.
 - `Unauthorized` if `admin` is not in the admin set.
+- `TimelockRequired` if a timelock delay is configured. Queue `AdminAction::TransferAdmin(new_admin)` via `propose_admin_action` instead.
+
+#### `accept_admin_transfer`
+
+**Requires auth:** `new_admin`
+
+| Name | Type | Description |
+|---|---|---|
+| `new_admin` | `Address` | The proposed address, accepting the transfer |
+
+**Returns:** `Result<(), ContractError>`
+
+**Events:** `("admin", "transfer")` with data `(old_admin: Address, new_admin: Address)`
+
+**Errors:**
+
+- `NoPendingTransfer` if no transfer is pending, or the pending proposal names a different address.
+- `Paused` if the contract is paused.
+
+#### `cancel_admin_transfer`
+
+**Requires auth:** `admin` (must be an existing admin)
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Existing admin cancelling the proposal |
+
+**Returns:** `Result<(), ContractError>`
+
+**Events:** `("admin", "cancel")` with data `(admin: Address)`
+
+**Errors:**
+
+- `NotInitialized` if the contract has not been initialized.
+- `Unauthorized` if `admin` is not in the admin set.
+- `NoPendingTransfer` if no transfer is pending.
+
+#### Direct `transfer_admin`
+
+`transfer_admin(admin, new_admin)` is the single-step form: it replaces the admin set with `[new_admin]` immediately, skipping the acceptance step, so prefer the two-step flow above. It is timelock-gated: while a timelock delay is configured it returns `TimelockRequired`, and the transfer must be queued as `AdminAction::TransferAdmin` through `propose_admin_action` / `execute_admin_action`. A raw client call panics with `Error(Contract, #N)`; `try_transfer_admin` returns `Ok(Err(ContractError::…))`.
 
 ---
 
@@ -372,22 +434,6 @@ Removes an address from the admin set. Any existing admin may call this. Refuses
 
 ---
 
-### `transfer_admin`
-
-Replaces the **entire** admin set with a single new admin. Any existing admin may call this. Use `add_admin` + `remove_admin` to rotate one member of a multi-admin set without losing the others.
-
-**Requires auth:** `admin` (must be an existing admin)
-
-**Parameters**
-
-| Name | Type | Description |
-|---|---|---|
-| `watcher` | `Address` | Address to check |
-
-**Returns:** `bool`
-
----
-
 ### `get_watchers`
 
 Returns all currently authorized watcher addresses.
@@ -395,23 +441,9 @@ Returns all currently authorized watcher addresses.
 **Parameters:** none
 
 **Returns:** `Vec<Address>` — may be empty.
-| `admin` | `Address` | Any current admin |
-| `new_admin` | `Address` | Sole address to become the new admin set |
-
-**Returns:** `Result<(), ContractError>` — `NotInitialized` / `Unauthorized`.
-
-**Events:** `(Symbol("admin"), Symbol("transfer"))` with data `(old_admin: Address, new_admin: Address)`.
 
 ---
 
-**Returns:** `Result<(), ContractError>`
-
-**Errors:**
-
-- `ContractError::NotInitialized` (`#3`) if the contract has not been initialized.
-- `ContractError::Unauthorized` (`#2`) if `admin` is not in the admin set.
-
-Replaces the **entire** admin set with `new_admin`. A raw client call panics with `Error(Contract, #N)`; `try_transfer_admin` returns `Ok(Err(ContractError::…))`.
 ### `get_admins`
 
 Returns every address in the current admin set.
@@ -452,28 +484,6 @@ Returns the number of registered watchers as a cheap integer read, avoiding the 
 
 ---
 
-## Errors
-
-`ContractError` is returned as the `Err` variant of every fallible entrypoint.
-
-| Variant | Code | Meaning |
-|---|---|---|
-| `admin` | `Address` | Current admin |
-| `AlreadyInitialized` | 1 | `initialize` was called on an already-initialized contract. |
-| `Unauthorized` | 2 | The caller is not in the admin set. |
-| `NotInitialized` | 3 | A privileged or admin-reading entrypoint was called before `initialize`. |
-| `LastAdmin` | 4 | `remove_admin` would have left the contract with no admins. |
-| `WatcherNotFound` | 5 | `replace_watcher` was given an `old_watcher` that is not registered. |
-Returns the primary admin address (first entry in the admin set). Kept for backwards compatibility; prefer `get_admins` when you need the full set.
-
-**Parameters:** none
-
-**Returns:** `Result<Address, ContractError>`
-
-**Errors:** `Unauthorized` if `admin` is not an existing admin.
-
----
-
 ### `clear_watchers_batch`
 
 Removes up to `max_count` registered watchers in a single call. Batched fallback for `clear_all_watchers` — call repeatedly until `get_watcher_count` returns 0 to clear an arbitrarily large watcher set without exceeding per-transaction resource/event limits.
@@ -493,77 +503,31 @@ Removes up to `max_count` registered watchers in a single call. Batched fallback
 
 ---
 
-### `propose_admin_transfer`
-
-Proposes transferring the admin role to a new address. Does **not** take effect until `new_admin` calls `accept_admin_transfer` with their own signature — this two-step flow prevents a typo'd or unowned `new_admin` from permanently locking the contract. Replaces any previously pending proposal.
-
-**Requires auth:** `admin` (must be an existing admin)
-
-**Parameters**
-
-| Name | Type | Description |
-|---|---|---|
-| `admin` | `Address` | Current admin proposing the transfer |
-| `new_admin` | `Address` | Address proposed to become the new admin |
-
-**Returns:** nothing
-
-**Errors:** `Unauthorized` if `admin` is not an existing admin; `NotInitialized` if the contract has not been initialized.
-
----
-
-### `accept_admin_transfer`
-
-Accepts a pending admin transfer, requiring `new_admin`'s own signature. Replaces the entire admin set with `new_admin`.
-
-**Requires auth:** `new_admin`
-
-**Parameters**
-
-| Name | Type | Description |
-|---|---|---|
-| `new_admin` | `Address` | Address accepting the proposed transfer |
-
-**Returns:** nothing
-
-**Errors:** `NoPendingTransfer` if no transfer is pending, or the pending proposal names a different address.
-
----
-
-### `cancel_admin_transfer`
-
-Cancels a pending admin transfer.
-
-**Requires auth:** `admin` (must be an existing admin)
-
-**Parameters**
-
-| Name | Type | Description |
-|---|---|---|
-| `admin` | `Address` | Existing admin cancelling the proposal |
-
-**Returns:** nothing
-
-**Errors:** `Unauthorized` if `admin` is not an existing admin; `NoPendingTransfer` if no transfer is pending.
-**Errors:** returns `ContractError::NotInitialized` (`#3`) if the contract has not been initialized. A raw client call panics with `Error(Contract, #3)`; `try_get_admin` returns `Ok(Err(ContractError::NotInitialized))`.
-
----
-
 ## Errors
 
 The contract defines a single error enum ([`lib.rs`](../contracts/watcher-registry/src/lib.rs)). Each variant is returned as `Err(ContractError::…)` from the relevant entrypoint.
 
+> **Note:** after several overlapping merges, the enum in `lib.rs` assigns the same discriminant to more than one variant (codes marked †). Match on the variant name, not the number, until the enum is renumbered.
+
 | Variant | Discriminant | Returned by | Meaning |
 |---|---|---|---|
 | `AlreadyInitialized` | `1` | `initialize` | `initialize` was called after the registry was already set up. |
-| `Unauthorized` | `2` | `add_admin`, `remove_admin`, `transfer_admin`, `register_watcher`, `remove_watcher`, `replace_watcher`, `clear_all_watchers` | The caller is not a member of the admin set. |
+| `Unauthorized` | `2` | every admin-gated entrypoint | The caller is not a member of the admin set. |
 | `NotInitialized` | `3` | every admin-gated entrypoint, `get_admins`, `get_admin` | A privileged call or admin read happened before `initialize`. |
 | `LastAdmin` | `4` | `remove_admin` | Removing this admin would leave the registry with no admins, permanently locking it. |
 | `WatcherNotFound` | `5` | `replace_watcher` | `old_watcher` is not currently registered, so there is nothing to replace. |
 | `DelayTooLarge` | `12` | `set_timelock_delay`, `propose_admin_action` | Configured or proposed timelock delay exceeds `MAX_TIMELOCK_DELAY` (518,400 ledgers ≈ 30 days). |
+| `NoPendingTransfer` | `6`† | `accept_admin_transfer`, `cancel_admin_transfer` | No admin transfer is pending, or the pending proposal names a different address. |
+| `Paused` | `6`† | admin and watcher mutations (`add_admin`, `remove_admin`, `accept_admin_transfer`, `register_watcher`, `remove_watcher`, `replace_watcher`, `clear_all_watchers`, …) | The contract is paused; an admin must call `unpause` first. |
+| `TooManyWatchers` / `MaxWatchersReached` | `7`† / `6`† | `register_watcher` | Registering would exceed `MAX_WATCHERS`. |
+| `BelowMinWatchers` | `7`† | `remove_watcher`, `clear_all_watchers` | The operation would drop the watcher count below `MIN_WATCHERS`. |
+| `TooManyAdmins` / `MaxAdminsReached` | `8`† / `7`† | `add_admin`, `execute_admin_action` | Adding would exceed `MAX_ADMINS`. |
+| `TimelockRequired` | `8`† | `add_admin`, `transfer_admin`, `propose_admin_transfer`, `clear_all_watchers`, `upgrade`, `set_timelock_delay` | A timelock delay is configured, so the action must go through `propose_admin_action` / `execute_admin_action`. From `set_timelock_delay`: the new delay is lower than the current one. |
+| `ActionAlreadyPending` | `9` | `propose_admin_action` | Another timelocked action is already queued. |
+| `NoPendingAction` | `10` | `execute_admin_action`, `cancel_admin_action` | No timelocked action is queued. |
+| `TimelockNotExpired` | `11` | `execute_admin_action` | The queued action's delay has not elapsed yet. |
 
 See [Error handling: raw vs `try_` calls](#error-handling-raw-vs-try_-calls) for how these surface through the generated SDK client.
-**Returns:** `Result<Address, ContractError>` — `NotInitialized` if the contract has not been initialized.
 
 ---
 
@@ -596,8 +560,15 @@ All state is stored in **instance storage**, addressed by the `DataKey` enum plu
 
 | Key | Value | Description |
 |---|---|---|
-| `"ADMIN"` | `Address` | Current admin address |
-| `"WATCHERS"` | `Vec<Address>` | List of authorized watcher addresses |
+| `DataKey::Admins` | `Vec<Address>` | Current admin set |
+| `DataKey::Watchers` | `Vec<Address>` | Authorized watcher addresses |
+| `DataKey::PendingAdminTransfer` | `Address` | Address awaiting `accept_admin_transfer` |
+| `DataKey::TimelockDelay` | `u32` | Timelock delay in ledgers (`0`/absent = disabled) |
+| `DataKey::PendingAction` | `PendingAction` | Queued timelocked admin action |
+| `DataKey::Paused` | `bool` | Pause flag |
+| `"W_CNT"` | `u32` | Cached watcher count |
+
+See [storage.md](storage.md#watcherregistry) for TTL behaviour.
 
 ---
 

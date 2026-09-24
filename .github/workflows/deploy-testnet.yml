@@ -18,6 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Issue #124 — refuse to release a tag that CHANGELOG.md does not document.
+      - name: Require a CHANGELOG section for this tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash scripts/check-changelog-release.sh "$RELEASE_TAG"
+
       # dtolnay/rust-toolchain requires an explicit toolchain input; it does not
       # read rust-toolchain.toml. Parse the pin so that file stays the one source
       # of truth for the Rust version.
