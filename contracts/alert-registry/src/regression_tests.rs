@@ -639,3 +639,103 @@ fn test_regression_instance_writes_extend_instance_ttl() {
         "set_global_alert_limit"
     );
 }
+
+/// Remaining TTL of a persistent entry in the registry's storage.
+fn persistent_ttl(env: &Env, client: &AlertRegistryClient, key: &crate::DataKey) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    env.as_contract(&client.address, || env.storage().persistent().get_ttl(key))
+}
+
+/// Regression test for #210:
+/// `deactivate_alert_by_admin`, `update_target_contract` and
+/// `transfer_alert_ownership` must refresh every index the alert belongs to,
+/// including the index it is moved **out of**. The owner/target it is moved
+/// into is covered by `test_regression_every_mutator_refreshes_all_alert_ttls`;
+/// this covers the index left behind, which still holds the owner's or
+/// target's other alerts.
+#[test]
+fn test_regression_mutators_refresh_indexes_they_leave() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let new_target = Address::generate(&env);
+    let register = |label: &str| {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, label),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        )
+    };
+    let moved = register("Moved");
+    let stays = register("Stays");
+    let age = |env: &Env| env.ledger().with_mut(|li| li.sequence_number += 1_000);
+    let full = crate::DEFAULT_TTL;
+
+    // Admin deactivation refreshes both indexes the alert is in.
+    age(&env);
+    client.deactivate_alert_by_admin(&admin, &stays);
+    assert_eq!(
+        persistent_ttl(&env, &client, &crate::DataKey::OwnerIndex(owner.clone())),
+        full,
+        "deactivate_alert_by_admin: owner index"
+    );
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::ContractIndex(target.clone())
+        ),
+        full,
+        "deactivate_alert_by_admin: contract index"
+    );
+
+    // Retargeting refreshes the old target's index, which still holds `stays`.
+    age(&env);
+    client.update_target_contract(&owner, &moved, &new_target);
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::ContractIndex(target.clone())
+        ),
+        full,
+        "update_target_contract: old contract index"
+    );
+    assert_eq!(
+        persistent_ttl(&env, &client, &crate::DataKey::OwnerIndex(owner.clone())),
+        full,
+        "update_target_contract: owner index"
+    );
+
+    // Transferring refreshes the old owner's index and live counter.
+    age(&env);
+    client.transfer_alert_ownership(&owner, &moved, &new_owner);
+    assert_eq!(
+        persistent_ttl(&env, &client, &crate::DataKey::OwnerIndex(owner.clone())),
+        full,
+        "transfer_alert_ownership: old owner index"
+    );
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::OwnerLiveCount(owner.clone())
+        ),
+        full,
+        "transfer_alert_ownership: old owner live count"
+    );
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::ContractIndex(new_target.clone())
+        ),
+        full,
+        "transfer_alert_ownership: contract index"
+    );
+}

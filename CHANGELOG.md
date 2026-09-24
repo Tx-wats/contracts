@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Index TTL refresh in `deactivate_alert_by_admin`, `update_target_contract`
+  and `transfer_alert_ownership`.** The code fix landed with the
+  `persist_alert` / `touch_alert` refactor (#213); a regression test now also
+  covers the indexes an alert is moved *out of* (the old owner's index and
+  live counter, and the old target's contract index). (issue #210)
 - **AlertRegistry never extended its instance storage TTL.** The admin, ID
   counter, limits, pause flag and watcher registry address all live in the
   instance entry, so an idle deployment could archive it and make every alert
