@@ -59,7 +59,7 @@ flowchart TD
     Owner["Owner"] -->|"register_alert / update_alert"| AR
     Admin["Admin"] -->|"register_watcher / remove_watcher"| WR
 
-    W -->|"is_authorized(watcher)"| WR
+    W -->|"is_watcher_authorized(watcher)"| WR
     W -->|"get_alerts_for_contract(target)"| AR
     AR -->|"is_watcher_authorized(querier)\n(on-chain, when gating enabled)"| WR
     Horizon["Horizon API"] -->|"GET /accounts/{id}/transactions"| W
@@ -477,7 +477,7 @@ stellar contract invoke \
   -- is_watcher_authorized \
   --watcher <WATCHER_ADDRESS>
 
-# Check authorization (backward-compatible alias)
+# Check authorization (deprecated alias, scheduled for removal in v0.3.0)
 stellar contract invoke \
   --id <WATCHER_REGISTRY_CONTRACT_ID> \
   --network testnet \
@@ -598,7 +598,7 @@ const checkTx = new TransactionBuilder(account3, {
 })
   .addOperation(
     contract.call(
-      "is_authorized",
+      "is_watcher_authorized",
       new Address("<WATCHER_NODE_ADDRESS>").toScVal(), // watcher
     )
   )
@@ -669,7 +669,7 @@ const client = new Client({
   rpcUrl: networks.testnet.rpcUrl,
 });
 
-const authorized = await client.is_authorized({ watcher: "GABC...XYZ" });
+const authorized = await client.is_watcher_authorized({ watcher: "GABC...XYZ" });
 console.log(authorized.result); // true | false
 ```
 

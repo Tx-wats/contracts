@@ -683,7 +683,11 @@ impl WatcherRegistry {
         false
     }
 
-    /// Alias for [`is_watcher_authorized`] kept for backwards compatibility.
+    /// Deprecated alias for [`Self::is_watcher_authorized`] kept for backwards compatibility.
+    ///
+    /// # Deprecation
+    /// Deprecated as of v0.2.0; scheduled for removal in v0.3.0.
+    /// New code should call [`Self::is_watcher_authorized`] instead.
     #[must_use]
     pub fn is_authorized(env: Env, watcher: Address) -> bool {
         Self::is_watcher_authorized(env, watcher)
@@ -1577,9 +1581,9 @@ mod tests {
             ContractError::BelowMinWatchers
         );
         assert_eq!(client.get_watchers().len(), 3);
-        assert!(client.is_authorized(&w1));
-        assert!(client.is_authorized(&w2));
-        assert!(client.is_authorized(&w3));
+        assert!(client.is_watcher_authorized(&w1));
+        assert!(client.is_watcher_authorized(&w2));
+        assert!(client.is_watcher_authorized(&w3));
     }
 
     // 13. clear_all_watchers rejects non-admin
@@ -1952,7 +1956,7 @@ mod tests {
                 .unwrap(),
             Ok(())
         );
-        assert!(client.is_authorized(&watcher));
+        assert!(client.is_watcher_authorized(&watcher));
     }
 
     // 14. add_admin is idempotent
@@ -2171,8 +2175,8 @@ mod tests {
             Ok(())
         );
 
-        assert!(!client.is_authorized(&old));
-        assert!(client.is_authorized(&new));
+        assert!(!client.is_watcher_authorized(&old));
+        assert!(client.is_watcher_authorized(&new));
         assert_eq!(client.get_watcher_count(), 1);
     }
 
@@ -2226,9 +2230,18 @@ mod tests {
             Ok(())
         );
 
-        assert!(!client.is_authorized(&old));
-        assert!(client.is_authorized(&new));
+        assert!(!client.is_watcher_authorized(&old));
+        assert!(client.is_watcher_authorized(&new));
         assert_eq!(client.get_watcher_count(), 1);
+    }
+
+    #[test]
+    fn test_is_authorized_deprecated_alias() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        assert!(!client.is_authorized(&watcher));
+        client.register_watcher(&admin, &watcher);
+        assert!(client.is_authorized(&watcher));
     }
 
     // 30. replace_watcher emits watcher.remove and watcher.replace events

@@ -333,7 +333,12 @@ Returns the number of registered watchers as a cheap integer read, backed by the
 
 ### `is_authorized`
 
-Backwards-compatible alias for `is_watcher_authorized`. Identical behavior and return value; retained so existing callers do not break.
+> **Deprecated:** Deprecated as of v0.2.0; scheduled for removal in v0.3.0. Use [`is_watcher_authorized`](#is_watcher_authorized) instead.
+
+Backwards-compatible alias for `is_watcher_authorized`. Identical behavior and return value; retained so existing callers do not break during the migration window.
+
+---
+
 ### `add_admin`
 
 Adds an address to the admin set. Any existing admin may call this. Idempotent — adding an address that is already an admin is a no-op.
