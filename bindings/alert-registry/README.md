@@ -13,6 +13,7 @@ npm install @tx-wat/alert-registry-bindings
 ## Usage
 
 ```typescript
+import { createHash } from 'node:crypto';
 import { Contract, networks } from '@tx-wat/alert-registry-bindings';
 import { SorobanRpc, Keypair } from '@stellar/stellar-sdk';
 
@@ -31,7 +32,8 @@ const result = await contract.register_alert({
   owner: keypair.publicKey(),
   target_contract: 'CONTRACT_ADDRESS_TO_WATCH',
   label: 'My Alert',
-  webhook_hash: 'sha256_hash_of_webhook_url',
+  // BytesN<32>: the 32 raw SHA-256 digest bytes of the webhook URL (not hex).
+  webhook_hash: createHash('sha256').update('https://example.com/hook').digest(),
   rules: ['rule:transfer', 'rule:mint'],
 }, {
   keypair,
@@ -81,6 +83,7 @@ The bindings provide TypeScript types and methods for all AlertRegistry contract
 - `get_contract_alerts_paginated` - Get paginated alerts for a contract
 - `get_alerts_by_owner_paginated` - Get paginated alerts by owner
 - `get_alerts_modified_since` - Get a bounded page of alerts modified since a timestamp
+- `get_alerts_modified_since_ledger` - Get a bounded page of alerts modified since a monotonic ledger sequence
 - `get_alert_count` - Get total number of alerts ever registered
 - `get_active_alert_count` - Get number of active alerts for an owner
 - `get_active_contract_alert_count` - Get number of active alerts for a target contract

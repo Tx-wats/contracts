@@ -382,6 +382,13 @@ stellar contract invoke \
   --offset 0 \
   --limit 50
 
+# Query alerts modified since monotonic ledger sequence (unambiguous sync)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alerts_modified_since_ledger \
+  --since_ledger 123450
+
 # Get total cumulative alert count
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
@@ -565,7 +572,7 @@ const tx = new TransactionBuilder(account, {
       new Address(ownerKeypair.publicKey()).toScVal(),          // owner
       new Address("<WATCHED_CONTRACT_ADDRESS>").toScVal(),      // target_contract
       nativeToScVal("My Alert", { type: "string" }),            // label
-      nativeToScVal("<sha256-of-webhook-url>", { type: "string" }), // webhook_hash
+      nativeToScVal(Buffer.from("<sha256-hex-of-webhook-url>", "hex")), // webhook_hash (BytesN<32>)
       nativeToScVal(["rule:transfer", "rule:mint"], { type: "array", element: { type: "string" } }), // rules
     )
   )

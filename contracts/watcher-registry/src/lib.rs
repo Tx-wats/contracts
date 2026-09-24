@@ -59,6 +59,8 @@ pub enum ContractError {
     NoPendingAction = 10,
     /// Returned when executing a queued action before its delay has elapsed.
     TimelockNotExpired = 11,
+    /// Returned when setting or proposing a timelock delay greater than [`MAX_TIMELOCK_DELAY`].
+    DelayTooLarge = 12,
 }
 
 // ── TTL constants ────────────────────────────────────────────────────────────
@@ -85,6 +87,12 @@ pub const MAX_WATCHERS: u32 = 100;
 /// reason as [`MAX_WATCHERS`], and kept much smaller since the admin set is
 /// an operational, not a workload, structure.
 pub const MAX_ADMINS: u32 = 10;
+
+/// Maximum timelock delay allowed in ledgers (518_400 ledgers ≈ 30 days at nominal 5s/ledger).
+///
+/// Prevents governance deadlock where proposals would saturate at `u32::MAX` and
+/// become permanently unexecutable.
+pub const MAX_TIMELOCK_DELAY: u32 = 518_400;
     /// Returned when a state-mutating call is made while the contract is paused.
     Paused = 6,
     /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
@@ -188,7 +196,22 @@ pub struct WatcherRegistry;
 
 #[contractimpl]
 impl WatcherRegistry {
+    /// Atomic constructor called during contract deployment to initialize the bootstrap admin.
+    ///
+    /// Running atomically with deployment prevents front-running the initialization window.
+    pub fn __constructor(env: Env, admin: Address) {
+        let admins: Vec<Address> = vec![&env, admin.clone()];
+        env.storage().instance().set(&DataKey::Admins, &admins);
+
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("init")), admin);
+    }
+
     /// Initialize the registry with a single bootstrap admin. Can only be called once.
+    ///
+    /// Kept for backwards compatibility. If the contract was initialized
+    /// via [`Self::__constructor`] during deployment, calling this again returns
+    /// [`ContractError::AlreadyInitialized`].
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
@@ -1006,6 +1029,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::DelayTooLarge`] if `delay_ledgers` exceeds [`MAX_TIMELOCK_DELAY`].
     /// Returns [`ContractError::TimelockRequired`] if `delay_ledgers` is below the current delay.
     pub fn set_timelock_delay(
         env: Env,
@@ -1014,6 +1038,10 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+
+        if delay_ledgers > MAX_TIMELOCK_DELAY {
+            return Err(ContractError::DelayTooLarge);
+        }
 
         if delay_ledgers < Self::timelock_delay(&env) {
             return Err(ContractError::TimelockRequired);
@@ -1055,6 +1083,12 @@ impl WatcherRegistry {
     ) -> Result<u32, ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+
+        if let AdminAction::SetTimelockDelay(delay) = action {
+            if delay > MAX_TIMELOCK_DELAY {
+                return Err(ContractError::DelayTooLarge);
+            }
+        }
 
         if env.storage().instance().has(&DataKey::PendingAction) {
             return Err(ContractError::ActionAlreadyPending);
@@ -1147,6 +1181,9 @@ impl WatcherRegistry {
             }
             AdminAction::ClearAllWatchers => Self::do_clear_all_watchers(&env),
             AdminAction::SetTimelockDelay(delay) => {
+                if delay > MAX_TIMELOCK_DELAY {
+                    return Err(ContractError::DelayTooLarge);
+                }
                 Self::do_set_timelock_delay(&env, &caller, delay);
             }
             AdminAction::Upgrade(new_wasm_hash) => {
@@ -2830,6 +2867,46 @@ mod tests {
         client.execute_admin_action(&admin);
 
         assert_eq!(client.get_timelock_delay(), 0);
+    }
+
+    #[test]
+    fn test_set_timelock_delay_rejects_exceeding_max() {
+        let (env, admin, client) = setup();
+
+        // Direct set with u32::MAX is rejected
+        assert_eq!(
+            client
+                .try_set_timelock_delay(&admin, &u32::MAX)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::DelayTooLarge
+        );
+
+        // Value strictly greater than MAX_TIMELOCK_DELAY is rejected
+        assert_eq!(
+            client
+                .try_set_timelock_delay(&admin, &(MAX_TIMELOCK_DELAY + 1))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::DelayTooLarge
+        );
+
+        // MAX_TIMELOCK_DELAY itself is accepted
+        assert_eq!(
+            client
+                .try_set_timelock_delay(&admin, &MAX_TIMELOCK_DELAY)
+                .unwrap(),
+            Ok(())
+        );
+
+        // Proposing a delay exceeding MAX_TIMELOCK_DELAY is also rejected
+        assert_eq!(
+            client
+                .try_propose_admin_action(&admin, &AdminAction::SetTimelockDelay(u32::MAX))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::DelayTooLarge
+        );
     }
 
     // 42. clear_all_watchers still works when executed through the timelock.

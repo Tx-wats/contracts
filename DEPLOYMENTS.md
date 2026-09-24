@@ -36,6 +36,11 @@ rotation emitting `alert.wh_prop` and `alert.wh_conf`.
 > A daily CI job automatically validates that the addresses above are still live.
 > For reset recovery instructions, see the [Deployment & Testnet Liveness Guide](docs/deployment-guide.md).
 
+### Testnet Admin Key & Key Holding
+
+The testnet contracts are deployed and administered by the identity configured via `STELLAR_IDENTITY` (defaults to `deployer`) or `ADMIN_ADDRESS`.
+- **Identity & Address:** Initial deployments use the `deployer` address created in the local keystore or provided via `STELLAR_ACCOUNT` / `STELLAR_SECRET_KEY`.
+- **Key Holding & Persistence:** On CI and development workstations, the private key corresponding to the deployer address must be saved in repository secrets (`TESTNET_DEPLOYER_SECRET`) or secure key vaults. `scripts/deploy.sh` will preserve an existing `deployer` key rather than overwriting it, ensuring that administrative rights (such as invoking `scripts/upgrade.sh` or managing watchers) remain accessible across consecutive workflow runs.
 
 ---
 
@@ -77,6 +82,8 @@ rotation emitting `alert.wh_prop` and `alert.wh_conf`.
 
 ## Deployment History
 
-| Date | Network | Contract | Address | WASM Hash | Notes |
-|---|---|---|---|---|---|
-| — | — | — | — | — | Initial placeholder |
+> **Tooling Note:** Deployments and build optimizations use Stellar CLI pinned to `v28.0.0` (Issue #285).
+
+| Date | Network | Contract | Address | WASM Hash | CLI Version | Notes |
+|---|---|---|---|---|---|---|
+| — | — | — | — | — | — | Initial placeholder |

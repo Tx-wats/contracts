@@ -17,7 +17,7 @@ Generated from the `DataKey` enum and every `symbol_short!` key the contract rea
 | `DataKey::Alert(id: u64)` | Persistent | `AlertConfig` | A single alert configuration, keyed by its numeric ID |
 | `DataKey::AlertActive(id: u64)` | Persistent | `bool` | The `active` flag stored separately so it can be read without deserializing the full `AlertConfig` (see `get_alert_active`) |
 | `DataKey::OwnerIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs owned by a given address |
-| `DataKey::OwnerActiveCount(addr: Address)` | Persistent | `u32` | Running count of currently live (non-removed) alerts owned by `addr`, maintained incrementally alongside `OwnerIndex` so `get_non_removed_alert_count` is O(1) instead of rescanning the index. `get_active_alert_count` instead scans `OwnerIndex` and filters by the `AlertActive` flag, so deactivated-but-not-removed alerts are excluded |
+| `DataKey::OwnerLiveCount(addr: Address)` | Persistent | `u32` | Running count of currently live (non-removed) alerts owned by `addr`, deactivated alerts included. Renamed from `OwnerActiveCount` (the name wrongly implied an `active` filter); entries under the legacy key are migrated to the new key on first read. Maintained incrementally alongside `OwnerIndex` so `get_non_removed_alert_count` is O(1) instead of rescanning the index. `get_active_alert_count` instead scans `OwnerIndex` and filters by the `AlertActive` flag, so deactivated-but-not-removed alerts are excluded |
 | `DataKey::ContractIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs watching a given contract address |
 | `DataKey::NextId` | — | — | Declared in the enum but **not used**: the counter is stored under the `NEXT_ID` symbol key below |
 | `symbol_short!("NEXT_ID")` | Instance | `u64` | Monotonic counter used to generate unique alert IDs; also the value returned by `get_alert_count` |
@@ -33,29 +33,30 @@ Generated from the `DataKey` enum and every `symbol_short!` key the contract rea
 | Field | Type | Description |
 |---|---|---|
 | `label` | `String` | Human-readable name for the alert (max 128 bytes) |
-| `webhook_hash` | `String` | SHA-256 hex digest of the webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the webhook URL, as 32 raw bytes |
 | `rules` | `Vec<String>` | Rule descriptor strings (e.g. `"rule:transfer"`) |
 | `owner` | `Address` | Address that owns and may mutate this alert |
 | `target_contract` | `Address` | Contract address being watched |
 | `created_at` | `u64` | Ledger timestamp at registration |
 | `updated_at` | `u64` | Ledger timestamp of the most recent update |
+| `updated_ledger` | `u32` | Monotonic ledger sequence number of the most recent update |
 | `active` | `bool` | Whether the alert is currently active |
-| `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
+| `pending_webhook_hash` | `Option<BytesN<32>>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
 ### TTL Behavior
 
-All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex`) are extended by `DEFAULT_TTL` (**17,280 ledgers**, ≈ 24 hours at 5 s/ledger) on every write that touches them. `bump_alert` can extend an alert's TTL further, up to `MAX_TTL` (535,680 ledgers, ≈ 31 days).
+All persistent key variants (`Alert`, `AlertActive`, `OwnerIndex`, `OwnerLiveCount`, `ContractIndex`) are extended by `DEFAULT_TTL` (**17,280 ledgers**, ≈ 24 hours at 5 s/ledger) on every write that touches them. `bump_alert` can extend an alert's TTL further, up to `MAX_TTL` (535,680 ledgers, ≈ 31 days).
+
+Every mutator that rewrites an alert goes through `persist_alert`, which writes `Alert(id)` and `AlertActive(id)` and then calls `touch_alert` to extend the alert's full set of entries: `Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `OwnerLiveCount(owner)`, `ContractIndex(target)`. `renew_alert_ttl` and `bump_alert` call `touch_alert` directly without rewriting data. `OwnerLiveCount(owner)` is only extended when present (it may not yet be migrated from the legacy `OwnerActiveCount` key, or may have expired). See [docs/ttl.md](ttl.md) for the per-function table.
 
 | Function | Keys Extended |
 |---|---|
-| `register_alert` | `Alert(id)`, `AlertActive(id)`, `OwnerIndex(owner)`, `OwnerActiveCount(owner)`, `ContractIndex(target)` |
-| `update_alert` | `Alert(id)`, `AlertActive(id)` |
-| `update_webhook` | `Alert(id)` |
-| `propose_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
-| `confirm_webhook` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` |
-| `renew_alert_ttl` | `Alert(id)`, `OwnerIndex(owner)`, `ContractIndex(target)` — data unchanged |
-| `deactivate_all_alerts` | `Alert(id)`, `AlertActive(id)` for each deactivated alert; `ContractIndex(target)` for each touched contract; `OwnerIndex(caller)` once, if at least one alert was deactivated |
-| `remove_alert` | `Alert(id)`, `AlertActive(id)` deleted; `OwnerIndex(owner)`, `OwnerActiveCount(owner)`, `ContractIndex(target)` updated and TTL-extended |
+| `register_alert`, `update_alert`, `update_webhook`, `update_label`, `propose_webhook`, `confirm_webhook`, `cancel_webhook_proposal`, `deactivate_alert_by_admin`, `renew_alert_ttl` | Full set, to `DEFAULT_TTL` |
+| `transfer_alert_ownership` | Full set with the new owner's `OwnerIndex`/`OwnerLiveCount`; the old owner's index and counter are rewritten and extended |
+| `update_target_contract` | Full set with the new target's `ContractIndex`; the old target's index is rewritten and extended |
+| `deactivate_all_alerts` | Full set for each deactivated alert |
+| `bump_alert` | Full set, to the requested TTL (capped at `MAX_TTL`) |
+| `remove_alert` | `Alert(id)`, `AlertActive(id)` deleted; `OwnerIndex(owner)`, `OwnerLiveCount(owner)`, `ContractIndex(target)` updated and TTL-extended |
 
 Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owner`, paginated variants, `get_alert_count`) do **not** extend any TTL.
 
@@ -93,6 +94,6 @@ There are no persistent storage entries in WatcherRegistry.
 
 | Contract | Tier | Keys | TTL Managed By |
 |---|---|---|---|
-| AlertRegistry | Persistent | `Alert`, `AlertActive`, `OwnerIndex`, `OwnerActiveCount`, `ContractIndex` | Contract (`extend_ttl` to `DEFAULT_TTL` = 17,280 ledgers on write; `bump_alert` up to `MAX_TTL`) |
+| AlertRegistry | Persistent | `Alert`, `AlertActive`, `OwnerIndex`, `OwnerLiveCount`, `ContractIndex` | Contract (`extend_ttl` to `DEFAULT_TTL` = 17,280 ledgers on write; `bump_alert` up to `MAX_TTL`) |
 | AlertRegistry | Instance | `NEXT_ID`, `ADMIN`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG` | **Not extended** by the contract (see #206) |
 | WatcherRegistry | Instance | `Admins`, `Watchers`, `PendingAdminTransfer`, `TimelockDelay`, `PendingAction`, `Paused`, `W_CNT` | Contract (`bump_instance_ttl`, extends to 535,680 ledgers) |

@@ -11,14 +11,15 @@ Contract that stores alert configurations on-chain, keyed by contract address.
 | Field | Type | Description |
 |---|---|---|
 | `label` | `String` | Human-readable name for the alert |
-| `webhook_hash` | `String` | SHA-256 hex digest of the webhook URL (privacy-preserving; see [Webhook Hash Scheme](#webhook-hash-scheme) below) |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the webhook URL, as 32 raw bytes (privacy-preserving; see [Webhook Hash Scheme](#webhook-hash-scheme) below) |
 | `rules` | `Vec<String>` | Serialized rule descriptors |
 | `owner` | `Address` | Address that owns this config |
 | `target_contract` | `Address` | Contract being watched |
 | `created_at` | `u64` | Ledger timestamp at creation |
 | `updated_at` | `u64` | Ledger timestamp of last update |
+| `updated_ledger` | `u32` | Monotonic ledger sequence number of last update |
 | `active` | `bool` | Whether the alert is active |
-| `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
+| `pending_webhook_hash` | `Option<BytesN<32>>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
 ### `AlertInput`
 
@@ -29,21 +30,22 @@ Input record for [`batch_register_alert`](#batch_register_alert). Mirrors the ar
 | `owner` | `Address` | Address that will own and control this alert |
 | `target_contract` | `Address` | Contract address to watch |
 | `label` | `String` | Human-readable name for the alert |
-| `webhook_hash` | `String` | SHA-256 hex digest of the destination webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the destination webhook URL |
 | `rules` | `Vec<String>` | Serialized rule descriptors |
 
 ---
 
 ## Webhook Hash Scheme
 
-The `webhook_hash` field stores a **SHA-256 hex digest** of the destination webhook URL. The raw URL is never written on-chain, which prevents publicly exposing private endpoint addresses.
+The `webhook_hash` field stores the **SHA-256 digest** of the destination webhook URL as 32 raw bytes (`BytesN<32>`). Because the type fixes the length, the contract no longer validates it (#214). The raw URL is never written on-chain, which prevents publicly exposing private endpoint addresses.
 
 ### Algorithm
 
 | Property | Value |
 |---|---|
 | Hash function | SHA-256 |
-| Encoding | Lowercase hex string (64 characters) |
+| On-chain type | `BytesN<32>` (the raw digest, not its hex text) |
+| Passing it in | `stellar contract invoke` takes the 64-character hex digest printed below; SDKs pass the 32 bytes (e.g. a Node `Buffer`) |
 | Input | The raw webhook URL, UTF-8 encoded, no trailing newline |
 
 ### Computing the Hash
@@ -92,7 +94,7 @@ Off-chain watcher nodes store the original webhook URL locally and verify agains
 
 To rotate a webhook URL, two methods are available:
 - **Two-phase rotation (recommended)**: Use `propose_webhook` followed by `confirm_webhook` to safely stage and test the new endpoint before activating it without downtime. See [ADR 0001: Two-Phase Webhook Rotation](adr/0001-two-phase-webhook-rotation.md) for the security rationale and threat analysis.
-- **Direct rotation**: Use `update_webhook` with the new SHA-256 hex digest for immediate cutover.
+- **Direct rotation**: Use `update_webhook` with the new SHA-256 digest for immediate cutover.
 
 ---
 
@@ -128,7 +130,7 @@ Registers a new alert configuration for a target contract address.
 | `owner` | `Address` | Owner of the alert config |
 | `target_contract` | `Address` | Contract address to watch |
 | `label` | `String` | Human-readable label |
-| `webhook_hash` | `String` | SHA-256 hex digest of the webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the webhook URL |
 | `rules` | `Vec<String>` | Rule descriptors |
 
 **Returns:** `u64` — the new config ID
@@ -155,9 +157,22 @@ Updates the rules and active status of an existing alert. Only the original owne
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
 
 ---
+### `__constructor`
+
+Atomic constructor executed during deployment via `stellar contract deploy -- --admin <ADDRESS>`. Sets up the initial admin in the same transaction as deployment, closing the front-running window.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Address to assign as initial admin |
+
+**Returns:** nothing
+
+---
 ### `initialize`
 
-Initializes an optional admin for the contract. Can only be called once.
+Initializes an optional admin for the contract. Retained for backwards compatibility. If the contract was initialized at deployment via `__constructor`, calling `initialize` returns `ContractError::AlreadyInitialized`.
 
 **Parameters**
 
@@ -463,6 +478,8 @@ Updates only the label of an existing alert, leaving `rules` and `webhook_hash` 
 
 Updates the webhook hash for an existing alert. Use this to rotate webhook URLs without re-registering. Only the original owner may call this.
 
+The update takes effect immediately and **discards any rotation staged by `propose_webhook`** (`pending_webhook_hash` is reset to `None`), so a later `confirm_webhook` returns `NoPendingWebhook` instead of reverting this update.
+
 **Requires auth:** `caller` (must match `owner` of the config)
 
 **Parameters**
@@ -471,7 +488,7 @@ Updates the webhook hash for an existing alert. Use this to rotate webhook URLs 
 |---|---|---|
 | `caller` | `Address` | Must be the alert owner |
 | `config_id` | `u64` | ID of the alert to update |
-| `webhook_hash` | `String` | New hashed webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the new webhook URL |
 
 **Returns:** `Result<(), ContractError>`
 
@@ -493,7 +510,7 @@ Calling `propose_webhook` again before confirming overwrites the previous pendin
 |---|---|---|
 | `caller` | `Address` | Must be the alert owner |
 | `config_id` | `u64` | ID of the alert to update |
-| `new_webhook_hash` | `String` | SHA-256 hex digest of the new webhook URL |
+| `new_webhook_hash` | `BytesN<32>` | SHA-256 digest of the new webhook URL |
 
 **Returns:** `Result<(), ContractError>`
 
@@ -526,7 +543,7 @@ Step 2 of the two-step webhook rotation flow. Promotes `pending_webhook_hash` to
 
 ### `renew_alert_ttl`
 
-Extends the TTL of an alert and its index entries without modifying any data. This is the recommended way to keep an alert alive without changing `updated_at` (which would cause it to appear in incremental-sync results via `get_alerts_modified_since`).
+Extends the TTL of an alert and its index entries without modifying any data. This is the recommended way to keep an alert alive without changing `updated_at` or `updated_ledger` (which would cause it to appear in incremental-sync results via `get_alerts_modified_since` or `get_alerts_modified_since_ledger`).
 
 **Requires auth:** `caller` (must match `owner` of the config)
 
@@ -578,6 +595,53 @@ If a `WatcherRegistry` is configured, `querier` must be a registered watcher or 
 | `limit` | `u32` | Maximum number of results to return |
 
 **Returns:** `Result<Vec<AlertConfig>, ContractError>` — may be empty.
+
+---
+
+### `get_alerts_modified_since`
+
+Returns all alert configs whose `updated_at` timestamp is greater than or equal to `since`.
+
+Enables incremental sync for watcher nodes by passing the ledger timestamp of the last sync.
+
+> **Note:** Because multiple ledgers can close within the same timestamp second, timestamp-based synchronization may produce duplicates (with `since = T`) or miss changes across ledgers closed in the same second (with `since = T + 1`). For strictly monotonic, unambiguous sync, use [`get_alerts_modified_since_ledger`](#get_alerts_modified_since_ledger).
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `since` | `u64` | Ledger timestamp (inclusive lower bound, pass `0` for all) |
+| `offset` | `u32` | Number of alert IDs to skip from the start of ID space |
+| `limit` | `u32` | Maximum number of IDs to scan |
+
+**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_at >= since`.
+
+---
+
+### `get_alerts_modified_since_ledger`
+
+Returns all alert configs whose `updated_ledger` sequence number is greater than or equal to `since_ledger`.
+
+Provides unambiguous **incremental sync** for watcher nodes keyed on monotonic ledger sequence numbers rather than timestamps. Because several ledgers can share the same close-time second, sequence numbers eliminate duplicate delivery and missed updates.
+
+#### Recommended Sync Loop
+
+1. Initialize `cursor_ledger = 0` (or the last-synced ledger sequence).
+2. On each polling cycle:
+   - Call `get_alerts_modified_since_ledger(since_ledger = cursor_ledger, offset, limit)`.
+   - Paginate by advancing `offset += limit` until an empty page or fewer than `limit` items are returned.
+   - For each returned alert, update local state and record the highest ledger sequence seen: `max_ledger = max(max_ledger, alert.updated_ledger)`.
+   - After finishing the scan, update the cursor for the next cycle: `cursor_ledger = max_ledger + 1` (or `current_ledger + 1` if no alerts were returned).
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `since_ledger` | `u32` | Ledger sequence number (inclusive lower bound, pass `0` for all) |
+| `offset` | `u32` | Number of alert IDs to skip from the start of ID space |
+| `limit` | `u32` | Maximum number of IDs to scan |
+
+**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_ledger >= since_ledger`.
 
 ---
 
@@ -659,7 +723,7 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `AlreadyInitialized` | 3 | `initialize` was called more than once |
 | `NotInitialized` | 4 | Admin function called before `initialize` |
 | `NotAWatcher` | 5 | Watcher-gating is enabled and `querier` is not a registered watcher |
-| `InvalidWebhookHash` | 6 | Webhook hash is not exactly 64 characters |
+| `InvalidWebhookHash` | 6 | No longer returned: webhook hashes are `BytesN<32>`, so a wrong length cannot be constructed. Kept so the code is never reused. |
 | `LabelTooLong` | 7 | `label` exceeds 128 bytes |
 | `TooManyRules` | 8 | `rules` exceeds the 50-rule maximum |
 | `InvalidRuleDescriptor` | 9 | A rule is not a recognised descriptor (`rule:transfer`, `rule:mint`) |

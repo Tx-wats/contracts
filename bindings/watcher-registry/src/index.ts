@@ -45,7 +45,9 @@ export interface NetworkConfig {
   rpcUrl: string;
 }
 
-export const networks: Record<string, NetworkConfig> = {
+export type NetworkName = "testnet" | "mainnet";
+
+export const networks = {
   testnet: {
     contractId: "CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J",
     networkPassphrase: "Test SDF Network ; September 2015",
@@ -58,4 +60,4 @@ export const networks: Record<string, NetworkConfig> = {
     networkPassphrase: "Public Global Stellar Network ; September 2015",
     rpcUrl: "https://mainnet.stellar.validationcloud.io/v1/",
   },
-} as const;
+} as const satisfies Record<NetworkName, NetworkConfig>;

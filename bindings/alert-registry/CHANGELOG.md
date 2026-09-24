@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING (0.2.0)
+- `webhook_hash` / `new_webhook_hash` arguments and the `webhook_hash` /
+  `pending_webhook_hash` fields of `AlertConfig` and `AlertInput` are now
+  `Buffer` (contract type `BytesN<32>`: the 32 raw SHA-256 digest bytes)
+  instead of a 64-character hex `string`. Pass
+  `createHash('sha256').update(url).digest()` rather than its hex text. (#214)
+
 ### Added
 - `getAlertIdsByOwner({ owner })` for fetching just the owner's alert IDs without the full configs.
 - Type declarations and client methods for two-phase webhook rotation:
