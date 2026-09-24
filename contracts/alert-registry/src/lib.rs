@@ -49,6 +49,16 @@ pub const DEFAULT_TTL: u32 = 17_280;
 /// Approximately 31 days at the nominal 5-second ledger close time.
 pub const MAX_TTL: u32 = 535_680;
 
+/// Threshold, in ledgers, below which the contract's instance entry is
+/// extended by [`AlertRegistry::bump_instance_ttl`] and by every write to
+/// instance storage. Approximately 24 hours at the nominal 5-second ledger
+/// close time. Mirrors `WatcherRegistry`.
+pub const INSTANCE_BUMP_THRESHOLD: u32 = 17_280;
+
+/// TTL, in ledgers, the instance entry is extended to. Approximately 31 days,
+/// the protocol maximum. See `docs/ttl.md`.
+pub const INSTANCE_BUMP_AMOUNT: u32 = 535_680;
+
 /// Storage key variants used to address persistent and instance entries.
 #[contracttype]
 pub enum DataKey {
@@ -269,6 +279,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("ADMIN"), &admin);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("init")),
@@ -292,6 +303,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("ADMIN"), &new_admin);
+        Self::extend_instance_ttl(&env);
 
         // Admin handover is security-relevant: emit it so off-chain watchers
         // can react to a change of control.
@@ -329,6 +341,19 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Extend the TTL of the contract's instance entry, which holds the admin,
+    /// the alert ID counter, the alert limits, the pause flag and the watcher
+    /// registry address. If it is archived, every alert becomes unreachable
+    /// until the entry is restored.
+    ///
+    /// Callable by anyone and requires no auth: it only refreshes the entry's
+    /// lifetime and never reads or changes registry state. Every write to
+    /// instance storage already extends it, so this is for deployments that
+    /// go quiet; have a keeper call it periodically (see `docs/ttl.md`).
+    pub fn bump_instance_ttl(env: Env) {
+        Self::extend_instance_ttl(&env);
+    }
+
     /// Get the current admin address.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
@@ -354,6 +379,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSED"), &true);
+        Self::extend_instance_ttl(&env);
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("pause")), admin);
         Ok(())
@@ -371,6 +397,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSED"), &false);
+        Self::extend_instance_ttl(&env);
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("unpause")), admin);
         Ok(())
@@ -400,6 +427,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("LIMIT"), &limit);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
@@ -438,6 +466,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("CLIMIT"), &limit);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
@@ -475,6 +504,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("GLIMIT"), &limit);
+        Self::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -527,6 +557,7 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("watchreg")),
@@ -552,6 +583,7 @@ impl AlertRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         env.storage().instance().remove(&symbol_short!("WATCHREG"));
+        Self::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -1914,7 +1946,17 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("NEXT_ID"), &(id + 1));
+        Self::extend_instance_ttl(env);
         id
+    }
+
+    /// Keep the instance entry (admin, counter, limits, pause flag, watcher
+    /// registry) alive. Called on every write to instance storage; see
+    /// [`AlertRegistry::bump_instance_ttl`] for deployments that go quiet.
+    fn extend_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Load the list of alert IDs owned by `owner`, or an empty vec.

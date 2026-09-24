@@ -564,3 +564,78 @@ fn test_regression_deactivate_all_alerts_rejects_while_paused() {
     assert!(!client.get_alert(&owner, &id).unwrap().active);
 }
 
+/// Remaining TTL of the contract's instance entry.
+fn instance_ttl(env: &Env, client: &AlertRegistryClient) -> u32 {
+    use soroban_sdk::testutils::storage::Instance as _;
+    env.as_contract(&client.address, || env.storage().instance().get_ttl())
+}
+
+fn advance_ledgers(env: &Env, ledgers: u32) {
+    env.ledger().with_mut(|li| li.sequence_number += ledgers);
+}
+
+/// Regression test for #206 (ledger advancement, see #266):
+/// AlertRegistry never extended its instance entry, so a deployment that
+/// went quiet would archive it and take the admin, the ID counter and the
+/// limits with it. `bump_instance_ttl` lets a keeper extend it to the full
+/// `INSTANCE_BUMP_AMOUNT` before it expires.
+#[test]
+fn test_regression_bump_instance_ttl_keeps_instance_alive() {
+    let (env, client) = setup();
+    let initial_ttl = instance_ttl(&env, &client);
+    assert!(initial_ttl < crate::INSTANCE_BUMP_THRESHOLD);
+
+    // Just before expiry, a permissionless bump restores the full TTL.
+    advance_ledgers(&env, initial_ttl - 1);
+    client.bump_instance_ttl();
+    assert_eq!(instance_ttl(&env, &client), crate::INSTANCE_BUMP_AMOUNT);
+
+    // Well past the point where the un-bumped entry would have expired, the
+    // instance is still live with the expected remaining lifetime. (The test
+    // host does not archive entries, so the TTL itself is the assertion.)
+    let past_original_expiry = initial_ttl + 1_000;
+    advance_ledgers(&env, past_original_expiry);
+    assert_eq!(
+        instance_ttl(&env, &client),
+        crate::INSTANCE_BUMP_AMOUNT - past_original_expiry
+    );
+}
+
+/// Regression test for #206: every write to instance storage (the ID counter
+/// in `next_id` and the admin setters) extends the instance entry.
+#[test]
+fn test_regression_instance_writes_extend_instance_ttl() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.initialize(&admin);
+    assert_eq!(instance_ttl(&env, &client), crate::INSTANCE_BUMP_AMOUNT);
+
+    // Age the entry below the bump threshold, then write through next_id.
+    let age_below_threshold = crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1;
+    advance_ledgers(&env, age_below_threshold);
+    assert!(instance_ttl(&env, &client) < crate::INSTANCE_BUMP_THRESHOLD);
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Counter Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(
+        instance_ttl(&env, &client),
+        crate::INSTANCE_BUMP_AMOUNT,
+        "register_alert"
+    );
+
+    // Same for an admin setter.
+    advance_ledgers(&env, age_below_threshold);
+    client.set_global_alert_limit(&admin, &100);
+    assert_eq!(
+        instance_ttl(&env, &client),
+        crate::INSTANCE_BUMP_AMOUNT,
+        "set_global_alert_limit"
+    );
+}

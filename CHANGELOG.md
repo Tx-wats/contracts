@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **AlertRegistry never extended its instance storage TTL.** The admin, ID
+  counter, limits, pause flag and watcher registry address all live in the
+  instance entry, so an idle deployment could archive it and make every alert
+  unreachable. The instance is now extended to `INSTANCE_BUMP_AMOUNT` on every
+  instance write (`next_id` and all admin setters), and a permissionless
+  `bump_instance_ttl` is available for keepers, mirroring `WatcherRegistry`.
+  Covered by ledger-advancement tests. (issue #206)
 - **`deactivate_all_alerts` silently returned `0` when paused.** Callers could
   not tell a paused contract from an owner with no active alerts. It now
   returns `Result<u32, ContractError>` and fails with `Paused`, like every other

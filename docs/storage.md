@@ -60,7 +60,7 @@ Every mutator that rewrites an alert goes through `persist_alert`, which writes 
 
 Read-only functions (`get_alert`, `get_alerts_for_contract`, `get_alerts_by_owner`, paginated variants, `get_alert_count`) do **not** extend any TTL.
 
-All instance keys (`NEXT_ID`, `ADMIN`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG`) share the contract instance entry's TTL. **AlertRegistry currently never extends its instance TTL** — there is no `extend_ttl` on `instance()` anywhere in the contract, so these keys are *not* safe to ignore: if the instance entry is archived, the counter, admin and limits all become unreachable (and with them every alert) until the entry is restored. See #206, which tracks adding a `bump_instance_ttl` to AlertRegistry.
+All instance keys (`NEXT_ID`, `ADMIN`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG`) share the contract instance entry's TTL. The contract extends it to `INSTANCE_BUMP_AMOUNT` (535,680 ledgers, ≈ 31 days) whenever it has dropped below `INSTANCE_BUMP_THRESHOLD` (17,280 ledgers) on every write to instance storage: the ID counter in `register_alert` and every admin setter. The permissionless `bump_instance_ttl` does the same for quiet periods; if the instance entry is archived, the counter, admin and limits (and with them every alert) are unreachable until it is restored. See [docs/ttl.md](ttl.md#keeping-the-alert-registry-instance-alive).
 
 > See [docs/ttl.md](ttl.md) for implications of the DEFAULT_TTL setting and recommended production values.
 
@@ -95,5 +95,5 @@ There are no persistent storage entries in WatcherRegistry.
 | Contract | Tier | Keys | TTL Managed By |
 |---|---|---|---|
 | AlertRegistry | Persistent | `Alert`, `AlertActive`, `OwnerIndex`, `OwnerLiveCount`, `ContractIndex` | Contract (`extend_ttl` to `DEFAULT_TTL` = 17,280 ledgers on write; `bump_alert` up to `MAX_TTL`) |
-| AlertRegistry | Instance | `NEXT_ID`, `ADMIN`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG` | **Not extended** by the contract (see #206) |
+| AlertRegistry | Instance | `NEXT_ID`, `ADMIN`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG` | Contract (extended on every instance write and by `bump_instance_ttl`, to 535,680 ledgers) |
 | WatcherRegistry | Instance | `Admins`, `Watchers`, `PendingAdminTransfer`, `TimelockDelay`, `PendingAction`, `Paused`, `W_CNT` | Contract (`bump_instance_ttl`, extends to 535,680 ledgers) |

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `bumpInstanceTtl()` — permissionless keep-alive for the contract's instance entry. (#206)
+
 ### Changed — BREAKING
 - `deactivateAllAlerts({ caller })` now resolves to `Result<u32>` instead of a
   bare `u32`: it fails with `Paused` while the contract is paused instead of
