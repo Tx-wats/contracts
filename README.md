@@ -26,7 +26,7 @@ cargo build --release --target wasm32-unknown-unknown
 cargo test
 
 # Generate TypeScript bindings
-make bindings
+make bindings-all
 ```
 
 ## TypeScript Bindings
@@ -40,7 +40,7 @@ Bindings are published to npm as `@tx-wat/alert-registry-bindings` by the
 tagged. Until the first tagged release, generate them locally:
 
 ```bash
-make bindings
+make bindings-alert
 ```
 
 ## Architecture
@@ -61,6 +61,7 @@ flowchart TD
 
     W -->|"is_watcher_authorized(watcher)"| WR
     W -->|"get_alerts_for_contract(target)"| AR
+    W -->|"get_alerts_for_contract(querier, target)"| AR
     AR -->|"is_watcher_authorized(querier)\n(on-chain, when gating enabled)"| WR
     Horizon["Horizon API"] -->|"GET /accounts/{id}/transactions"| W
     W -->|"POST webhook URL"| Endpoint["Downstream\nIntegration"]
@@ -74,7 +75,7 @@ flowchart TD
 2. Authorized watcher nodes are recorded in `WatcherRegistry` by an admin.
 3. A watcher node polls Horizon for transaction activity, fetches matching alert configs from `AlertRegistry`, and checks whether any rule matches.
 4. On a match the watcher fires the configured webhook so downstream integrations can react.
-5. If `AlertRegistry` has been configured with a `WatcherRegistry` address (optional, via `set_watcher_registry`), each gated read from step 3 makes its own on-chain cross-contract call into `WatcherRegistry::is_watcher_authorized` before returning data — independent of the watcher node's own off-chain `is_authorized` check in step 2.
+5. If `AlertRegistry` has been configured with a `WatcherRegistry` address (optional, via `set_watcher_registry`), each gated read from step 3 makes its own on-chain cross-contract call into `WatcherRegistry::is_watcher_authorized` before returning data — independent of the watcher node's own off-chain `is_watcher_authorized` check in step 2.
 
 ---
 
@@ -121,7 +122,7 @@ stellar contract invoke \
   -- initialize \
   --admin <ADMIN_ADDRESS>
 
-# Transfer admin role
+# Transfer admin role (AlertRegistry has a single admin; takes effect immediately)
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --source <ADMIN_IDENTITY> \
@@ -295,12 +296,29 @@ stellar contract invoke \
 
 **Alert Queries & Inspection:**
 
+The alert-content reads (`get_alert`, `get_alert_active`, `get_alert_owner`,
+`get_alerts_for_contract`, `get_active_alerts_for_contract`,
+`get_alerts_by_owner`, `get_contract_alerts_paginated` and
+`get_alerts_by_owner_paginated`) take a `querier` address as their first
+argument. It is always required, but it is only checked once an admin has
+enabled watcher-gating with `set_watcher_registry`; from then on `querier`
+must be a registered watcher or the call fails with `NotAWatcher`.
+
 ```bash
 # Retrieve a single alert config by ID
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --network testnet \
   -- get_alert \
+  --querier <QUERIER_ADDRESS> \
+  --config_id 1
+
+# Read only the owner of an alert
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alert_owner \
+  --querier <QUERIER_ADDRESS> \
   --config_id 1
 
 # Check if an alert is active (lightweight read)
@@ -308,6 +326,7 @@ stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --network testnet \
   -- get_alert_active \
+  --querier <QUERIER_ADDRESS> \
   --config_id 1
 
 # Query all alerts for a contract
@@ -323,6 +342,7 @@ stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --network testnet \
   -- get_active_alerts_for_contract \
+  --querier <QUERIER_ADDRESS> \
   --target_contract <WATCHED_CONTRACT_ADDRESS>
 
 # Query all alerts owned by an address
@@ -358,7 +378,9 @@ stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --network testnet \
   -- get_alerts_modified_since \
-  --since 1700000000
+  --since 1700000000 \
+  --offset 0 \
+  --limit 50
 
 # Get total cumulative alert count
 stellar contract invoke \
@@ -403,16 +425,33 @@ stellar contract invoke \
   --network testnet \
   -- remove_admin \
   --caller <ADMIN_ADDRESS> \
-  --admin_to_remove <ADMIN_TO_REMOVE_ADDRESS>
+  --target_admin <ADMIN_TO_REMOVE_ADDRESS>
 
-# Transfer admin role (replaces admin set)
+# Transfer the admin role — step 1 of 2: an existing admin proposes the new admin.
+# Nothing changes until the proposed address accepts.
 stellar contract invoke \
   --id <WATCHER_REGISTRY_CONTRACT_ID> \
   --source <ADMIN_IDENTITY> \
   --network testnet \
-  -- transfer_admin \
-  --caller <ADMIN_ADDRESS> \
+  -- propose_admin_transfer \
+  --admin <ADMIN_ADDRESS> \
   --new_admin <NEW_ADMIN_ADDRESS>
+
+# Transfer the admin role — step 2 of 2: the proposed admin accepts with their own key.
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <NEW_ADMIN_IDENTITY> \
+  --network testnet \
+  -- accept_admin_transfer \
+  --new_admin <NEW_ADMIN_ADDRESS>
+
+# Cancel a pending admin transfer (any admin)
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- cancel_admin_transfer \
+  --admin <ADMIN_ADDRESS>
 
 # Get primary admin address
 stellar contract invoke \
@@ -471,6 +510,7 @@ stellar contract invoke \
 
 ```bash
 # Check if an address is an authorized watcher
+# (`is_authorized` is a deprecated alias kept only for backwards compatibility)
 stellar contract invoke \
   --id <WATCHER_REGISTRY_CONTRACT_ID> \
   --network testnet \
@@ -632,21 +672,23 @@ let config_id = alert_registry.register_alert(
 All mutating functions require Stellar auth signatures:
 
 ```
-Owner signs → register_alert / update_alert / remove_alert
-Admin signs → register_watcher / remove_watcher / transfer_admin
+Owner signs     → register_alert / update_alert / remove_alert
+Admin signs     → register_watcher / remove_watcher / propose_admin_transfer (WatcherRegistry)
+                  transfer_admin (AlertRegistry)
+New admin signs → accept_admin_transfer (WatcherRegistry)
 ```
 
 Stellar's `require_auth()` enforces this at the protocol level — no custom signature verification needed.
 
-### Event Indexing (planned)
+### Event Indexing
 
-Contracts emit no custom events yet. Watchers poll via Horizon's transaction endpoint:
+Both contracts emit Soroban events for every state change; the full catalogue
+of topics and payloads is in [docs/events.md](docs/events.md). Watchers can
+also poll Horizon's transaction endpoint:
 
 ```
 GET https://horizon-testnet.stellar.org/accounts/<CONTRACT_ID>/transactions
 ```
-
-Future versions will emit `soroban_sdk::events` for real-time indexing.
 
 ## TypeScript Bindings
 
@@ -658,7 +700,7 @@ automatically from the compiled WASM on every release using
 npm install @tx-wat/watcher-registry @stellar/stellar-sdk
 ```
 
-> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings` from the repository root.
+> **Note:** the npm packages are published by CI on the first tagged release. Until then, generate the bindings locally with `make bindings-all` from the repository root.
 
 ```typescript
 import { Client, networks } from "@tx-wat/watcher-registry";

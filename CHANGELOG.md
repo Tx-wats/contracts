@@ -33,6 +33,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same `old_watcher`; this is now documented with a worked indexer
   de-duplication example. (issue #70)
 
+### Fixed — correctness
+
+- **`validate_rules` accepted duplicate rule descriptors.** `["rule:transfer",
+  "rule:transfer"]` was stored silently, wasting storage and skewing
+  rule-count-based limits. Duplicates are now rejected with
+  `ContractError::DuplicateRule` in both `register_alert` and `update_alert`.
+
+### Removed
+
+- `docs/pr-get-alerts-by-owner-paginated.md` and `docs/pr-remove-watcher-not-registered.md` —
+  removed stray per-PR change summaries in favor of durable reference documentation (#106).
+
+### Documentation
+
+- **`docs/watcher-registry.md` synced with the contract.** The stale single-admin
+  `"ADMIN"` / `"WATCHERS"` storage table is replaced with the real `DataKey::Admins`
+  (multi-admin `Vec<Address>`), `DataKey::Watchers`, and the previously undocumented
+  `symbol_short!("W_CNT")` u32 counter. Added the missing `add_admin`, `remove_admin`,
+  `replace_watcher`, `clear_all_watchers`, and `get_admins` function entries, each with
+  its emitted-event topic/data shape, and corrected the `Result`-returning signatures
+  that the doc still described as panicking (#63, #64, #68).
+- **`docs/storage.md` WatcherRegistry keys** updated to `Admins` / `Watchers` / `W_CNT`
+  to match, including the storage-tier summary row (#63).
+- **`docs/events.md` intro banner** rewrote the stale "only `register_alert` and
+  `remove_alert` emit; everything else is planned" note; the WatcherRegistry
+  `admin.init` status and the `admin.add` / `admin.remove` / `watcher.replace` entries
+  were already corrected in a prior fix. Audited every remaining status line against
+  the contract source (#67).
+- **Role policy documented.** `WatcherRegistry` now states in its rustdoc and in
+  `docs/watcher-registry.md` that an address may hold both the admin and watcher roles,
+  and that contract addresses are accepted for either role. Covered by
+  `test_address_can_be_admin_and_watcher` and `test_contract_address_can_hold_roles` (#69).
+
+## [0.1.0] - 2026-08-17
+
+First release. This is the build deployed to Stellar testnet on 2026-08-17
+(addresses in [`DEPLOYMENTS.md`](DEPLOYMENTS.md)); both contracts report it
+through `contractmeta!(key = "Version", val = "0.1.0")`, and the npm bindings
+are published as `0.1.0`.
+
 ### Fixed — build and test suite restored
 
 The workspace did not compile and the test suite had never run. Both are now green.
@@ -70,10 +110,6 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - **`update_alert` silently discarded rule validation.** It called
   `validate_rules` and dropped the returned `Result`, so an alert could be
   updated with rule descriptors that `register_alert` rejects. Now propagated.
-- **`validate_rules` accepted duplicate rule descriptors.** `["rule:transfer",
-  "rule:transfer"]` was stored silently, wasting storage and skewing
-  rule-count-based limits. Duplicates are now rejected with
-  `ContractError::DuplicateRule` in both `register_alert` and `update_alert`.
 - **`update_webhook` accepted webhook hashes of any length**, while
   `register_alert` required exactly 64 characters. Both now enforce the same rule.
 - **`replace_watcher` could drop the replacement watcher.** Corrected so the new
@@ -98,17 +134,6 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - **`renew_alert_ttl`** — owner-authenticated TTL extension that leaves
   `updated_at` untouched, so renewing storage does not make an alert reappear in
   `get_alerts_modified_since` incremental syncs.
-
-### Removed
-
-- `docs/pr-get-alerts-by-owner-paginated.md` and `docs/pr-remove-watcher-not-registered.md` —
-  removed stray per-PR change summaries in favor of durable reference documentation (#106).
-
-- `contracts/alert-registry/src/{contract,storage,types}.rs` — 857 lines of a
-  second, divergent `AlertRegistry` implementation that was never declared as a
-  module and therefore compiled into nothing.
-- Root-level `task1.md`, `task2.md` and `issue.md` scratch notes (the first two
-  described work already shipped; the third contained the word "test").
 - **Feature A — `watcher.remove` event**: `WatcherRegistry::remove_watcher` now emits
   `(Symbol("watcher"), Symbol("remove"))` with `data = watcher: Address` **only when the
   watcher was actually present** (no-op removals are silent). Dependent systems such as
@@ -126,26 +151,9 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - `WatcherRegistry::is_authorized` alias for `is_watcher_authorized` (backwards compat).
 - `WatcherRegistry::clear_all_watchers` bulk-deauthorizes all watchers in one admin call,
   emitting a `watcher.remove` event for each removed address.
-- `WatcherRegistry::decrement_watcher_count` is now correctly called on `remove_watcher`
-  (previously the count only ever incremented — this was a bug fix).
 - `alert.bump` event documented in `docs/events.md`.
 - `watcher.remove` event marked ✅ implemented in `docs/events.md`.
 - `docs/ttl.md` updated to document `DEFAULT_TTL`, `MAX_TTL`, and `bump_alert`.
-
-### Fixed
-- `WatcherRegistry::remove_watcher` no longer emits an event when the watcher address
-  was not registered (previously always emitted regardless).
-- `WatcherRegistry::get_watcher_count` now decrements correctly on removal.
-- `AlertRegistry::remove_alert` body was missing in `lib.rs` (structural corruption);
-  restored with correct `remove_alert_record` call.
-- `AlertRegistry::remove_alert_by_admin` was missing from `lib.rs`; restored.
-- `AlertRegistry::register_alert` had duplicated validation calls; deduplicated.
-- `AlertRegistry::update_alert` now keeps `DataKey::AlertActive` in sync when `active`
-  changes.
-- `contract.rs` `#[contract]` / `#[contractimpl]` attributes removed to prevent
-  duplicate Soroban client generation conflicting with `lib.rs`.
-- All `extend_ttl(_, 100, 100)` calls replaced with `extend_ttl(_, DEFAULT_TTL, DEFAULT_TTL)`.
-
 - `get_watcher_count` function to WatcherRegistry for efficient watcher count queries (#21)
 - TypeScript bindings for AlertRegistry published to npm as `@tx-wat/alert-registry-bindings` (#120)
 - GitHub Actions workflow for automated npm publishing of TypeScript bindings
@@ -161,31 +169,6 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - `.github/workflows/publish-bindings.yml` — CI workflow that generates and publishes TypeScript bindings to npm on every GitHub release
 - `docs/ecosystem-submission.md` — step-by-step guide for submitting to the Stellar Developer Tools ecosystem listing and the `stellar/soroban-examples` repository
 - `contracts/watcher-registry/README.md` and `contracts/alert-registry/README.md` — per-contract READMEs required for the soroban-examples submission
-
-### Documentation
-
-- **`docs/watcher-registry.md` synced with the contract.** The stale single-admin
-  `"ADMIN"` / `"WATCHERS"` storage table is replaced with the real `DataKey::Admins`
-  (multi-admin `Vec<Address>`), `DataKey::Watchers`, and the previously undocumented
-  `symbol_short!("W_CNT")` u32 counter. Added the missing `add_admin`, `remove_admin`,
-  `replace_watcher`, `clear_all_watchers`, and `get_admins` function entries, each with
-  its emitted-event topic/data shape, and corrected the `Result`-returning signatures
-  that the doc still described as panicking (#63, #64, #68).
-- **`docs/storage.md` WatcherRegistry keys** updated to `Admins` / `Watchers` / `W_CNT`
-  to match, including the storage-tier summary row (#63).
-- **`docs/events.md` intro banner** rewrote the stale "only `register_alert` and
-  `remove_alert` emit; everything else is planned" note; the WatcherRegistry
-  `admin.init` status and the `admin.add` / `admin.remove` / `watcher.replace` entries
-  were already corrected in a prior fix. Audited every remaining status line against
-  the contract source (#67).
-- **Role policy documented.** `WatcherRegistry` now states in its rustdoc and in
-  `docs/watcher-registry.md` that an address may hold both the admin and watcher roles,
-  and that contract addresses are accepted for either role. Covered by
-  `test_address_can_be_admin_and_watcher` and `test_contract_address_can_hold_roles` (#69).
-
-## [0.1.0] - 2025-05-28
-
-### Added
 - `AlertRegistry` contract: register, update, remove, and query alert configs on-chain
 - `WatcherRegistry` contract: manage authorized watcher node addresses with admin controls
 - Persistent storage with TTL extension on every write
@@ -195,5 +178,29 @@ The workspace did not compile and the test suite had never run. Both are now gre
 - Function reference docs in `docs/alert-registry.md` and `docs/watcher-registry.md`
 - Contribution guidelines in `CONTRIBUTING.md`
 
-[Unreleased]: https://github.com/Tx-wat/stellar-txwatch-contracts/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Tx-wat/stellar-txwatch-contracts/releases/tag/v0.1.0
+### Removed
+
+- `contracts/alert-registry/src/{contract,storage,types}.rs` — 857 lines of a
+  second, divergent `AlertRegistry` implementation that was never declared as a
+  module and therefore compiled into nothing.
+- Root-level `task1.md`, `task2.md` and `issue.md` scratch notes (the first two
+  described work already shipped; the third contained the word "test").
+
+### Fixed
+- `WatcherRegistry::remove_watcher` no longer emits an event when the watcher address
+  was not registered (previously always emitted regardless).
+- `WatcherRegistry::get_watcher_count` now decrements correctly on removal.
+- `AlertRegistry::remove_alert` body was missing in `lib.rs` (structural corruption);
+  restored with correct `remove_alert_record` call.
+- `AlertRegistry::remove_alert_by_admin` was missing from `lib.rs`; restored.
+- `AlertRegistry::register_alert` had duplicated validation calls; deduplicated.
+- `AlertRegistry::update_alert` now keeps `DataKey::AlertActive` in sync when `active`
+  changes.
+- `contract.rs` `#[contract]` / `#[contractimpl]` attributes removed to prevent
+  duplicate Soroban client generation conflicting with `lib.rs`.
+- All `extend_ttl(_, 100, 100)` calls replaced with `extend_ttl(_, DEFAULT_TTL, DEFAULT_TTL)`.
+- `WatcherRegistry::decrement_watcher_count` is now correctly called on `remove_watcher`
+  (previously the count only ever incremented — this was a bug fix).
+
+[Unreleased]: https://github.com/Tx-wats/contracts/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Tx-wats/contracts/releases/tag/v0.1.0
