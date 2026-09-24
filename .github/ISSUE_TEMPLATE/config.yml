@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Security Vulnerability Report
-    url: https://github.com/ComputerOracle/contracts/blob/main/SECURITY.md
-    about: Please report security vulnerabilities privately via email (emmanuelanalaba@gmail.com) as detailed in SECURITY.md instead of opening a public issue.
+  - name: Report a security vulnerability
+    url: https://github.com/Tx-wats/contracts/security/advisories/new
+    about: Report vulnerabilities privately through GitHub's private vulnerability reporting. Please do not open a public issue.
+  - name: Security policy
+    url: https://github.com/Tx-wats/contracts/blob/main/SECURITY.md
+    about: Supported versions, backup maintainer contacts and our disclosure timeline.
