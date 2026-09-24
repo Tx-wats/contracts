@@ -31,9 +31,9 @@ fn create_env_and_client() -> (Env, Address, AlertRegistryClient<'static>) {
     (env, admin, client)
 }
 
-fn make_hash64(env: &Env, ch: char) -> SorobanString {
-    let buf = [ch as u8; 64];
-    SorobanString::from_str(env, core::str::from_utf8(&buf).unwrap())
+/// A webhook hash (32-byte SHA-256 digest) with every byte set to `ch`.
+fn make_hash64(env: &Env, ch: char) -> soroban_sdk::BytesN<32> {
+    soroban_sdk::BytesN::from_array(env, &[ch as u8; 32])
 }
 
 fn make_str(env: &Env, s: &str) -> SorobanString {

@@ -557,7 +557,7 @@ const tx = new TransactionBuilder(account, {
       new Address(ownerKeypair.publicKey()).toScVal(),          // owner
       new Address("<WATCHED_CONTRACT_ADDRESS>").toScVal(),      // target_contract
       nativeToScVal("My Alert", { type: "string" }),            // label
-      nativeToScVal("<sha256-of-webhook-url>", { type: "string" }), // webhook_hash
+      nativeToScVal(Buffer.from("<sha256-hex-of-webhook-url>", "hex")), // webhook_hash (BytesN<32>)
       nativeToScVal(["rule:transfer", "rule:mint"], { type: "array", element: { type: "string" } }), // rules
     )
   )

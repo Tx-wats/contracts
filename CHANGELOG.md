@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING (alert-registry 0.2.0)
+
+- **`webhook_hash` is now `BytesN<32>` instead of a 64-character hex
+  `String`.** A SHA-256 digest is 32 bytes; the hex string doubled the storage
+  rent of every alert and needed a runtime length check. `AlertConfig`
+  (`webhook_hash`, `pending_webhook_hash`), `AlertInput`, and the
+  `register_alert` / `update_webhook` / `propose_webhook` entry points all take
+  `BytesN<32>`, and the length validation is removed because the type
+  guarantees it. `ContractError::InvalidWebhookHash` (6) is no longer returned
+  but is kept so its code is never reused. This is an ABI and storage-layout
+  change: the contract version (`contractmeta` and crate) and the
+  `@tx-wat/alert-registry-bindings` package are bumped to 0.2.0, and alerts
+  stored by 0.1.0 cannot be read by 0.2.0 (testnet-only deployment; re-register
+  after upgrading). The `stellar contract invoke` CLI still accepts the
+  64-character hex digest for a `BytesN<32>` argument. (issue #214)
+
 ### Fixed — alert-registry
 
 - **`update_webhook` left a stale pending hash that later overwrote it.**

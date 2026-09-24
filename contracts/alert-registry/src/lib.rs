@@ -18,7 +18,7 @@ use soroban_sdk::{
 };
 
 contractmeta!(key = "Name", val = "AlertRegistry");
-contractmeta!(key = "Version", val = "0.1.0");
+contractmeta!(key = "Version", val = "0.2.0");
 
 // ── Storage keys ────────────────────────────────────────────────────────────
 
@@ -92,7 +92,9 @@ pub enum ContractError {
     /// Returned when a watcher registry is configured and the querying address
     /// is not a registered watcher.
     NotAWatcher = 5,
-    /// The webhook hash is not exactly 64 characters (a hex SHA-256 digest).
+    /// No longer returned. Webhook hashes are now typed `BytesN<32>`, so a
+    /// wrong-length hash cannot be constructed (#214). The variant is kept so
+    /// its discriminant is never reused for a different error.
     InvalidWebhookHash = 6,
     /// The label exceeds 128 bytes.
     LabelTooLong = 7,
@@ -139,15 +141,16 @@ pub enum ContractError {
 pub struct AlertConfig {
     /// Human-readable label for the alert.
     pub label: String,
-    /// SHA-256 hash of the webhook URL (the raw URL is never stored on-chain).
-    pub webhook_hash: String,
+    /// SHA-256 hash of the webhook URL (the raw URL is never stored on-chain),
+    /// as its 32 raw digest bytes.
+    pub webhook_hash: BytesN<32>,
     /// Staged replacement for `webhook_hash` during a two-phase rotation.
     ///
     /// Set by [`AlertRegistry::propose_webhook`] and promoted to `webhook_hash`
     /// by [`AlertRegistry::confirm_webhook`]. `None` when no rotation is in
     /// progress. Staging the change means a misconfigured endpoint never
     /// silently replaces a working one.
-    pub pending_webhook_hash: Option<String>,
+    pub pending_webhook_hash: Option<BytesN<32>>,
     /// List of rule identifiers that trigger this alert (e.g. `"rule:transfer"`).
     pub rules: Vec<String>,
     /// Address that owns and may mutate this alert.
@@ -175,8 +178,8 @@ pub struct AlertInput {
     pub target_contract: Address,
     /// Human-readable name for the alert.
     pub label: String,
-    /// SHA-256 hash of the destination webhook URL.
-    pub webhook_hash: String,
+    /// SHA-256 hash of the destination webhook URL, as its 32 raw digest bytes.
+    pub webhook_hash: BytesN<32>,
     /// Rule identifiers that should trigger the alert.
     pub rules: Vec<String>,
 }
@@ -562,13 +565,12 @@ impl AlertRegistry {
     /// * `owner` - Address that will own and control this alert.
     /// * `target_contract` - Contract address to watch.
     /// * `label` - Human-readable name for the alert.
-    /// * `webhook_hash` - SHA-256 hash of the destination webhook URL.
+    /// * `webhook_hash` - SHA-256 hash of the destination webhook URL, as its 32 raw digest bytes.
     /// * `rules` - Rule identifiers that should trigger the alert.
     ///
     /// # Returns
     /// The new alert's numeric ID.
     /// # Errors
-    /// Returns [`ContractError::InvalidWebhookHash`] if `webhook_hash` is not exactly 64 characters.
     /// Returns [`ContractError::LabelTooLong`] if `label` exceeds 128 bytes.
     /// Returns [`ContractError::OwnerAlertLimitExceeded`] if the owner is at the configured per-owner alert limit.
     /// Returns [`ContractError::ContractAlertLimitExceeded`] if the target contract is at the configured per-contract alert limit.
@@ -581,12 +583,9 @@ impl AlertRegistry {
         owner: Address,
         target_contract: Address,
         label: String,
-        webhook_hash: String,
+        webhook_hash: BytesN<32>,
         rules: Vec<String>,
     ) -> Result<u64, ContractError> {
-        if webhook_hash.len() != 64 {
-            return Err(ContractError::InvalidWebhookHash);
-        }
         owner.require_auth();
         Self::assert_not_paused(&env)?;
 
@@ -680,21 +679,16 @@ impl AlertRegistry {
     /// Requires a valid Stellar auth signature from `caller`, who must also be
     /// the original owner of the alert.
     /// # Errors
-    /// Returns [`ContractError::InvalidWebhookHash`] if `webhook_hash` is not exactly 64 characters.
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     pub fn update_webhook(
         env: Env,
         caller: Address,
         config_id: u64,
-        webhook_hash: String,
+        webhook_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
-
-        if webhook_hash.len() != 64 {
-            return Err(ContractError::InvalidWebhookHash);
-        }
 
         let mut config: AlertConfig = env
             .storage()
@@ -731,8 +725,6 @@ impl AlertRegistry {
     /// alert owner.
     ///
     /// # Errors
-    /// Returns [`ContractError::InvalidWebhookHash`] unless `webhook_hash` is
-    /// exactly 64 characters.
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
     ///
@@ -742,14 +734,10 @@ impl AlertRegistry {
         env: Env,
         caller: Address,
         config_id: u64,
-        webhook_hash: String,
+        webhook_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
-
-        if webhook_hash.len() != 64 {
-            return Err(ContractError::InvalidWebhookHash);
-        }
 
         let mut config: AlertConfig = env
             .storage()
@@ -2066,15 +2054,14 @@ mod tests {
         vec, Env, FromVal, String, Symbol,
     };
 
-    /// A 64-character webhook hash of repeated `c` — `register_alert`,
-    /// `update_webhook` and `propose_webhook` all require exactly 64 characters.
-    fn hash64c(env: &Env, c: char) -> String {
-        let buf = [c as u8; 64];
-        String::from_str(env, core::str::from_utf8(&buf).unwrap())
+    /// A webhook hash (32-byte SHA-256 digest) with every byte set to `c`;
+    /// vary `c` when a test needs two hashes that must differ.
+    fn hash64c(env: &Env, c: char) -> BytesN<32> {
+        BytesN::from_array(env, &[c as u8; 32])
     }
 
     /// The default valid 64-character webhook hash.
-    fn hash64(env: &Env) -> String {
+    fn hash64(env: &Env) -> BytesN<32> {
         hash64c(env, '0')
     }
 

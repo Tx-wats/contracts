@@ -33,14 +33,14 @@ Generated from the `DataKey` enum and every `symbol_short!` key the contract rea
 | Field | Type | Description |
 |---|---|---|
 | `label` | `String` | Human-readable name for the alert (max 128 bytes) |
-| `webhook_hash` | `String` | SHA-256 hex digest of the webhook URL |
+| `webhook_hash` | `BytesN<32>` | SHA-256 digest of the webhook URL, as 32 raw bytes |
 | `rules` | `Vec<String>` | Rule descriptor strings (e.g. `"rule:transfer"`) |
 | `owner` | `Address` | Address that owns and may mutate this alert |
 | `target_contract` | `Address` | Contract address being watched |
 | `created_at` | `u64` | Ledger timestamp at registration |
 | `updated_at` | `u64` | Ledger timestamp of the most recent update |
 | `active` | `bool` | Whether the alert is currently active |
-| `pending_webhook_hash` | `Option<String>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
+| `pending_webhook_hash` | `Option<BytesN<32>>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
 
 ### TTL Behavior
 

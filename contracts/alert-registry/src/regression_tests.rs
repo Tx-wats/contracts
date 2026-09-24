@@ -15,13 +15,13 @@ fn setup() -> (Env, AlertRegistryClient<'static>) {
     (env, client)
 }
 
-fn hash64(env: &Env) -> String {
+fn hash64(env: &Env) -> soroban_sdk::BytesN<32> {
     hash64c(env, '0')
 }
 
-fn hash64c(env: &Env, c: char) -> String {
-    let buf = [c as u8; 64];
-    String::from_str(env, core::str::from_utf8(&buf).unwrap())
+/// A webhook hash (32-byte SHA-256 digest) with every byte set to `c`.
+fn hash64c(env: &Env, c: char) -> soroban_sdk::BytesN<32> {
+    soroban_sdk::BytesN::from_array(env, &[c as u8; 32])
 }
 
 fn str(env: &Env, s: &str) -> String {
@@ -109,7 +109,9 @@ fn test_regression_missing_remove_alert_body() {
 /// Regression test for historical bug:
 /// `update_webhook accepted webhook hashes of any length, while register_alert required exactly 64 characters.`
 ///
-/// Ensures that `update_webhook` enforces 64-character length validation identically to `register_alert`.
+/// Since #214 every entry point takes the hash as `BytesN<32>`, so a
+/// wrong-length hash can no longer be constructed at all. What remains to
+/// check is that the 32 digest bytes are stored and returned unchanged.
 #[test]
 fn test_regression_update_webhook_accepted_invalid_length_hashes() {
     let (env, client) = setup();
@@ -124,48 +126,19 @@ fn test_regression_update_webhook_accepted_invalid_length_hashes() {
         &vec![&env, str(&env, "rule:transfer")],
     );
 
-    // Too short (63 chars)
-    let short_hash = str(
-        &env,
-        "123456789012345678901234567890123456789012345678901234567890123",
-    );
-    let res_short = client.try_update_webhook(&owner, &id, &short_hash);
+    let digest: [u8; 32] = core::array::from_fn(|i| i as u8);
+    let new_hash = soroban_sdk::BytesN::from_array(&env, &digest);
     assert_eq!(
-        res_short.unwrap_err().unwrap(),
-        ContractError::InvalidWebhookHash
-    );
-
-    // Too long (65 chars)
-    let long_hash = str(
-        &env,
-        "12345678901234567890123456789012345678901234567890123456789012345",
-    );
-    let res_long = client.try_update_webhook(&owner, &id, &long_hash);
-    assert_eq!(
-        res_long.unwrap_err().unwrap(),
-        ContractError::InvalidWebhookHash
-    );
-
-    // Empty hash
-    let empty_hash = str(&env, "");
-    let res_empty = client.try_update_webhook(&owner, &id, &empty_hash);
-    assert_eq!(
-        res_empty.unwrap_err().unwrap(),
-        ContractError::InvalidWebhookHash
-    );
-
-    // Valid 64-char hash succeeds
-    let valid_hash = str(
-        &env,
-        "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-    );
-    assert_eq!(
-        client.try_update_webhook(&owner, &id, &valid_hash).unwrap(),
+        client.try_update_webhook(&owner, &id, &new_hash).unwrap(),
         Ok(())
     );
     assert_eq!(
-        client.get_alert(&owner, &id).unwrap().webhook_hash,
-        valid_hash
+        client
+            .get_alert(&owner, &id)
+            .unwrap()
+            .webhook_hash
+            .to_array(),
+        digest
     );
 }
 

@@ -8,7 +8,7 @@
 //! ```
 
 use alert_registry::{AlertRegistry, AlertRegistryClient};
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, BytesN, Env, String};
 use watcher_registry::{WatcherRegistry, WatcherRegistryClient};
 
 // ── String helpers ────────────────────────────────────────────────────────────
@@ -18,18 +18,17 @@ pub fn str(env: &Env, s: &str) -> String {
     String::from_str(env, s)
 }
 
-/// A 64-character webhook hash of repeated `c`.
+/// A webhook hash (32-byte SHA-256 digest) with every byte set to `c`.
 ///
-/// `register_alert`, `update_webhook` and `propose_webhook` all require a
-/// webhook hash of exactly 64 characters; vary `c` when a test needs two
-/// hashes that must differ.
-pub fn hash64c(env: &Env, c: char) -> String {
-    let buf = [c as u8; 64];
-    String::from_str(env, core::str::from_utf8(&buf).unwrap())
+/// `register_alert`, `update_webhook` and `propose_webhook` take the webhook
+/// hash as `BytesN<32>`; vary `c` when a test needs two hashes that must
+/// differ.
+pub fn hash64c(env: &Env, c: char) -> BytesN<32> {
+    BytesN::from_array(env, &[c as u8; 32])
 }
 
-/// The default valid 64-character webhook hash.
-pub fn hash64(env: &Env) -> String {
+/// The default webhook hash used by tests.
+pub fn hash64(env: &Env) -> BytesN<32> {
     hash64c(env, '0')
 }
 
