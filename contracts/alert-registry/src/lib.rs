@@ -81,8 +81,34 @@ pub enum DataKey {
     OwnerLiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
-    /// Monotonic counter used to generate unique alert IDs.
-    NextId,
+}
+
+/// Keys of the entries in the contract's **instance** storage.
+///
+/// Each constant is the exact `symbol_short!` the contract has always used, so
+/// the on-chain encoding is unchanged and no migration is needed; routing every
+/// access through these names turns a mistyped key into a compile error.
+/// They are deliberately not [`DataKey`] variants: a variant is encoded as
+/// `[Symbol("Name"), ...]`, not as the bare symbol, so it would orphan the
+/// values already stored under these keys.
+pub mod instance_key {
+    use soroban_sdk::{symbol_short, Symbol};
+
+    /// `Address` of the admin (see [`crate::AlertRegistry::get_admin`]).
+    pub const ADMIN: Symbol = symbol_short!("ADMIN");
+    /// `u64` monotonic counter used to generate alert IDs; also the value of
+    /// [`crate::AlertRegistry::get_alert_count`].
+    pub const NEXT_ID: Symbol = symbol_short!("NEXT_ID");
+    /// `bool` circuit-breaker flag set by `pause` / `unpause`.
+    pub const PAUSED: Symbol = symbol_short!("PAUSED");
+    /// `u32` per-owner alert limit (`0` = unlimited).
+    pub const LIMIT: Symbol = symbol_short!("LIMIT");
+    /// `u32` per-contract alert limit (`0` = unlimited).
+    pub const CLIMIT: Symbol = symbol_short!("CLIMIT");
+    /// `u32` ceiling on the total number of alerts ever registered (`0` = none).
+    pub const GLIMIT: Symbol = symbol_short!("GLIMIT");
+    /// `Address` of the optional `WatcherRegistry` used for read gating.
+    pub const WATCHREG: Symbol = symbol_short!("WATCHREG");
 }
 
 /// Errors returned by `AlertRegistry` entry points.
@@ -255,9 +281,7 @@ impl AlertRegistry {
     ///
     /// Running atomically with deployment prevents front-running the initialization window.
     pub fn __constructor(env: Env, admin: Address) {
-        env.storage()
-            .instance()
-            .set(&symbol_short!("ADMIN"), &admin);
+        env.storage().instance().set(&instance_key::ADMIN, &admin);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("init")),
@@ -273,12 +297,10 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlreadyInitialized`] if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
-        if env.storage().instance().has(&symbol_short!("ADMIN")) {
+        if env.storage().instance().has(&instance_key::ADMIN) {
             return Err(ContractError::AlreadyInitialized);
         }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("ADMIN"), &admin);
+        env.storage().instance().set(&instance_key::ADMIN, &admin);
         Self::extend_instance_ttl(&env);
 
         env.events().publish(
@@ -302,7 +324,7 @@ impl AlertRegistry {
         Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
-            .set(&symbol_short!("ADMIN"), &new_admin);
+            .set(&instance_key::ADMIN, &new_admin);
         Self::extend_instance_ttl(&env);
 
         // Admin handover is security-relevant: emit it so off-chain watchers
@@ -318,8 +340,9 @@ impl AlertRegistry {
     ///
     /// The new WASM must already be installed on-chain. Storage is untouched by
     /// the upgrade, so the new build **must** keep the existing [`DataKey`]
-    /// layout and `NextId` counter — the host cannot verify this, and a build
-    /// that changes them will read the existing entries as garbage. See
+    /// layout and [`instance_key`] entries (including the `NEXT_ID` counter)
+    /// — the host cannot verify this, and a build that changes them will read
+    /// the existing entries as garbage. See
     /// `docs/upgrade-guide.md`.
     ///
     /// Requires the admin role to have been initialized: an uninitialized
@@ -360,7 +383,7 @@ impl AlertRegistry {
     pub fn get_admin(env: Env) -> Result<Address, ContractError> {
         env.storage()
             .instance()
-            .get(&symbol_short!("ADMIN"))
+            .get(&instance_key::ADMIN)
             .ok_or(ContractError::NotInitialized)
     }
 
@@ -376,9 +399,7 @@ impl AlertRegistry {
     pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("PAUSED"), &true);
+        env.storage().instance().set(&instance_key::PAUSED, &true);
         Self::extend_instance_ttl(&env);
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("pause")), admin);
@@ -394,9 +415,7 @@ impl AlertRegistry {
     pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("PAUSED"), &false);
+        env.storage().instance().set(&instance_key::PAUSED, &false);
         Self::extend_instance_ttl(&env);
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("unpause")), admin);
@@ -408,7 +427,7 @@ impl AlertRegistry {
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .instance()
-            .get(&symbol_short!("PAUSED"))
+            .get(&instance_key::PAUSED)
             .unwrap_or(false)
     }
 
@@ -424,9 +443,7 @@ impl AlertRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_not_paused(&env)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("LIMIT"), &limit);
+        env.storage().instance().set(&instance_key::LIMIT, &limit);
         Self::extend_instance_ttl(&env);
 
         env.events().publish(
@@ -440,7 +457,7 @@ impl AlertRegistry {
     pub fn get_per_owner_alert_limit(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("LIMIT"))
+            .get(&instance_key::LIMIT)
             .unwrap_or(0u32)
     }
 
@@ -463,9 +480,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("CLIMIT"), &limit);
+        env.storage().instance().set(&instance_key::CLIMIT, &limit);
         Self::extend_instance_ttl(&env);
 
         env.events().publish(
@@ -479,7 +494,7 @@ impl AlertRegistry {
     pub fn get_per_contract_alert_limit(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("CLIMIT"))
+            .get(&instance_key::CLIMIT)
             .unwrap_or(0u32)
     }
 
@@ -501,9 +516,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("GLIMIT"), &limit);
+        env.storage().instance().set(&instance_key::GLIMIT, &limit);
         Self::extend_instance_ttl(&env);
         Ok(())
     }
@@ -512,7 +525,7 @@ impl AlertRegistry {
     pub fn get_global_alert_limit(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("GLIMIT"))
+            .get(&instance_key::GLIMIT)
             .unwrap_or(0u32)
     }
 
@@ -556,7 +569,7 @@ impl AlertRegistry {
         Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
-            .set(&symbol_short!("WATCHREG"), &watcher_registry);
+            .set(&instance_key::WATCHREG, &watcher_registry);
         Self::extend_instance_ttl(&env);
 
         env.events().publish(
@@ -582,7 +595,7 @@ impl AlertRegistry {
     pub fn clear_watcher_registry(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
-        env.storage().instance().remove(&symbol_short!("WATCHREG"));
+        env.storage().instance().remove(&instance_key::WATCHREG);
         Self::extend_instance_ttl(&env);
         Ok(())
     }
@@ -590,7 +603,7 @@ impl AlertRegistry {
     /// Return the configured `WatcherRegistry` contract address, or `None` if
     /// watcher-gating has not been enabled.
     pub fn get_watcher_registry(env: Env) -> Option<Address> {
-        env.storage().instance().get(&symbol_short!("WATCHREG"))
+        env.storage().instance().get(&instance_key::WATCHREG)
     }
 
     /// Return `true` if watcher-gating is currently enabled (a `WatcherRegistry`
@@ -1619,7 +1632,7 @@ impl AlertRegistry {
         let total: u64 = env
             .storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64);
 
         let range_start = u64::from(offset).min(total);
@@ -1690,7 +1703,7 @@ impl AlertRegistry {
         let total: u64 = env
             .storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64);
 
         let range_start = u64::from(offset).min(total);
@@ -1724,7 +1737,7 @@ impl AlertRegistry {
     pub fn get_alert_count(env: Env) -> u64 {
         env.storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64)
     }
 
@@ -1796,8 +1809,7 @@ impl AlertRegistry {
     /// watcher. Returns `Ok(())` when no registry is configured (gating is
     /// disabled) or when the querier passes the check.
     fn assert_watcher_if_configured(env: &Env, querier: &Address) -> Result<(), ContractError> {
-        let maybe_registry: Option<Address> =
-            env.storage().instance().get(&symbol_short!("WATCHREG"));
+        let maybe_registry: Option<Address> = env.storage().instance().get(&instance_key::WATCHREG);
 
         if let Some(registry_addr) = maybe_registry {
             let client = ExtWatcherClient::new(env, &registry_addr);
@@ -1820,7 +1832,7 @@ impl AlertRegistry {
         let paused: bool = env
             .storage()
             .instance()
-            .get(&symbol_short!("PAUSED"))
+            .get(&instance_key::PAUSED)
             .unwrap_or(false);
         if paused {
             return Err(ContractError::Paused);
@@ -1829,14 +1841,10 @@ impl AlertRegistry {
     }
 
     fn assert_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
-        if !env.storage().instance().has(&symbol_short!("ADMIN")) {
+        if !env.storage().instance().has(&instance_key::ADMIN) {
             return Err(ContractError::NotInitialized);
         }
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("ADMIN"))
-            .unwrap();
+        let admin: Address = env.storage().instance().get(&instance_key::ADMIN).unwrap();
         if admin == *caller {
             Ok(())
         } else {
@@ -1866,7 +1874,7 @@ impl AlertRegistry {
     }
 
     /// Reject registration once the total number of alerts ever registered
-    /// (the monotonic [`NextId`](DataKey::NextId) counter) reaches the
+    /// (the monotonic [`instance_key::NEXT_ID`] counter) reaches the
     /// configured global ceiling. A limit of `0` means no ceiling.
     fn assert_global_alert_limit(env: &Env) -> Result<(), ContractError> {
         let limit = Self::get_global_alert_limit(env.clone());
@@ -1941,11 +1949,11 @@ impl AlertRegistry {
         let id: u64 = env
             .storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64);
         env.storage()
             .instance()
-            .set(&symbol_short!("NEXT_ID"), &(id + 1));
+            .set(&instance_key::NEXT_ID, &(id + 1));
         Self::extend_instance_ttl(env);
         id
     }

@@ -739,3 +739,39 @@ fn test_regression_mutators_refresh_indexes_they_leave() {
         "transfer_alert_ownership: contract index"
     );
 }
+
+/// Regression test for #211:
+/// instance keys are now read and written through the `instance_key`
+/// constants instead of ad-hoc `symbol_short!` literals. The constants must
+/// stay byte-identical to the literals, or an upgraded contract would lose the
+/// admin, counter and limits already stored by a deployed one.
+#[test]
+fn test_regression_instance_keys_match_legacy_symbols() {
+    use crate::instance_key;
+    use soroban_sdk::symbol_short;
+
+    assert_eq!(instance_key::ADMIN, symbol_short!("ADMIN"));
+    assert_eq!(instance_key::NEXT_ID, symbol_short!("NEXT_ID"));
+    assert_eq!(instance_key::PAUSED, symbol_short!("PAUSED"));
+    assert_eq!(instance_key::LIMIT, symbol_short!("LIMIT"));
+    assert_eq!(instance_key::CLIMIT, symbol_short!("CLIMIT"));
+    assert_eq!(instance_key::GLIMIT, symbol_short!("GLIMIT"));
+    assert_eq!(instance_key::WATCHREG, symbol_short!("WATCHREG"));
+
+    // State written under the literal keys (as a deployed pre-#211 build
+    // would have left it) is read back through the new constants.
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    env.as_contract(&client.address, || {
+        let storage = env.storage().instance();
+        storage.set(&symbol_short!("ADMIN"), &admin);
+        storage.set(&symbol_short!("NEXT_ID"), &7u64);
+        storage.set(&symbol_short!("LIMIT"), &3u32);
+        storage.set(&symbol_short!("PAUSED"), &true);
+    });
+
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(client.get_alert_count(), 7);
+    assert_eq!(client.get_per_owner_alert_limit(), 3);
+    assert!(client.is_paused());
+}

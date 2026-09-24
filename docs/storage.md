@@ -19,14 +19,15 @@ Generated from the `DataKey` enum and every `symbol_short!` key the contract rea
 | `DataKey::OwnerIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs owned by a given address |
 | `DataKey::OwnerLiveCount(addr: Address)` | Persistent | `u32` | Running count of currently live (non-removed) alerts owned by `addr`, deactivated alerts included. Renamed from `OwnerActiveCount` (the name wrongly implied an `active` filter); entries under the legacy key are migrated to the new key on first read. Maintained incrementally alongside `OwnerIndex` so `get_non_removed_alert_count` is O(1) instead of rescanning the index. `get_active_alert_count` instead scans `OwnerIndex` and filters by the `AlertActive` flag, so deactivated-but-not-removed alerts are excluded |
 | `DataKey::ContractIndex(addr: Address)` | Persistent | `Vec<u64>` | List of alert IDs watching a given contract address |
-| `DataKey::NextId` | — | — | Declared in the enum but **not used**: the counter is stored under the `NEXT_ID` symbol key below |
-| `symbol_short!("NEXT_ID")` | Instance | `u64` | Monotonic counter used to generate unique alert IDs; also the value returned by `get_alert_count` |
-| `symbol_short!("ADMIN")` | Instance | `Address` | Admin address that may pause the contract, remove alerts and set limits |
-| `symbol_short!("PAUSED")` | Instance | `bool` | Circuit-breaker flag set by `pause` / `unpause`; absent means not paused |
-| `symbol_short!("LIMIT")` | Instance | `u32` | Optional per-owner active alert limit (`set_per_owner_alert_limit`) |
-| `symbol_short!("CLIMIT")` | Instance | `u32` | Optional per-contract alert limit (`set_per_contract_alert_limit`) |
-| `symbol_short!("GLIMIT")` | Instance | `u32` | Optional global ceiling on total alerts ever registered (`set_global_alert_limit`) |
-| `symbol_short!("WATCHREG")` | Instance | `Address` | Optional `WatcherRegistry` contract address; when set, read queries are gated to registered watchers |
+| `instance_key::NEXT_ID` (`symbol_short!("NEXT_ID")`) | Instance | `u64` | Monotonic counter used to generate unique alert IDs; also the value returned by `get_alert_count` |
+| `instance_key::ADMIN` (`symbol_short!("ADMIN")`) | Instance | `Address` | Admin address that may pause the contract, remove alerts and set limits |
+| `instance_key::PAUSED` (`symbol_short!("PAUSED")`) | Instance | `bool` | Circuit-breaker flag set by `pause` / `unpause`; absent means not paused |
+| `instance_key::LIMIT` (`symbol_short!("LIMIT")`) | Instance | `u32` | Optional per-owner active alert limit (`set_per_owner_alert_limit`) |
+| `instance_key::CLIMIT` (`symbol_short!("CLIMIT")`) | Instance | `u32` | Optional per-contract alert limit (`set_per_contract_alert_limit`) |
+| `instance_key::GLIMIT` (`symbol_short!("GLIMIT")`) | Instance | `u32` | Optional global ceiling on total alerts ever registered (`set_global_alert_limit`) |
+| `instance_key::WATCHREG` (`symbol_short!("WATCHREG")`) | Instance | `Address` | Optional `WatcherRegistry` contract address; when set, read queries are gated to registered watchers |
+
+Instance keys are the constants in `alert_registry::instance_key`. Each is the same bare `symbol_short!` the contract has always used, so the storage encoding is unchanged across the switch (#211); the constants only make a mistyped key a compile error. They are intentionally not `DataKey` variants, whose encoding (`[Symbol("Name"), …]`) would differ from the stored keys. The former `DataKey::NextId` variant was never used for storage and has been removed.
 
 ### AlertConfig Fields
 

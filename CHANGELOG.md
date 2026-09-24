@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Ad-hoc `symbol_short!` instance keys consolidated.** The seven instance keys
+  (`ADMIN`, `NEXT_ID`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG`) are now
+  constants in `alert_registry::instance_key`, so a mistyped key no longer
+  compiles. The symbol values are byte-identical, so existing deployments need
+  no migration (they are not `DataKey` variants, whose encoding would differ).
+  The dead `DataKey::NextId` variant, which never stored anything, is removed
+  and the docs that pointed at it are corrected. (issue #211)
 - **Index TTL refresh in `deactivate_alert_by_admin`, `update_target_contract`
   and `transfer_alert_ownership`.** The code fix landed with the
   `persist_alert` / `touch_alert` refactor (#213); a regression test now also
