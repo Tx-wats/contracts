@@ -196,7 +196,25 @@ use watcher_registry_interface::WatcherRegistryClient as ExtWatcherClient;
 impl AlertRegistry {
     // ── Admin / configuration ─────────────────────────────────────────────
 
+    /// Atomic constructor called during contract deployment to initialize the bootstrap admin.
+    ///
+    /// Running atomically with deployment prevents front-running the initialization window.
+    pub fn __constructor(env: Env, admin: Address) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ADMIN"), &admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("init")),
+            (admin,),
+        );
+    }
+
     /// Initialize the optional admin role for the registry. Can only be called once.
+    ///
+    /// Kept for backwards compatibility. If the contract was initialized
+    /// via [`Self::__constructor`] during deployment, calling this again returns
+    /// [`ContractError::AlreadyInitialized`].
     /// # Errors
     /// Returns [`ContractError::AlreadyInitialized`] if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {

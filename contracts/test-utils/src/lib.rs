@@ -60,10 +60,9 @@ pub fn setup_watcher_registry() -> (Env, Address, WatcherRegistryClient<'static>
     use soroban_sdk::testutils::Address as _;
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(WatcherRegistry, ());
-    let client = WatcherRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let contract_id = env.register(WatcherRegistry, (&admin,));
+    let client = WatcherRegistryClient::new(&env, &contract_id);
     (env, admin, client)
 }
 
