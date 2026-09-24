@@ -1,4 +1,14 @@
+//! `AlertRegistry` — Soroban contract that stores alert configurations on-chain,
+//! keyed by the contract address they watch.
+//!
+//! See `docs/alert-registry.md` for the function reference.
 #![no_std]
+// Doc coverage is enforced by scripts/check-docs.sh in CI rather than by
+// `#![warn(missing_docs)]` here: Soroban's contract macros generate
+// undocumented public items, which clippy's `-D warnings` would turn into
+// errors. Intra-doc links inside `#[contractimpl]` must use the full type path
+// (not `Self::`) because the macro copies method docs into generated modules.
+#![warn(rustdoc::broken_intra_doc_links)]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec,
@@ -13,8 +23,7 @@ contractmeta!(key = "Version", val = "0.1.0");
 // ── Storage keys ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[path = "tests.rs"]
-mod contract_tests;
+mod tests;
 
 #[cfg(test)]
 #[path = "regression_tests.rs"]
@@ -29,11 +38,13 @@ mod proptests;
 /// See `docs/ttl.md` for the full rationale.
 pub const DEFAULT_TTL: u32 = 17_280;
 
-/// Protocol-enforced upper bound on caller-specified TTL values.
+/// Upper bound on the TTL, in ledgers, that [`AlertRegistry::bump_alert`]
+/// applies.
 ///
-/// Callers may request any TTL up to this value when calling
-/// [`AlertRegistry::bump_alert`].  Requests above this cap are silently
-/// clamped to `MAX_TTL`.
+/// Callers should request at most this value. The current build caps larger
+/// requests at `MAX_TTL` and reports the TTL it actually applied in the
+/// `alert.bump` event, but whether over-cap requests should be capped or
+/// rejected is an open question (#28), so do not rely on the capping.
 ///
 /// Approximately 31 days at the nominal 5-second ledger close time.
 pub const MAX_TTL: u32 = 535_680;
@@ -59,22 +70,35 @@ pub enum DataKey {
     NextId,
 }
 
+/// Errors returned by `AlertRegistry` entry points.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
+    /// The caller is not the alert owner or the admin required for this call.
     Unauthorized = 1,
+    /// No alert exists with the given ID (never registered, removed, or expired).
     AlertNotFound = 2,
+    /// `initialize` was called on an already initialized contract.
     AlreadyInitialized = 3,
+    /// An admin-only call was made before `initialize` set an admin.
     NotInitialized = 4,
     /// Returned when a watcher registry is configured and the querying address
     /// is not a registered watcher.
     NotAWatcher = 5,
+    /// The webhook hash is not exactly 64 characters (a hex SHA-256 digest).
     InvalidWebhookHash = 6,
+    /// The label exceeds 128 bytes.
     LabelTooLong = 7,
+    /// The rule list exceeds the 50-rule maximum.
     TooManyRules = 8,
+    /// A rule is not a recognised rule descriptor.
     InvalidRuleDescriptor = 9,
+    /// The owner is already at the per-owner alert limit
+    /// (set via `set_per_owner_alert_limit`).
     OwnerAlertLimitExceeded = 10,
+    /// The alert ID is already present in the owner or contract index
+    /// (an internal invariant violation).
     DuplicateAlertId = 11,
     /// Returned by `confirm_webhook` when no webhook rotation is in progress.
     NoPendingWebhook = 12,
@@ -162,11 +186,22 @@ pub struct AlertInput {
 ///
 /// # Watcher-gating (optional)
 /// When a `WatcherRegistry` contract address is configured via
-/// [`set_watcher_registry`], the read-only query functions
-/// (`get_alerts_for_contract`, `get_alerts_by_owner`, and their paginated
-/// variants) will perform a cross-contract call to verify that the querying
-/// address is a registered watcher before returning data. Callers that are not
-/// registered watchers receive [`ContractError::NotAWatcher`].
+/// [`AlertRegistry::set_watcher_registry`], every read that returns alert
+/// content performs a cross-contract call to verify that its `querier`
+/// argument is a registered watcher before returning data:
+///
+/// - [`AlertRegistry::get_alert`]
+/// - [`AlertRegistry::get_alert_active`]
+/// - [`AlertRegistry::get_alert_owner`]
+/// - [`AlertRegistry::get_alerts_for_contract`]
+/// - [`AlertRegistry::get_active_alerts_for_contract`]
+/// - [`AlertRegistry::get_alerts_by_owner`]
+/// - [`AlertRegistry::get_contract_alerts_paginated`]
+/// - [`AlertRegistry::get_alerts_by_owner_paginated`]
+///
+/// Callers that are not registered watchers receive
+/// [`ContractError::NotAWatcher`]. Reads that expose only IDs or counts
+/// (for example [`AlertRegistry::get_alert_ids_by_owner`]) are not gated.
 ///
 /// If no watcher registry is configured the gating is skipped and the
 /// functions behave as before.
@@ -174,7 +209,7 @@ pub struct AlertInput {
 /// # Storage and TTL
 /// All persistent entries are extended by [`DEFAULT_TTL`] ledgers (~24 hours) on every
 /// write. Callers can extend any alert up to [`MAX_TTL`] ledgers (~31 days) via
-/// [`bump_alert`]. See `docs/ttl.md` for full details.
+/// [`AlertRegistry::bump_alert`]. See `docs/ttl.md` for full details.
 #[contract]
 pub struct AlertRegistry;
 
@@ -198,7 +233,25 @@ use watcher_registry_interface::WatcherRegistryClient as ExtWatcherClient;
 impl AlertRegistry {
     // ── Admin / configuration ─────────────────────────────────────────────
 
+    /// Atomic constructor called during contract deployment to initialize the bootstrap admin.
+    ///
+    /// Running atomically with deployment prevents front-running the initialization window.
+    pub fn __constructor(env: Env, admin: Address) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ADMIN"), &admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("init")),
+            (admin,),
+        );
+    }
+
     /// Initialize the optional admin role for the registry. Can only be called once.
+    ///
+    /// Kept for backwards compatibility. If the contract was initialized
+    /// via [`Self::__constructor`] during deployment, calling this again returns
+    /// [`ContractError::AlreadyInitialized`].
     /// # Errors
     /// Returns [`ContractError::AlreadyInitialized`] if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
@@ -278,7 +331,7 @@ impl AlertRegistry {
             .ok_or(ContractError::NotInitialized)
     }
 
-    /// Pause the contract, rejecting all state-mutating calls until [`Self::unpause`] is called.
+    /// Pause the contract, rejecting all state-mutating calls until [`AlertRegistry::unpause`] is called.
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
     /// compromised — mutations can be frozen while the incident is investigated.
@@ -298,7 +351,7 @@ impl AlertRegistry {
         Ok(())
     }
 
-    /// Resume normal operation after a [`Self::pause`].
+    /// Resume normal operation after a [`AlertRegistry::pause`].
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
     /// # Errors
@@ -357,7 +410,7 @@ impl AlertRegistry {
 
     /// Set a per-contract active alert limit (admin only). A value of `0` means no limit.
     ///
-    /// Symmetric to [`set_per_owner_alert_limit`]: that limit bounds how many
+    /// Symmetric to [`AlertRegistry::set_per_owner_alert_limit`]: that limit bounds how many
     /// alerts a single owner may register, while this one bounds how many
     /// alerts (contributed by any number of distinct owners) may target a
     /// single `target_contract`, closing the gap where a target contract
@@ -397,9 +450,9 @@ impl AlertRegistry {
     /// (admin only). A value of `0` means no limit.
     ///
     /// This bounds the cost of registry-wide scans such as
-    /// [`get_alerts_modified_since`], which iterate ID ranges derived from
+    /// [`AlertRegistry::get_alerts_modified_since`], which iterate ID ranges derived from
     /// the total alert count: without a ceiling, an attacker could inflate
-    /// that count via repeated [`register_alert`] calls to degrade the read
+    /// that count via repeated [`AlertRegistry::register_alert`] calls to degrade the read
     /// path for every caller.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
@@ -726,7 +779,7 @@ impl AlertRegistry {
     /// Stage a replacement webhook hash without taking it live.
     ///
     /// The alert keeps delivering to its current `webhook_hash` until
-    /// [`Self::confirm_webhook`] promotes the staged value, so a mistyped or
+    /// [`AlertRegistry::confirm_webhook`] promotes the staged value, so a mistyped or
     /// unreachable endpoint can never silently displace a working one. Calling
     /// this again before confirming overwrites the staged value.
     ///
@@ -917,6 +970,9 @@ impl AlertRegistry {
     /// Unlike [`Self::bump_alert`], this is owner-authenticated and leaves
     /// `updated_at` and `updated_ledger` alone, so renewing storage never looks like an edit to
     /// downstream consumers polling `get_alerts_modified_since` or `get_alerts_modified_since_ledger`.
+    /// Unlike [`AlertRegistry::bump_alert`], this is owner-authenticated and leaves
+    /// `updated_at` alone, so renewing storage never looks like an edit to
+    /// downstream consumers polling `get_alerts_modified_since`.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be the
@@ -979,9 +1035,7 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
-    ///
-    /// # Panics
-    /// Panics if `label` exceeds 128 bytes.
+    /// Returns [`ContractError::LabelTooLong`] if `label` exceeds 128 bytes.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("label"))` with data `(id: u64, caller: Address)`.
@@ -1089,7 +1143,7 @@ impl AlertRegistry {
 
     /// Deactivate an alert without deleting its record (admin only).
     ///
-    /// Unlike [`Self::remove_alert_by_admin`], the alert config and its
+    /// Unlike [`AlertRegistry::remove_alert_by_admin`], the alert config and its
     /// indexes are left intact — only the `active` flag is cleared — so
     /// history is preserved for e.g. spam/abuse moderation.
     ///
@@ -1196,7 +1250,7 @@ impl AlertRegistry {
     /// Register multiple alert configs in a single call.
     ///
     /// Each input is validated and authorized exactly as
-    /// [`Self::register_alert`] would, and each successful registration emits
+    /// [`AlertRegistry::register_alert`] would, and each successful registration emits
     /// the same `(Symbol("alert"), Symbol("register"))` event. If any input
     /// fails validation or authorization, the entire batch (including any
     /// alerts already registered earlier in the same call) is rolled back,
@@ -1208,7 +1262,7 @@ impl AlertRegistry {
     /// # Returns
     /// The new alerts' numeric IDs, in the same order as `inputs`.
     /// # Errors
-    /// Returns the same errors as [`Self::register_alert`] for the failing item.
+    /// Returns the same errors as [`AlertRegistry::register_alert`] for the failing item.
     pub fn batch_register_alert(
         env: Env,
         inputs: Vec<AlertInput>,
@@ -1231,7 +1285,7 @@ impl AlertRegistry {
 
     /// Remove multiple alert configs owned by `caller` in a single call.
     ///
-    /// Each ID is validated and authorized exactly as [`Self::remove_alert`]
+    /// Each ID is validated and authorized exactly as [`AlertRegistry::remove_alert`]
     /// would, and each successful removal emits the same
     /// `(Symbol("alert"), Symbol("remove"))` event. If any ID does not exist
     /// or is not owned by `caller`, the entire batch is rolled back, since
@@ -1265,9 +1319,10 @@ impl AlertRegistry {
 
     /// Extend the TTL of an alert and its associated indexes.
     ///
-    /// Callers may request any TTL up to [`MAX_TTL`] ledgers.  Values above
-    /// the cap are silently clamped to `MAX_TTL`, so callers can safely pass
-    /// `u32::MAX` to request the longest possible lifetime.
+    /// Callers should request at most [`MAX_TTL`] ledgers. Larger values are
+    /// currently capped at `MAX_TTL`, and the TTL actually applied is reported
+    /// in the `alert.bump` event; see [`MAX_TTL`] for why callers should not
+    /// rely on the capping.
     ///
     /// This is the primary mechanism for keeping long-lived alerts alive
     /// without modifying their content.  Unlike `update_alert`, this function
@@ -1276,7 +1331,7 @@ impl AlertRegistry {
     ///
     /// # Arguments
     /// * `config_id` - ID of the alert to extend.
-    /// * `ttl`       - Desired TTL in ledgers (clamped to [`MAX_TTL`]).
+    /// * `ttl`       - Desired TTL in ledgers, at most [`MAX_TTL`].
     ///
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
@@ -1346,7 +1401,7 @@ impl AlertRegistry {
 
     /// Retrieve only the active alert configs that watch a given contract address.
     ///
-    /// Equivalent to [`get_alerts_for_contract`] but filters out any entries
+    /// Equivalent to [`AlertRegistry::get_alerts_for_contract`] but filters out any entries
     /// where `active == false`. Returns an empty vec if no active alerts exist
     /// for `target_contract`.
     ///
@@ -1387,11 +1442,11 @@ impl AlertRegistry {
     /// Retrieve the raw list of alert IDs owned by a given address.
     ///
     /// Thin wrapper over the underlying `OwnerIndex` entry. Use this instead
-    /// of [`Self::get_alerts_by_owner`] when only the IDs are needed (e.g. an
+    /// of [`AlertRegistry::get_alerts_by_owner`] when only the IDs are needed (e.g. an
     /// existence check or a count) so callers don't pay the cost of
     /// deserializing every full [`AlertConfig`].
     ///
-    /// Unlike [`Self::get_alerts_by_owner`], this is not subject to
+    /// Unlike [`AlertRegistry::get_alerts_by_owner`], this is not subject to
     /// watcher-gating, since it exposes no alert content.
     ///
     /// Returns an empty vec if `owner` has no registered alerts.
@@ -1545,8 +1600,6 @@ impl AlertRegistry {
     ///
     /// # Returns
     /// The number of alerts that were deactivated.
-    /// # Panics
-    /// Panics if the contract's stored state is malformed or missing.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("bulk_off"))` with data
@@ -1559,8 +1612,7 @@ impl AlertRegistry {
         }
         let ids = Self::owner_index(&env, &caller);
         let mut count: u32 = 0;
-        for i in 0..ids.len() {
-            let id = ids.get(i).unwrap();
+        for id in ids.iter() {
             if let Some(mut cfg) = env
                 .storage()
                 .persistent()
@@ -1691,7 +1743,7 @@ impl AlertRegistry {
     ///
     /// The scan cost of a single call is bounded by `limit`, not by the total
     /// size of the registry, so callers should page through with a bounded
-    /// `limit` (see [`get_global_alert_limit`] for an admin-settable ceiling
+    /// `limit` (see [`AlertRegistry::get_global_alert_limit`] for an admin-settable ceiling
     /// on total registry size) rather than requesting the whole ID space in
     /// one call. Callers that need every alert should page repeatedly,
     /// advancing `offset` by `limit` each call until fewer than `limit`
@@ -1798,9 +1850,9 @@ impl AlertRegistry {
     /// Get the total number of alerts ever registered.
     ///
     /// This is a **monotonic counter** — it only increases and is never
-    /// decremented when alerts are removed. Use [`get_non_removed_alert_count`]
+    /// decremented when alerts are removed. Use [`AlertRegistry::get_non_removed_alert_count`]
     /// if you need the number of currently live (non-removed) alerts for a
-    /// given owner, or [`get_active_alert_count`] for the number that are
+    /// given owner, or [`AlertRegistry::get_active_alert_count`] for the number that are
     /// still active.
     #[must_use]
     pub fn get_alert_count(env: Env) -> u64 {
@@ -1812,16 +1864,16 @@ impl AlertRegistry {
 
     /// Get the number of currently active alerts owned by `owner`.
     ///
-    /// Unlike [`get_alert_count`], this reflects removals and only counts
+    /// Unlike [`AlertRegistry::get_alert_count`], this reflects removals and only counts
     /// alerts with `active == true` — deactivated-but-not-removed alerts are
     /// excluded, so the result matches the `active` flag of the alerts
-    /// returned by [`Self::get_alerts_by_owner`].
+    /// returned by [`AlertRegistry::get_alerts_by_owner`].
     ///
     /// Scans the owner's [`DataKey::OwnerIndex`] and reads the cheap
     /// [`DataKey::AlertActive`] flag for each entry, so it reflects both
     /// removals and deactivations. If you only need the number of live
     /// (non-removed) alerts regardless of the `active` flag, use
-    /// [`Self::get_non_removed_alert_count`], which is an O(1) lookup.
+    /// [`AlertRegistry::get_non_removed_alert_count`], which is an O(1) lookup.
     #[must_use]
     pub fn get_active_alert_count(env: Env, owner: Address) -> u32 {
         let ids = Self::owner_index(&env, &owner);
@@ -1842,11 +1894,11 @@ impl AlertRegistry {
 
     /// Get the number of currently live (non-removed) alerts owned by `owner`.
     ///
-    /// Unlike [`Self::get_active_alert_count`], this does **not** filter by
+    /// Unlike [`AlertRegistry::get_active_alert_count`], this does **not** filter by
     /// the `active` flag: deactivated-but-not-removed alerts still count.
     ///
     /// Backed by a running counter maintained incrementally by
-    /// [`Self::push_owner_index`]/[`Self::remove_from_owner_index`], so this
+    /// [`AlertRegistry::push_owner_index`]/[`AlertRegistry::remove_from_owner_index`], so this
     /// is an O(1) lookup regardless of how many alerts `owner` has ever
     /// registered — it never rescans the owner's index.
     #[must_use]
@@ -1854,18 +1906,16 @@ impl AlertRegistry {
         Self::owner_active_count(&env, &owner)
     }
 
-    /// Get the number of currently active (non-removed) alerts targeting `target_contract`,
-    /// aggregated across every contributing owner.
+    /// Get the number of live (non-removed, unexpired) alerts targeting
+    /// `target_contract`, aggregated across every contributing owner.
     ///
-    /// Symmetric to [`get_active_alert_count`], but keyed by target contract
-    /// instead of owner.
-    /// # Panics
-    /// Panics if the contract's stored state is malformed or missing.
+    /// Keyed by target contract rather than owner. Unlike
+    /// [`AlertRegistry::get_active_alert_count`], this does **not** filter by the
+    /// `active` flag: deactivated-but-not-removed alerts still count.
     pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
         let ids = Self::contract_index(&env, &target_contract);
         let mut count: u32 = 0;
-        for i in 0..ids.len() {
-            let id = ids.get(i).unwrap();
+        for id in ids.iter() {
             if env.storage().persistent().has(&DataKey::Alert(id)) {
                 count += 1;
             }
@@ -2132,7 +2182,7 @@ impl AlertRegistry {
         out
     }
 
-    /// Like [`configs_for_ids`] but only includes entries where `active == true`.
+    /// Like [`AlertRegistry::configs_for_ids`] but only includes entries where `active == true`.
     ///
     /// IDs that no longer exist in storage are silently skipped, as are configs
     /// whose `active` field is `false`.

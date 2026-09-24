@@ -156,9 +156,22 @@ Updates the rules and active status of an existing alert. Only the original owne
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
 
 ---
+### `__constructor`
+
+Atomic constructor executed during deployment via `stellar contract deploy -- --admin <ADDRESS>`. Sets up the initial admin in the same transaction as deployment, closing the front-running window.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Address to assign as initial admin |
+
+**Returns:** nothing
+
+---
 ### `initialize`
 
-Initializes an optional admin for the contract. Can only be called once.
+Initializes an optional admin for the contract. Retained for backwards compatibility. If the contract was initialized at deployment via `__constructor`, calling `initialize` returns `ContractError::AlreadyInitialized`.
 
 **Parameters**
 
