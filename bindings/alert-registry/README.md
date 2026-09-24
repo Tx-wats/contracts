@@ -83,6 +83,7 @@ The bindings provide TypeScript types and methods for all AlertRegistry contract
 - `get_contract_alerts_paginated` - Get paginated alerts for a contract
 - `get_alerts_by_owner_paginated` - Get paginated alerts by owner
 - `get_alerts_modified_since` - Get a bounded page of alerts modified since a timestamp
+- `get_alerts_modified_since_ledger` - Get a bounded page of alerts modified since a monotonic ledger sequence
 - `get_alert_count` - Get total number of alerts ever registered
 - `get_active_alert_count` - Get number of active alerts for an owner
 - `get_active_contract_alert_count` - Get number of active alerts for a target contract

@@ -381,6 +381,13 @@ stellar contract invoke \
   --offset 0 \
   --limit 50
 
+# Query alerts modified since monotonic ledger sequence (unambiguous sync)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_alerts_modified_since_ledger \
+  --since_ledger 123450
+
 # Get total cumulative alert count
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
