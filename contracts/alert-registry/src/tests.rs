@@ -2666,6 +2666,33 @@ fn test_get_alert_ids_by_owner() {
     assert_eq!(client.get_alert_ids_by_owner(&other).len(), 0);
 }
 
+#[test]
+fn test_get_alerts_by_ids_preserves_order_and_skips_missing() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let first = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "first"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    let second = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "second"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    client.remove_alert(&owner, &first);
+
+    let configs =
+        client.get_alerts_by_ids(&Address::generate(&env), &vec![&env, 999, second, first]);
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs.get(0).unwrap().label, str(&env, "second"));
+}
+
 // 10. Paginated queries work without watcher gating
 #[test]
 fn test_paginated_queries_no_gating() {

@@ -444,6 +444,16 @@ If a `WatcherRegistry` is configured (via `set_watcher_registry`), `querier` mus
 
 ---
 
+### `get_alerts_by_ids`
+
+Returns alert configurations for a supplied list of IDs in input order,
+omitting IDs whose records no longer exist or have expired. Watcher
+authorization, when configured, is checked once for the entire batch. Use this
+when IDs came from `get_alert_ids_by_owner` or event processing instead of
+calling `get_alert` separately for every ID.
+
+---
+
 ### `get_alert_active`
 
 Cheap read-only function that returns just the `active` bool for a given alert ID, avoiding the cost of deserializing the full [`AlertConfig`](#alertconfig). The active flag is stored under a dedicated storage key (`DataKey::AlertActive`).

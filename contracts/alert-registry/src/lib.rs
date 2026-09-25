@@ -1824,6 +1824,24 @@ impl AlertRegistry {
         Self::owner_index(&env, &owner)
     }
 
+    /// Retrieve alert configs for a list of IDs in one call.
+    ///
+    /// IDs are returned in the same order as `ids`; records that no longer
+    /// exist or have expired are silently omitted. If a `WatcherRegistry` is
+    /// configured, `querier` is authorized once for the whole batch.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_alerts_by_ids(
+        env: Env,
+        querier: Address,
+        ids: Vec<u64>,
+    ) -> Result<Vec<AlertConfig>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
+        Ok(Self::configs_for_ids(&env, &ids))
+    }
+
     /// Get a page of alert configs for a target contract (offset + limit).
     ///
     /// If a `WatcherRegistry` is configured, `querier` must be a registered
