@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Owner live-counter TTL refresh.** The code fix landed with the
+  `persist_alert` / `touch_alert` refactor (#213), which extends the per-owner
+  counter on every mutation, `bump_alert` and `renew_alert_ttl`. A
+  ledger-advancement regression test now keeps an alert alive across several
+  TTL periods with keep-alive calls only and checks the counter never lapses
+  and the per-owner limit still holds. (issue #207)
 - **`update_webhook` left a stale pending hash that later overwrote it.**
   `propose_webhook(B)` → `update_webhook(C)` → `confirm_webhook()` promoted the
   stale `B` over the direct update to `C`. `update_webhook` now clears

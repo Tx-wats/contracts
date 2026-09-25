@@ -728,3 +728,65 @@ fn test_regression_alert_transfer_rejects_self_and_paused() {
         ContractError::Paused
     );
 }
+
+/// Advance the ledger to one ledger short of `DEFAULT_TTL`, i.e. the last
+/// ledger at which an entry written or extended `DEFAULT_TTL` ago is still live.
+fn advance_almost_default_ttl(env: &Env) {
+    env.ledger()
+        .with_mut(|li| li.sequence_number += crate::DEFAULT_TTL - 1);
+}
+
+/// Regression test for #207 (ledger advancement):
+/// the per-owner live counter used to be extended only when an alert was
+/// registered or removed, so an owner who only bumped or renewed their alert
+/// saw the counter expire after ~24 hours, read `0`, and could register a
+/// whole new quota. Keep an alert alive across several TTL periods using only
+/// `bump_alert` and `renew_alert_ttl`: the counter must stay live and the
+/// per-owner limit must still hold.
+#[test]
+fn test_regression_owner_live_count_survives_keepalive_only_activity() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &1);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Kept Alive"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    for period in 0..4 {
+        advance_almost_default_ttl(&env);
+        if period % 2 == 0 {
+            client.bump_alert(&id, &crate::DEFAULT_TTL);
+        } else {
+            client.renew_alert_ttl(&owner, &id);
+        }
+        let [_, _, _, live_count_ttl, _] = alert_entry_ttls(&env, &client, id, &owner, &target);
+        assert_eq!(
+            live_count_ttl,
+            crate::DEFAULT_TTL,
+            "OwnerLiveCount TTL must be refreshed in period {period}"
+        );
+    }
+
+    assert_eq!(client.get_non_removed_alert_count(&owner), 1);
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, "Second"),
+                &hash64(&env),
+                &vec![&env, str(&env, "rule:transfer")],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::OwnerAlertLimitExceeded,
+        "the limit must still apply after the original counter write would have expired"
+    );
+}
