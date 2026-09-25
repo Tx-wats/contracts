@@ -72,6 +72,9 @@ pub const MAX_PAGE_SIZE: u32 = 100;
 pub enum DataKey {
     /// Stores an [`AlertConfig`] keyed by its numeric ID.
     Alert(u64),
+    /// Stores the last config for a removed alert so incremental sync can
+    /// deliver an inactive tombstone.
+    RemovedAlert(u64),
     /// Stores just the `active` bool separately so it can be read without
     /// deserializing the full [`AlertConfig`].
     AlertActive(u64),
@@ -210,6 +213,9 @@ pub enum ContractError {
     /// admin transfer is currently pending, or when the accepting address does
     /// not match the proposed address.
     NoPendingTransfer = 16,
+    /// Returned by `propose_webhook` when the proposed hash is already live
+    /// or already pending.
+    NoopWebhookRotation = 22,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -1131,6 +1137,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
+    /// Returns [`ContractError::NoopWebhookRotation`] if `webhook_hash` is
+    /// already live or is already pending.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("wh_prop"))` with data `(id: u64, caller: Address)`.
@@ -1150,6 +1158,12 @@ impl AlertRegistry {
             .ok_or(ContractError::AlertNotFound)?;
 
         Self::assert_owner(&config, &caller)?;
+
+        if config.webhook_hash == webhook_hash
+            || config.pending_webhook_hash.as_ref() == Some(&webhook_hash)
+        {
+            return Err(ContractError::NoopWebhookRotation);
+        }
 
         // The live hash is deliberately left untouched until confirmation.
         config.pending_webhook_hash = Some(webhook_hash);
@@ -2237,10 +2251,9 @@ impl AlertRegistry {
     /// * `limit` - Maximum number of IDs to scan starting at `offset`.
     ///
     /// # Returns
-    /// A `Vec<AlertConfig>` containing every live alert in the ID range
-    /// `[offset, offset + limit)` (clamped to the current alert count) with
-    /// `updated_at >= since`. Alerts that have been removed (and whose storage
-    /// entry has therefore expired) are silently omitted.
+    /// A `Vec<AlertConfig>` containing every live alert or removal tombstone
+    /// in the ID range `[offset, offset + limit)` (clamped to the current
+    /// alert count) with `updated_at >= since`.
     ///
     /// # Note
     /// Because multiple ledgers can share the same close-time second, timestamp-based
@@ -2253,8 +2266,8 @@ impl AlertRegistry {
     /// `limit` (see [`AlertRegistry::get_global_alert_limit`] for an admin-settable ceiling
     /// on total registry size) rather than requesting the whole ID space in
     /// one call. Callers that need every alert should page repeatedly,
-    /// advancing `offset` by `limit` each call until fewer than `limit`
-    /// results are returned.
+    /// advancing `offset` by `limit` until it reaches `get_alert_count()`;
+    /// a short or empty result page does not indicate that the scan is complete.
     #[must_use]
     pub fn get_alerts_modified_since(env: Env, since: u64, offset: u32, limit: u32) -> Vec<AlertConfig> {
         let total: u64 = env
@@ -2274,6 +2287,11 @@ impl AlertRegistry {
                 .storage()
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
+                .or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get::<DataKey, AlertConfig>(&DataKey::RemovedAlert(id))
+                })
             {
                 if cfg.updated_at >= since {
                     out.push_back(cfg);
@@ -2297,8 +2315,9 @@ impl AlertRegistry {
     /// 1. Initialize `cursor_ledger = 0` (or the last-synced ledger sequence).
     /// 2. For each polling cycle:
     ///    a. Call `get_alerts_modified_since_ledger(env, cursor_ledger, offset, limit)`
-    ///       paginating by advancing `offset += limit` until an empty page or fewer than
-    ///       `limit` items are returned.
+    ///       paginating by advancing `offset += limit` until `offset` reaches
+    ///       `get_alert_count()`. Empty or short pages can contain no matching
+    ///       alerts while later IDs still match.
     ///    b. For each returned alert, update local state and track the highest ledger
     ///       seen: `max_ledger = max(max_ledger, alert.updated_ledger)`.
     ///    c. After finishing the registry scan, advance the cursor:
@@ -2311,9 +2330,9 @@ impl AlertRegistry {
     /// * `limit` - Maximum number of IDs to scan starting at `offset`.
     ///
     /// # Returns
-    /// A `Vec<AlertConfig>` containing every live alert in the ID range
-    /// `[offset, offset + limit)` (clamped to the current alert count) with
-    /// `updated_ledger >= since_ledger`. Alerts that have been removed are silently omitted.
+    /// A `Vec<AlertConfig>` containing every live alert or removal tombstone
+    /// in the ID range `[offset, offset + limit)` (clamped to the current
+    /// alert count) with `updated_ledger >= since_ledger`.
     ///
     /// # Note
     /// The scan cost of a single call is bounded by `limit`, not by the total
@@ -2345,6 +2364,11 @@ impl AlertRegistry {
                 .storage()
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
+                .or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get::<DataKey, AlertConfig>(&DataKey::RemovedAlert(id))
+                })
             {
                 if cfg.updated_ledger >= since_ledger {
                     out.push_back(cfg);
@@ -2413,13 +2437,26 @@ impl AlertRegistry {
         Self::owner_live_count(&env, &owner)
     }
 
-    /// Get the number of live (non-removed, unexpired) alerts targeting
+    /// Get the number of active (non-removed, unexpired) alerts targeting
     /// `target_contract`, aggregated across every contributing owner.
     ///
     /// Keyed by target contract rather than owner. Unlike
-    /// [`AlertRegistry::get_active_alert_count`], this does **not** filter by the
-    /// `active` flag: deactivated-but-not-removed alerts still count.
+    /// [`AlertRegistry::get_non_removed_alert_count`], this filters by the
+    /// `active` flag and excludes deactivated alerts.
     pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
+        let ids = Self::contract_index(&env, &target_contract);
+        let mut count: u32 = 0;
+        for id in ids.iter() {
+            if env
+                .storage()
+                .persistent()
+                .get::<DataKey, bool>(&DataKey::AlertActive(id))
+                == Some(true)
+            {
+                count += 1;
+            }
+        }
+        count
         Self::contract_live_count(&env, &target_contract)
     }
 
@@ -2611,6 +2648,19 @@ impl AlertRegistry {
 
     fn remove_alert_record(env: &Env, config: &AlertConfig, config_id: u64, caller: &Address) {
         Self::clear_pending_transfer(env, config_id);
+        let mut tombstone = config.clone();
+        tombstone.pending_webhook_hash = None;
+        tombstone.active = false;
+        tombstone.updated_at = env.ledger().timestamp();
+        tombstone.updated_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::RemovedAlert(config_id), &tombstone);
+        env.storage().persistent().extend_ttl(
+            &DataKey::RemovedAlert(config_id),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
         env.storage()
             .persistent()
             .remove(&DataKey::AdminSuspended(config_id));

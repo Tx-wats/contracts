@@ -1042,6 +1042,55 @@ fn test_propose_webhook_overwrites_previous_pending() {
     assert_eq!(cfg.webhook_hash, hash64c(&env, 's'));
 }
 
+#[test]
+fn test_propose_webhook_rejects_live_hash_without_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let hash = hash64c(&env, 'a');
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash,
+        &vec![&env],
+    );
+    let event_count = env.events().all().len();
+
+    assert_eq!(
+        client.try_propose_webhook(&owner, &id, &hash).unwrap_err().unwrap(),
+        ContractError::NoopWebhookRotation
+    );
+    assert_eq!(env.events().all().len(), event_count);
+    assert!(client.get_alert(&owner, &id).unwrap().pending_webhook_hash.is_none());
+}
+
+#[test]
+fn test_propose_webhook_rejects_pending_hash_without_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64c(&env, 'a'),
+        &vec![&env],
+    );
+    let pending = hash64c(&env, 'b');
+    client.propose_webhook(&owner, &id, &pending);
+    let event_count = env.events().all().len();
+
+    assert_eq!(
+        client
+            .try_propose_webhook(&owner, &id, &pending)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::NoopWebhookRotation
+    );
+    assert_eq!(env.events().all().len(), event_count);
+}
+
 // Full rotation flow: propose → confirm → propose again → confirm again
 #[test]
 fn test_webhook_rotation_full_cycle() {
@@ -1820,12 +1869,14 @@ fn test_get_alerts_modified_since_ledger_precision() {
     assert_eq!(page2.len(), 1);
     assert_eq!(page2.get(0).unwrap().label, str(&env, "A1"));
 
-    // Removed alerts are excluded
+    // Removed alerts are returned as inactive tombstones
     client.remove_alert(&owner, &id1);
     let res_after_remove = client.get_alerts_modified_since_ledger(&0, &0u32, &u32::MAX);
-    assert_eq!(res_after_remove.len(), 2);
+    assert_eq!(res_after_remove.len(), 3);
     assert_eq!(res_after_remove.get(0).unwrap().label, str(&env, "A0"));
-    assert_eq!(res_after_remove.get(1).unwrap().label, str(&env, "A2"));
+    assert_eq!(res_after_remove.get(1).unwrap().label, str(&env, "A1"));
+    assert!(!res_after_remove.get(1).unwrap().active);
+    assert_eq!(res_after_remove.get(2).unwrap().label, str(&env, "A2"));
 }
 
 #[test]
@@ -2632,6 +2683,24 @@ fn test_per_contract_alert_limit_freed_by_removal() {
         &vec![&env, str(&env, "rule:mint")],
     );
     assert_eq!(client.get_active_contract_alert_count(&target), 1u32);
+}
+
+#[test]
+fn test_per_contract_alert_count_excludes_deactivated_alerts() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    assert_eq!(client.get_active_contract_alert_count(&target), 1u32);
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:transfer")], &false);
+    assert_eq!(client.get_active_contract_alert_count(&target), 0u32);
 }
 
 #[test]
