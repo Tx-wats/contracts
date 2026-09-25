@@ -52,6 +52,7 @@ describe("AlertRegistry bindings", () => {
     // Write methods (auth required)
     expect(typeof client.register_alert).toBe("function");
     expect(typeof client.update_alert).toBe("function");
+    expect(typeof client.set_alert_active).toBe("function");
     expect(typeof client.update_webhook).toBe("function");
     expect(typeof client.remove_alert).toBe("function");
     expect(typeof client.initialize).toBe("function");

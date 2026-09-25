@@ -100,6 +100,7 @@ extended when present; see `docs/storage.md`.)
 |-----------------------|-----------------|
 | `register_alert`      | Full set, to `DEFAULT_TTL` |
 | `update_alert`        | Full set, to `DEFAULT_TTL` |
+| `set_alert_active`    | Full set, to `DEFAULT_TTL` |
 | `update_webhook`      | Full set, to `DEFAULT_TTL` |
 | `update_label`        | Full set, to `DEFAULT_TTL` |
 | `propose_webhook`     | Full set, to `DEFAULT_TTL` |

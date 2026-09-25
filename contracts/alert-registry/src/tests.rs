@@ -3035,3 +3035,186 @@ fn test_clear_watcher_registry_disables_then_reconfigure() {
         ContractError::NotAWatcher
     );
 }
+
+// ── set_alert_active ─────────────────────────────────────────────────────────
+
+/// Deactivating an alert keeps its rules; reactivating keeps them too. Callers
+/// that only want to pause must not have to resend (and risk wiping) the rules.
+#[test]
+fn test_set_alert_active_keeps_rules() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "Alert"), &hash64(&env), &rules);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    client.set_alert_active(&owner, &id, &false);
+    let paused = client.get_alert(&owner, &id).unwrap();
+    assert!(!paused.active);
+    assert_eq!(paused.rules, rules);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+
+    client.set_alert_active(&owner, &id, &true);
+    let resumed = client.get_alert(&owner, &id).unwrap();
+    assert!(resumed.active);
+    assert_eq!(resumed.rules, rules);
+    assert_eq!(resumed.created_at, paused.created_at);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+}
+
+/// Only the owner may toggle an alert.
+#[test]
+fn test_set_alert_active_rejects_non_owner() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    assert_eq!(
+        client
+            .try_set_alert_active(&attacker, &id, &false)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+    assert!(client.get_alert(&owner, &id).unwrap().active);
+}
+
+#[test]
+fn test_set_alert_active_not_found() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+
+    assert_eq!(
+        client
+            .try_set_alert_active(&owner, &99u64, &false)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertNotFound
+    );
+}
+
+#[test]
+fn test_set_alert_active_blocked_by_pause() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    client.pause(&admin);
+
+    assert_eq!(
+        client
+            .try_set_alert_active(&owner, &id, &false)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Paused
+    );
+    assert!(client.get_alert(&owner, &id).unwrap().active);
+}
+
+#[test]
+fn test_set_alert_active_emits_event() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    client.set_alert_active(&owner, &id, &false);
+
+    let events = crate::emitted_events(&env);
+    let mut found = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        if topics.len() == 2
+            && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+            && Symbol::from_val(&env, &topics.get(1).unwrap()) == Symbol::new(&env, "set_active")
+        {
+            let (emitted_id, emitted_owner, emitted_active): (u64, Address, bool) =
+                FromVal::from_val(&env, &data);
+            assert_eq!(emitted_id, id);
+            assert_eq!(emitted_owner, owner);
+            assert!(!emitted_active);
+            found = true;
+        }
+    }
+    assert!(found, "alert.set_active event must be emitted");
+}
+
+/// Toggling follows the same auth rules as every other owner mutation.
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_alert_active_requires_auth() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(AlertRegistry, (admin.clone(),));
+    let client = AlertRegistryClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    env.mock_all_auths();
+    env.set_auths(&[]);
+    client.set_alert_active(&owner, &id, &false);
+}
+
+/// `updated_ledger` moves with the toggle, so ledger-keyed sync sees it.
+#[test]
+fn test_set_alert_active_updates_ledger_and_timestamp() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    env.ledger().set_sequence_number(1000);
+    env.ledger().set_timestamp(1_700_000_000);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    let before = client.get_alert(&owner, &id).unwrap();
+
+    env.ledger().set_sequence_number(1005);
+    env.ledger().set_timestamp(1_700_000_030);
+    client.set_alert_active(&owner, &id, &false);
+
+    let after = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(after.updated_ledger, 1005);
+    assert_eq!(after.updated_at, 1_700_000_030);
+    assert!(after.updated_ledger > before.updated_ledger);
+    let catch_up = client.get_alerts_modified_since_ledger(&before.updated_ledger, &0u32, &10u32);
+    assert_eq!(catch_up.len(), 1);
+    // The altered alert is the one the ledger-keyed sync has to pick up.
+    assert_eq!(catch_up.get(0).unwrap().updated_ledger, 1005);
+}

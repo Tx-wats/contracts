@@ -157,6 +157,34 @@ Updates the rules and active status of an existing alert. Only the original owne
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
 
 ---
+
+### `set_alert_active`
+
+Activates or deactivates a single alert **without resending its rules**. Use this
+instead of `update_alert` when you only want to pause or resume an alert:
+`update_alert` replaces the whole rule list, so a caller that passes an empty
+`Vec` wipes the rules by accident.
+
+**Requires auth:** `caller` (must match `owner` of the config)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert to toggle |
+| `active` | `bool` | New active status |
+
+**Returns:** nothing
+
+**Errors:** Returns `ContractError::AlertNotFound` if ID does not exist;
+`ContractError::Unauthorized` if caller is not the owner;
+`ContractError::Paused` if the registry is paused.
+
+`rules` and `created_at` are untouched; only `updated_at` and `updated_ledger`
+move, so ledger-keyed sync picks the change up.
+
+---
 ### `__constructor`
 
 Atomic constructor executed during deployment via `stellar contract deploy -- --admin <ADDRESS>`. Sets up the initial admin in the same transaction as deployment, closing the front-running window.

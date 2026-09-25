@@ -698,6 +698,61 @@ impl AlertRegistry {
         Ok(id)
     }
 
+    /// Activate or deactivate a single alert without resending its rules.
+    ///
+    /// [`AlertRegistry::update_alert`] replaces the whole rule list, so a client
+    /// that only wants to pause an alert has to read the rules back and send
+    /// them again — passing an empty `Vec` silently wipes them. This entrypoint
+    /// flips the `active` flag and leaves `rules` untouched, applying the same
+    /// auth, pause and ownership checks as `update_alert`.
+    ///
+    /// Reactivating an alert keeps its rules and its `created_at`; only
+    /// `updated_at` / `updated_ledger` move.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must also be
+    /// the original owner of the alert.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert's owner.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
+    /// # Panics
+    /// Panics if the contract's stored alert indexes are malformed.
+    pub fn set_alert_active(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        active: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let mut config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+
+        Self::assert_owner(&config, &caller)?;
+
+        config.active = active;
+        config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
+
+        Self::persist_alert(&env, config_id, &config);
+
+        // `symbol_short!` caps at 9 characters, so the second topic is built
+        // with `Symbol::new`.
+        env.events().publish(
+            (
+                symbol_short!("alert"),
+                soroban_sdk::Symbol::new(&env, "set_active"),
+            ),
+            (config_id, config.owner.clone(), active),
+        );
+        Ok(())
+    }
+
     /// Update the rules and active flag of an existing alert.
     ///
     /// # Auth

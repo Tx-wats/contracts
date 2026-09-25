@@ -51,7 +51,7 @@ Every mutator that rewrites an alert goes through `persist_alert`, which writes 
 
 | Function | Keys Extended |
 |---|---|
-| `register_alert`, `update_alert`, `update_webhook`, `update_label`, `propose_webhook`, `confirm_webhook`, `cancel_webhook_proposal`, `deactivate_alert_by_admin`, `renew_alert_ttl` | Full set, to `DEFAULT_TTL` |
+| `register_alert`, `update_alert`, `set_alert_active`, `update_webhook`, `update_label`, `propose_webhook`, `confirm_webhook`, `cancel_webhook_proposal`, `deactivate_alert_by_admin`, `renew_alert_ttl` | Full set, to `DEFAULT_TTL` |
 | `transfer_alert_ownership` | Full set with the new owner's `OwnerIndex`/`OwnerLiveCount`; the old owner's index and counter are rewritten and extended |
 | `update_target_contract` | Full set with the new target's `ContractIndex`; the old target's index is rewritten and extended |
 | `deactivate_all_alerts` | Full set for each deactivated alert |

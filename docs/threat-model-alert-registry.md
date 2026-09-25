@@ -39,7 +39,7 @@ The contract supports:
 ## What the Contract Protects Against
 
 ### 1. Unauthorized Modification and Deletion
-- **Owner-Exclusive Mutation**: `update_alert`, `update_label`, `update_webhook`, `propose_webhook`, `confirm_webhook`, `renew_alert_ttl`, and `remove_alert` require `caller.require_auth()` and verify that `caller == config.owner`. Non-owners receive `ContractError::Unauthorized`.
+- **Owner-Exclusive Mutation**: `update_alert`, `set_alert_active`, `update_label`, `update_webhook`, `propose_webhook`, `confirm_webhook`, `renew_alert_ttl`, and `remove_alert` require `caller.require_auth()` and verify that `caller == config.owner`. Non-owners receive `ContractError::Unauthorized`.
 - **Admin-Exclusive Operations**: `transfer_admin`, `set_per_owner_alert_limit`, `set_watcher_registry`, and `remove_alert_by_admin` enforce admin authorization via `admin.require_auth()` and `assert_admin()`. Unauthenticated or unauthorized callers receive `ContractError::Unauthorized`.
 
 ### 2. Webhook Endpoint Hijacking & Blackholing (Two-Phase Rotation)

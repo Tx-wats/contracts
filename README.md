@@ -200,6 +200,16 @@ stellar contract invoke \
   --rules '["rule:transfer"]' \
   --active true
 
+# Pause a single alert without resending its rules
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- set_alert_active \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --active false
+
 # Update alert label
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \

@@ -41,6 +41,22 @@ Emitted when an alert's rules or active flag are changed.
 
 ---
 
+### `alert.set_active`
+
+Emitted when a single alert is activated or deactivated through
+`set_alert_active`. The alert's rules are not part of the payload — they are
+unchanged by this call and can be read via `get_alert`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("set_active")` |
+| Data | `(id: u64, owner: Address, active: bool)` |
+
+**Status:** ✅ implemented (`set_alert_active`)
+
+---
+
 ### `alert.webhook`
 
 Emitted when an alert's webhook hash is rotated.

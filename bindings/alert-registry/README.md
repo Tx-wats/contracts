@@ -65,6 +65,7 @@ The bindings provide TypeScript types and methods for all AlertRegistry contract
 ### Write Methods (require authentication)
 - `register_alert` - Register a new alert configuration
 - `update_alert` - Update rules and active status
+- `set_alert_active` - Activate/deactivate a single alert without resending its rules
 - `update_webhook` - Update webhook hash
 - `remove_alert` - Remove an alert
 - `initialize` - Initialize the contract with an admin (one-time)

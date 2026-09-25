@@ -128,6 +128,7 @@ Every state-mutating public function in both contracts has been audited and equi
 |---|---|---|:---:|
 | `register_alert` | `owner` | `test_register_alert_requires_auth` | ✅ |
 | `update_alert` | `caller` (owner) | `test_update_alert_requires_auth` | ✅ |
+| `set_alert_active` | `caller` (owner) | `test_set_alert_active_requires_auth` | ✅ |
 | `update_webhook` | `caller` (owner) | `test_update_webhook_requires_auth` | ✅ |
 | `propose_webhook` | `caller` (owner) | `test_propose_webhook_requires_auth` | ✅ |
 | `confirm_webhook` | `caller` (owner) | `test_confirm_webhook_requires_auth` | ✅ |
