@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **`AlertActive` TTL refresh.** The code fix landed with #213
+  (`persist_alert` rewrites and extends the flag on every mutation). A
+  ledger-advancement regression test now edits an alert repeatedly while the
+  ledger moves past `DEFAULT_TTL` and checks the flag stays live and
+  `get_alert_active` / `get_active_alert_count` stay correct. (issue #208)
 - **Owner live-counter TTL refresh.** The code fix landed with the
   `persist_alert` / `touch_alert` refactor (#213), which extends the per-owner
   counter on every mutation, `bump_alert` and `renew_alert_ttl`. A

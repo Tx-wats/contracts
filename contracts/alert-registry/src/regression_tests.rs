@@ -790,3 +790,55 @@ fn test_regression_owner_live_count_survives_keepalive_only_activity() {
         "the limit must still apply after the original counter write would have expired"
     );
 }
+
+/// Regression test for #208 (ledger advancement):
+/// most mutators used to extend `Alert(id)` but not the cheap `AlertActive(id)`
+/// flag, so the flag could expire while the alert lived on, making
+/// `get_alert_active` return `None` and `get_active_alert_count` undercount.
+/// Edit the alert repeatedly while advancing the ledger past `DEFAULT_TTL` in
+/// total: the flag must stay live and correct throughout.
+#[test]
+fn test_regression_alert_active_survives_repeated_edits() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Edited"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let check = |step: &str| {
+        let [_, active_ttl, _, _, _] = alert_entry_ttls(&env, &client, id, &owner, &target);
+        assert_eq!(
+            active_ttl,
+            crate::DEFAULT_TTL,
+            "AlertActive TTL after {step}"
+        );
+        assert_eq!(client.get_alert_active(&owner, &id), Some(true), "{step}");
+        assert_eq!(client.get_active_alert_count(&owner), 1, "{step}");
+    };
+
+    advance_almost_default_ttl(&env);
+    client.update_label(&owner, &id, &str(&env, "Renamed"));
+    check("update_label");
+
+    advance_almost_default_ttl(&env);
+    client.update_webhook(&owner, &id, &hash64c(&env, 'b'));
+    check("update_webhook");
+
+    advance_almost_default_ttl(&env);
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'c'));
+    check("propose_webhook");
+
+    advance_almost_default_ttl(&env);
+    client.confirm_webhook(&owner, &id);
+    check("confirm_webhook");
+
+    advance_almost_default_ttl(&env);
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'd'));
+    client.cancel_webhook_proposal(&owner, &id);
+    check("cancel_webhook_proposal");
+}
