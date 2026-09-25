@@ -48,6 +48,36 @@ window** — a call every few days is cheap and leaves ample margin. Any other
 transaction against the contract in the meantime does *not* refresh the TTL on
 its own, so do not rely on incidental traffic.
 
+## Keeping the Alert Registry Instance Alive
+
+`AlertRegistry` also keeps state in its instance entry: the admin, the alert ID
+counter (`NEXT_ID`), the per-owner, per-contract and global limits, the pause
+flag and the watcher registry address. If that entry is archived, every alert
+becomes unreachable until it is restored, even though the alerts themselves
+are persistent entries.
+
+Unlike `WatcherRegistry`, AlertRegistry extends its instance entry on **every
+write to instance storage**: each `register_alert` / `batch_register_alert`
+(through the ID counter) and every admin setter (`initialize`,
+`transfer_admin`, `pause`, `unpause`, `set_per_owner_alert_limit`,
+`set_per_contract_alert_limit`, `set_global_alert_limit`,
+`set_watcher_registry`, `clear_watcher_registry`). Each extends the instance
+TTL to `INSTANCE_BUMP_AMOUNT` (535 680 ledgers, ~31 days) once it has dropped
+below `INSTANCE_BUMP_THRESHOLD` (17 280 ledgers, ~24 hours), the same values as
+`WatcherRegistry`.
+
+For quiet periods with no registrations or admin changes, it exposes the same
+permissionless keep-alive:
+
+```rust
+// Anyone may call this — no auth, no state change.
+alert_client.bump_instance_ttl();
+```
+
+**Operators should have a keeper call it every few days**, alongside
+`WatcherRegistry::bump_instance_ttl`. Reads and alert updates do not touch the
+instance entry's TTL.
+
 ## Configurable TTL via `bump_alert`
 
 Callers can extend the TTL of any alert up to the **protocol maximum of
