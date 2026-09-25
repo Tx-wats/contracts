@@ -85,6 +85,10 @@ pub enum DataKey {
     OwnerLiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
+    /// Stores the number of currently live (non-removed) alerts targeting
+    /// a given contract, maintained incrementally alongside
+    /// [`DataKey::ContractIndex`].
+    ContractLiveCount(Address),
     /// Monotonic counter used to generate unique alert IDs.
     NextId,
     /// Stores the [`PendingAlertTransfer`] proposed for an alert, until it is
@@ -2252,14 +2256,7 @@ impl AlertRegistry {
     /// [`AlertRegistry::get_active_alert_count`], this does **not** filter by the
     /// `active` flag: deactivated-but-not-removed alerts still count.
     pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
-        let ids = Self::contract_index(&env, &target_contract);
-        let mut count: u32 = 0;
-        for id in ids.iter() {
-            if env.storage().persistent().has(&DataKey::Alert(id)) {
-                count += 1;
-            }
-        }
-        count
+        Self::contract_live_count(&env, &target_contract)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -2384,7 +2381,31 @@ impl AlertRegistry {
         {
             return Err(ContractError::ContractAlertLimitExceeded);
         }
+
         Ok(())
+    }
+
+    /// Read the per-contract live-alert counter, lazily rebuilding it for
+    /// contracts written before the counter was introduced.
+    fn contract_live_count(env: &Env, target: &Address) -> u32 {
+        let key = DataKey::ContractLiveCount(target.clone());
+        if let Some(count) = env.storage().persistent().get(&key) {
+            return count;
+        }
+        let mut count: u32 = 0;
+        for id in Self::contract_index(env, target).iter() {
+            if env.storage().persistent().has(&DataKey::Alert(id)) {
+                count += 1;
+            }
+        }
+        Self::set_contract_live_count(env, target, count);
+        count
+    }
+
+    fn set_contract_live_count(env: &Env, target: &Address, count: u32) {
+        let key = DataKey::ContractLiveCount(target.clone());
+        env.storage().persistent().set(&key, &count);
+        env.storage().persistent().extend_ttl(&key, DEFAULT_TTL, DEFAULT_TTL);
     }
 
     /// Reject registration once the total number of alerts ever registered
@@ -2477,6 +2498,10 @@ impl AlertRegistry {
         let live_count_key = DataKey::OwnerLiveCount(config.owner.clone());
         if storage.has(&live_count_key) {
             storage.extend_ttl(&live_count_key, ttl, ttl);
+        }
+        let contract_count_key = DataKey::ContractLiveCount(config.target_contract.clone());
+        if storage.has(&contract_count_key) {
+            storage.extend_ttl(&contract_count_key, ttl, ttl);
         }
         let suspended_key = DataKey::AdminSuspended(config_id);
         if storage.has(&suspended_key) {
@@ -2600,6 +2625,7 @@ impl AlertRegistry {
                 return Err(ContractError::DuplicateAlertId);
             }
         }
+        let count = Self::contract_live_count(env, target);
         ids.push_back(id);
         env.storage()
             .persistent()
@@ -2609,6 +2635,7 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+        Self::set_contract_live_count(env, target, count + 1);
         Ok(())
     }
 
@@ -2642,6 +2669,7 @@ impl AlertRegistry {
     /// Remove `id` from the contract's index and persist the updated list.
     fn remove_from_contract_index(env: &Env, target: &Address, id: u64) {
         let ids = Self::contract_index(env, target);
+        let count = Self::contract_live_count(env, target);
         let mut updated: Vec<u64> = vec![env];
         for i in 0..ids.len() {
             let v = ids.get(i).unwrap();
@@ -2657,6 +2685,7 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+        Self::set_contract_live_count(env, target, count.saturating_sub(1));
     }
 
     /// Resolve a list of alert IDs to their stored [`AlertConfig`] values.
