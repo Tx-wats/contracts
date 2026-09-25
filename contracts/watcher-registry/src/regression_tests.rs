@@ -90,7 +90,7 @@ fn test_regression_remove_watcher_unregistered_emits_no_event() {
         Ok(())
     );
 
-    let events = env.events().all();
+    let events = crate::emitted_events(&env);
     assert_eq!(
         events.len(),
         0,
@@ -115,7 +115,7 @@ fn test_regression_clear_all_watchers_emits_one_event_per_removed_watcher() {
 
     client.clear_all_watchers(&admin);
 
-    let events = env.events().all();
+    let events = crate::emitted_events(&env);
     // Should have emitted 2 remove events (one for each removed watcher)
     assert_eq!(events.len(), 2);
     for i in 0..events.len() {

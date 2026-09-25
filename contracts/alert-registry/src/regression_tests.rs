@@ -88,12 +88,12 @@ fn test_regression_missing_remove_alert_body() {
     assert_eq!(client.get_alerts_by_owner(&owner, &owner).len(), 1);
     assert_eq!(client.get_alerts_for_contract(&owner, &target).len(), 1);
 
-    let events_before = env.events().all().len();
+    let events_before = crate::emitted_events(&env).len();
 
     // Call remove_alert
     assert_eq!(client.try_remove_alert(&owner, &id).unwrap(), Ok(()));
 
-    let all_events = env.events().all();
+    let all_events = crate::emitted_events(&env);
     assert!(
         all_events.len() > events_before,
         "Remove alert must emit an event"
@@ -183,13 +183,13 @@ fn test_regression_transfer_admin_emitted_no_event() {
 
     client.initialize(&admin);
 
-    let events_before = env.events().all().len();
+    let events_before = crate::emitted_events(&env).len();
     assert_eq!(
         client.try_transfer_admin(&admin, &new_admin).unwrap(),
         Ok(())
     );
 
-    let all_events = env.events().all();
+    let all_events = crate::emitted_events(&env);
     let new_events = all_events.slice(events_before..all_events.len());
     assert_eq!(new_events.len(), 1);
 

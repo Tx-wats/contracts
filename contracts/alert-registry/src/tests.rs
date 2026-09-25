@@ -105,7 +105,7 @@ fn test_update_alert_emits_event() {
 
     client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &false);
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // 3. Happy path — remove alert
@@ -214,7 +214,7 @@ fn test_initialize_emits_event() {
 
     client.initialize(&admin);
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // set_per_owner_alert_limit emits an admin.limit event
@@ -226,7 +226,7 @@ fn test_set_per_owner_alert_limit_emits_event() {
 
     client.set_per_owner_alert_limit(&admin, &5u32);
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 #[test]
@@ -563,7 +563,7 @@ fn test_update_webhook_emits_event() {
 
     client.update_webhook(&owner, &id, &hash64c(&env, 'b'));
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // 11. update_webhook unauthorized
@@ -794,7 +794,7 @@ fn test_renew_alert_ttl_emits_event() {
 
     client.renew_alert_ttl(&owner, &id);
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // renew_alert_ttl — unauthorized caller is rejected
@@ -1071,7 +1071,7 @@ fn test_propose_webhook_emits_event() {
 
     client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // confirm_webhook emits a wh_conf event
@@ -1092,7 +1092,7 @@ fn test_confirm_webhook_emits_event() {
     client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
     client.confirm_webhook(&owner, &id);
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // update_label emits a label event
@@ -1112,7 +1112,7 @@ fn test_update_label_emits_event() {
 
     client.update_label(&owner, &id, &str(&env, "New Label"));
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // pending_webhook_hash is None on fresh registration
@@ -1305,7 +1305,7 @@ fn test_set_watcher_registry_emits_event() {
 
     client.set_watcher_registry(&admin, &registry_id);
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
     assert_eq!(client.get_watcher_registry(), Some(registry_id));
 }
 
@@ -1526,7 +1526,7 @@ fn test_update_target_contract_emits_event() {
 
     client.update_target_contract(&owner, &id, &target_b);
 
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 #[test]
@@ -1597,7 +1597,7 @@ fn test_deactivate_all_alerts_precise_behavior() {
     assert_eq!(client.get_active_alert_count(&owner2), 1);
 
     let count = client.deactivate_all_alerts(&owner1);
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
     assert_eq!(count, 3);
     assert_eq!(client.get_alert_active(&Address::generate(&env), &id0), Some(false));
     assert_eq!(client.get_alert_active(&Address::generate(&env), &id1), Some(false));
@@ -1972,7 +1972,7 @@ fn test_transfer_alert_ownership_emits_event() {
     );
 
     client.transfer_alert_ownership(&owner, &id, &new_owner);
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // ── Issue #36 — deactivate_alert_by_admin ───────────────────────────────
@@ -2061,7 +2061,7 @@ fn test_deactivate_alert_by_admin_emits_event() {
     );
 
     client.deactivate_alert_by_admin(&admin, &id);
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // ── Issue #37 — batch_register_alert / batch_remove_alert ───────────────
@@ -2536,7 +2536,7 @@ fn test_set_per_contract_alert_limit_emits_admin_limit_event() {
 
     client.set_per_contract_alert_limit(&admin, &7u32);
 
-    let events = env.events().all();
+    let events = crate::emitted_events(&env);
     let limit_event = events
         .iter()
         .find(|(_, topics, _)| {
@@ -3004,6 +3004,9 @@ fn test_set_watcher_registry_recovers_after_invalid_attempt() {
     assert_eq!(
         alert_client.get_watcher_registry().unwrap(),
         watcher_contract_id
+    );
+}
+
 // 17b. clear_watcher_registry disables gating; set_watcher_registry can
 // re-enable it afterward.
 #[test]
@@ -3412,7 +3415,7 @@ fn test_transfer_admin_emits_event() {
     client.transfer_admin(&admin, &new_admin);
 
     // Verify at least one event was published during the transfer
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // 19. old admin cannot act after transfer_admin
@@ -4578,8 +4581,7 @@ fn test_bump_alert_clamps_to_max_ttl() {
     client.bump_alert(&id, &u32::MAX);
 
     // The emitted event should carry the clamped effective TTL
-    let events = env.events().all();
-    let bump_event = events.iter().find(|(_, topics, _)| {
+    let bump_event = crate::find_event(&env, |_, topics, _| {
         topics.len() == 2
             && Symbol::from_val(&env, &topics.get(0).unwrap())
                 == soroban_sdk::symbol_short!("alert")
@@ -4614,8 +4616,7 @@ fn test_bump_alert_uses_requested_ttl_when_below_max() {
     let requested_ttl: u32 = 120_960; // ~7 days, well below MAX_TTL
     client.bump_alert(&id, &requested_ttl);
 
-    let events = env.events().all();
-    let bump_event = events.iter().find(|(_, topics, _)| {
+    let bump_event = crate::find_event(&env, |_, topics, _| {
         topics.len() == 2
             && Symbol::from_val(&env, &topics.get(0).unwrap())
                 == soroban_sdk::symbol_short!("alert")
@@ -4649,7 +4650,7 @@ fn test_bump_alert_event_shape() {
     let ttl: u32 = 17_280;
     client.bump_alert(&id, &ttl);
 
-    let events = env.events().all();
+    let events = crate::emitted_events(&env);
     let bump_event = events
         .iter()
         .find(|(_, topics, _)| {
@@ -5113,7 +5114,7 @@ fn test_transfer_admin_emits_event() {
     client.transfer_admin(&admin, &new_admin);
 
     // Verify at least one event was published during the transfer
-    assert!(!env.events().all().is_empty());
+    assert!(!crate::emitted_events(&env).is_empty());
 }
 
 // 19. old admin cannot act after transfer_admin
@@ -6271,8 +6272,7 @@ fn test_bump_alert_clamps_to_max_ttl() {
     client.bump_alert(&id, &u32::MAX);
 
     // The emitted event should carry the clamped effective TTL
-    let events = env.events().all();
-    let bump_event = events.iter().find(|(_, topics, _)| {
+    let bump_event = crate::find_event(&env, |_, topics, _| {
         topics.len() == 2
             && Symbol::from_val(&env, &topics.get(0).unwrap())
                 == soroban_sdk::symbol_short!("alert")
@@ -6307,8 +6307,7 @@ fn test_bump_alert_uses_requested_ttl_when_below_max() {
     let requested_ttl: u32 = 120_960; // ~7 days, well below MAX_TTL
     client.bump_alert(&id, &requested_ttl);
 
-    let events = env.events().all();
-    let bump_event = events.iter().find(|(_, topics, _)| {
+    let bump_event = crate::find_event(&env, |_, topics, _| {
         topics.len() == 2
             && Symbol::from_val(&env, &topics.get(0).unwrap())
                 == soroban_sdk::symbol_short!("alert")
@@ -6342,7 +6341,7 @@ fn test_bump_alert_event_shape() {
     let ttl: u32 = 17_280;
     client.bump_alert(&id, &ttl);
 
-    let events = env.events().all();
+    let events = crate::emitted_events(&env);
     let bump_event = events
         .iter()
         .find(|(_, topics, _)| {
@@ -6400,3 +6399,77 @@ fn test_ttl_constants() {
     // MAX_TTL ≈ 31 days at 5 s/ledger
     assert_eq!(MAX_TTL, 535_680);
 }
+
+
+// ── Ledger-indexed queries (moved out of the duplicated inline test module) ──
+
+    // 24. get_alerts_modified_since_ledger returns all alerts when since_ledger == 0
+    #[test]
+    fn test_get_alerts_modified_since_ledger_zero_returns_all() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+        client.register_alert(&owner, &target, &str(&env, "B"), &hash64(&env), &vec![&env]);
+
+        let results = client.get_alerts_modified_since_ledger(&0u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 2);
+    }
+
+    // 25. get_alerts_modified_since_ledger returns empty vec on empty registry
+    #[test]
+    fn test_get_alerts_modified_since_ledger_empty_registry() {
+        let (_env, client) = setup();
+        let results = client.get_alerts_modified_since_ledger(&0u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 0);
+    }
+
+    // 26. Filters out alerts whose updated_ledger is before since_ledger (unambiguous multi-ledger sync)
+    #[test]
+    fn test_get_alerts_modified_since_ledger_filters_by_sequence() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        // Multiple ledgers in the same close-time second (timestamp 1000)
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+            li.sequence_number = 50;
+        });
+        client.register_alert(&owner, &target, &str(&env, "L50"), &hash64(&env), &vec![&env]);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+            li.sequence_number = 51;
+        });
+        client.register_alert(&owner, &target, &str(&env, "L51"), &hash64(&env), &vec![&env]);
+
+        // Querying with since_ledger = 51 returns only the second alert
+        let results = client.get_alerts_modified_since_ledger(&51u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results.get(0).unwrap().label, str(&env, "L51"));
+    }
+
+    // 27. since_ledger boundary value exactly equal is included; +1 excludes it
+    #[test]
+    fn test_get_alerts_modified_since_ledger_boundary_inclusive() {
+        let (env, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        env.ledger().with_mut(|li| li.sequence_number = 75);
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "BoundarySeq"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        let results = client.get_alerts_modified_since_ledger(&75u32, &0u32, &u32::MAX);
+        assert_eq!(results.len(), 1);
+
+        let results_after = client.get_alerts_modified_since_ledger(&76u32, &0u32, &u32::MAX);
+        assert_eq!(results_after.len(), 0);
+    }

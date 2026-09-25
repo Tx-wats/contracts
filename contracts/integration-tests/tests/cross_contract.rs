@@ -6,6 +6,51 @@ use test_utils::setup_both as setup;
 use test_utils::str;
 use test_utils::{hash64, hash64c};
 
+// ── Event helpers (soroban-sdk 25) ───────────────────────────────────────────
+
+/// Every event emitted in `env`, flattened into `(emitter, topics, data)` SDK
+/// values.
+///
+/// `soroban_sdk` 25's `Events::all()` returns a wrapper with no slice
+/// accessors, so the underlying XDR events are read directly. The emitter is
+/// `Val::U32_ZERO`: these tests only use it as a positional placeholder.
+fn emitted_events(
+    env: &soroban_sdk::Env,
+) -> soroban_sdk::Vec<(soroban_sdk::Val, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
+    use soroban_sdk::{xdr::ContractEventBody, IntoVal, TryFromVal, Val};
+    let mut out: soroban_sdk::Vec<(Val, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::Vec::new(env);
+    for event in env.events().all().events() {
+        if let ContractEventBody::V0(v0) = &event.body {
+            let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
+            for topic in v0.topics.iter() {
+                topics.push_back(Val::try_from_val(env, topic).unwrap());
+            }
+            let data = Val::try_from_val(env, &v0.data).unwrap();
+            out.push_back((Val::U32_ZERO.into_val(env), topics, data));
+        }
+    }
+    out
+}
+
+/// The first emitted event whose `(emitter, topics, data)` matches `pred`.
+fn find_event(
+    env: &soroban_sdk::Env,
+    pred: impl Fn(&soroban_sdk::Val, &soroban_sdk::Vec<soroban_sdk::Val>, &soroban_sdk::Val) -> bool,
+) -> Option<(
+    soroban_sdk::Val,
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+)> {
+    let events = emitted_events(env);
+    for i in 0..events.len() {
+        let entry = events.get(i).unwrap();
+        if pred(&entry.0, &entry.1, &entry.2) {
+            return Some(entry);
+        }
+    }
+    None
+}
+
 // `setup_both` returns (env, alert_client, watcher_client) — same shape as the
 // old local `setup()` function, so all tests below compile unchanged.
 
@@ -296,6 +341,12 @@ fn test_gated_mode_rejects_non_watcher() {
     assert_eq!(
         alert_client
             .try_get_alert(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
     assert_eq!(
         alert_client
             .try_get_alerts_for_contract(&stranger, &target)
@@ -338,6 +389,12 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
     assert_eq!(
         alert_client
             .try_get_alert_active(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
     assert_eq!(
         alert_client
             .try_get_alerts_by_owner(&stranger, &owner)
@@ -409,6 +466,12 @@ fn test_gated_mode_accepts_registered_watcher() {
             .unwrap_err()
             .unwrap(),
         AlertError::NotAWatcher
+    );
+}
+
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
     assert_eq!(
         alert_client
             .get_alerts_for_contract(&watcher, &target)
@@ -448,15 +511,12 @@ fn test_remove_watcher_emits_event_with_correct_address() {
     watcher_client.register_watcher(&admin, &watcher);
     watcher_client.remove_watcher(&admin, &watcher);
 
-    let events = env.events().all();
-    let remove_event = events
-        .iter()
-        .find(|(_, topics, _)| {
-            topics.len() == 2
-                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("watcher")
-                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("remove")
-        })
-        .expect("watcher.remove event must be emitted");
+    let remove_event = find_event(&env, |_, topics, _| {
+        topics.len() == 2
+            && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("watcher")
+            && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("remove")
+    })
+    .expect("watcher.remove event must be emitted");
 
     let (_, _, data) = remove_event;
     let emitted: Address = soroban_sdk::FromVal::from_val(&env, &data);
@@ -506,12 +566,12 @@ fn test_remove_watcher_event_and_immediate_access_revocation() {
     watcher_client.remove_watcher(&admin, &watcher);
 
     // Verify the event was emitted
-    let events = env.events().all();
-    let has_remove_event = events.iter().any(|(_, topics, _)| {
+    let has_remove_event = find_event(&env, |_, topics, _| {
         topics.len() == 2
             && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("watcher")
             && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("remove")
-    });
+    })
+    .is_some();
     assert!(
         has_remove_event,
         "watcher.remove event must be emitted on deauthorization"

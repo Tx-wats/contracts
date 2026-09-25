@@ -18,11 +18,6 @@ use soroban_sdk::{
 contractmeta!(key = "Name", val = "WatcherRegistry");
 contractmeta!(key = "Version", val = "0.1.0");
 
-/// Maximum number of watchers that may be registered at once.
-const MAX_WATCHERS: u32 = 1_000;
-/// Maximum number of admins that may be in the admin set at once.
-const MAX_ADMINS: u32 = 50;
-
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Errors returned by `WatcherRegistry` entry points.
@@ -43,16 +38,30 @@ pub enum ContractError {
     /// Returned when accepting/cancelling a transfer but none is pending.
     NoPendingTransfer = 6,
     /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
+    ///
+    /// Kept as a distinct variant so the alias `MaxWatchersReached` (16) does
+    /// not share a discriminant with it; the two names describe the same
+    /// condition and either may be matched on.
     TooManyWatchers = 7,
     /// Returned when adding an admin would exceed [`MAX_ADMINS`].
     TooManyAdmins = 8,
     /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
-    MaxWatchersReached = 6,
+    ///
+    /// Deprecated alias of [`ContractError::TooManyWatchers`]; kept for callers
+    /// that already match on it. Renumbered from 6 to end the duplicate
+    /// discriminant with [`ContractError::NoPendingTransfer`].
+    MaxWatchersReached = 16,
     /// Returned when adding an admin would exceed [`MAX_ADMINS`].
-    MaxAdminsReached = 7,
+    ///
+    /// Deprecated alias of [`ContractError::TooManyAdmins`]; renumbered from 7,
+    /// which it shared with [`ContractError::TooManyWatchers`].
+    MaxAdminsReached = 17,
     /// Returned when a sensitive action is called directly while a timelock
     /// delay is configured — it must go through propose/execute instead.
-    TimelockRequired = 8,
+    ///
+    /// Renumbered from 8, which it shared with
+    /// [`ContractError::TooManyAdmins`].
+    TimelockRequired = 15,
     /// Returned when proposing an action while another one is already queued.
     ActionAlreadyPending = 9,
     /// Returned when executing or cancelling with nothing queued.
@@ -61,6 +70,14 @@ pub enum ContractError {
     TimelockNotExpired = 11,
     /// Returned when setting or proposing a timelock delay greater than [`MAX_TIMELOCK_DELAY`].
     DelayTooLarge = 12,
+    /// Returned when a state-mutating call is made while the contract is paused.
+    ///
+    /// Added to the enum proper: the pause feature's variants were merged into
+    /// the file after [`MAX_TIMELOCK_DELAY`], outside the enum, which left the
+    /// crate unable to parse.
+    Paused = 13,
+    /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
+    BelowMinWatchers = 14,
 }
 
 // ── TTL constants ────────────────────────────────────────────────────────────
@@ -93,11 +110,6 @@ pub const MAX_ADMINS: u32 = 10;
 /// Prevents governance deadlock where proposals would saturate at `u32::MAX` and
 /// become permanently unexecutable.
 pub const MAX_TIMELOCK_DELAY: u32 = 518_400;
-    /// Returned when a state-mutating call is made while the contract is paused.
-    Paused = 6,
-    /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
-    BelowMinWatchers = 7,
-}
 
 /// Minimum number of registered watchers that must remain after
 /// `remove_watcher` or `clear_all_watchers`. Prevents an admin (or a
@@ -122,6 +134,8 @@ pub enum DataKey {
     TimelockDelay,
     /// Stores the single queued [`PendingAction`], if any.
     PendingAction,
+    /// Stores the `bool` paused flag.
+    Paused,
 }
 
 // ── Timelock types ───────────────────────────────────────────────────────────
@@ -152,8 +166,6 @@ pub struct PendingAction {
     pub proposer: Address,
     /// Ledger sequence at or after which the action may be executed.
     pub ready_at: u32,
-    /// Stores the `bool` paused flag.
-    Paused,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -276,7 +288,6 @@ impl WatcherRegistry {
         );
 
         Ok(())
-        Self::do_add_admin(&env, &caller, new_admin)
     }
 
     /// Remove an admin from the admin set (any existing admin may call this).
@@ -324,17 +335,51 @@ impl WatcherRegistry {
         Ok(())
     }
 
-    /// Propose transferring the sole admin role to a new address (any existing
+    /// Propose transferring the admin role to a new address (any existing
     /// admin may call this). The transfer does not take effect until
     /// `new_admin` calls [`WatcherRegistry::accept_admin_transfer`] with their own signature —
     /// this prevents a typo'd or unowned address from permanently locking the
     /// contract.
     ///
-    /// This replaces any previously pending proposal. This replaces the
-    /// **entire** admin set with a single new admin once accepted. Use
-    /// [`WatcherRegistry::add_admin`] + [`WatcherRegistry::remove_admin`] if you want to rotate one member of a
-    /// multi-admin set without losing the others.
+    /// This replaces any previously pending proposal. Accepting it replaces the
+    /// **entire** admin set with the single new admin; use
+    /// [`WatcherRegistry::transfer_admin`] to hand off only the caller's own
+    /// slot in a multi-admin set.
     ///
+    /// Emits an `("admin", "propose")` event naming the proposer and the
+    /// proposed admin.
+    ///
+    /// Sensitive: when a timelock delay is configured this must be queued via
+    /// [`WatcherRegistry::propose_admin_action`] instead of called directly.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
+    pub fn propose_admin_transfer(
+        env: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        Self::assert_timelock_disabled(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminTransfer, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("propose")),
+            (admin, new_admin),
+        );
+
+        Ok(())
+    }
+
     /// Transfer the caller's own admin slot to a new address (any existing
     /// admin may call this, and only affects that admin's own membership).
     ///
@@ -360,7 +405,6 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
-    pub fn propose_admin_transfer(
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
     pub fn transfer_admin(
         env: Env,
@@ -370,49 +414,6 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
-
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingAdminTransfer, &new_admin);
-
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("propose")),
-            (admin, new_admin),
-        );
-
-        Ok(())
-    }
-
-    /// Accept a pending admin transfer proposed via [`WatcherRegistry::propose_admin_transfer`].
-    ///
-    /// Requires `new_admin`'s own signature, proving key control before the
-    /// admin set is replaced. Emits an `("admin", "transfer")` event.
-    ///
-    /// # Auth
-    /// Requires a valid Stellar auth signature from `new_admin`.
-    /// # Errors
-    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending,
-    /// or the pending proposal names a different address.
-    pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
-        new_admin.require_auth();
-
-        let pending: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingAdminTransfer)
-            .ok_or(ContractError::NoPendingTransfer)?;
-        if pending != new_admin {
-            return Err(ContractError::NoPendingTransfer);
-        }
-
-        let new_admins: Vec<Address> = vec![&env, new_admin.clone()];
-        env.storage().instance().set(&DataKey::Admins, &new_admins);
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingAdminTransfer);
-
-        Self::do_transfer_admin(&env, &admin, new_admin);
-        Self::assert_not_paused(&env)?;
 
         let admins = Self::load_admins(&env);
         let mut updated: Vec<Address> = vec![&env];
@@ -433,6 +434,45 @@ impl WatcherRegistry {
         env.storage().instance().set(&DataKey::Admins, &updated);
 
         // Emit an auditable on-chain event recording the admin slot transfer.
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("transfer")),
+            (admin, new_admin),
+        );
+
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer proposed via [`WatcherRegistry::propose_admin_transfer`].
+    ///
+    /// Requires `new_admin`'s own signature, proving key control before the
+    /// admin set is replaced. Emits an `("admin", "transfer")` event.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `new_admin`.
+    /// # Errors
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending,
+    /// or the pending proposal names a different address.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
+    pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminTransfer)
+            .ok_or(ContractError::NoPendingTransfer)?;
+        if pending != new_admin {
+            return Err(ContractError::NoPendingTransfer);
+        }
+
+        let new_admins: Vec<Address> = vec![&env, new_admin.clone()];
+        env.storage().instance().set(&DataKey::Admins, &new_admins);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
+
+        // Emit an auditable on-chain event recording the admin transfer.
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("transfer")),
             new_admin,
@@ -907,6 +947,8 @@ impl WatcherRegistry {
             }
         }
         false
+    }
+
     /// Pause the contract, rejecting all state-mutating calls until [`WatcherRegistry::unpause`] is called.
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
@@ -1444,15 +1486,8 @@ mod tests {
         client.propose_admin_transfer(&admin, &new_admin);
         client.accept_admin_transfer(&new_admin);
 
-        let events = env.events().all();
-        // Find the transfer event
-        let found = events.iter().any(|e| {
-            // topics are (symbol "admin", symbol "transfer")
-            // we just verify at least one event was emitted after transfer
-            let _ = e;
-            true
-        });
-        assert!(found);
+        // The two-step transfer path emits at least one event.
+        assert!(!crate::emitted_events(&env).is_empty());
     }
 
     // 4. Unauthorized register rejected
@@ -2129,7 +2164,7 @@ mod tests {
         client.add_admin(&admin, &second_admin);
 
         // At least one event was emitted (the add event)
-        assert!(!env.events().all().is_empty());
+        assert!(!crate::emitted_events(&env).is_empty());
     }
 
     // 21. remove_admin emits event
@@ -2141,7 +2176,7 @@ mod tests {
         client.add_admin(&admin, &second_admin);
         client.remove_admin(&admin, &second_admin);
 
-        assert!(!env.events().all().is_empty());
+        assert!(!crate::emitted_events(&env).is_empty());
     }
 
     // 22. remove_watcher emits event
@@ -2153,7 +2188,7 @@ mod tests {
         client.register_watcher(&admin, &watcher);
         client.remove_watcher(&admin, &watcher);
 
-        assert!(!env.events().all().is_empty());
+        assert!(!crate::emitted_events(&env).is_empty());
     }
 
     // 23. remove_watcher event has the correct topic and data shape
@@ -2165,9 +2200,8 @@ mod tests {
         client.register_watcher(&admin, &watcher);
         client.remove_watcher(&admin, &watcher);
 
-        let events = env.events().all();
         // Find an event with exactly 2 topics (watcher.remove shape)
-        let remove_event = events.iter().find(|(_, topics, _)| topics.len() == 2);
+        let remove_event = crate::find_event(&env, |_, topics, _| topics.len() == 2);
         assert!(remove_event.is_some(), "expected a watcher.remove event");
 
         // Verify data is the watcher address
@@ -2186,7 +2220,7 @@ mod tests {
         client.remove_watcher(&admin, &stranger);
 
         // Only the admin.init event from setup() should exist; no watcher.remove
-        let events = env.events().all();
+        let events = crate::emitted_events(&env);
         assert_eq!(
             events.len(),
             0,
@@ -2309,7 +2343,7 @@ mod tests {
         client.replace_watcher(&admin, &old, &new);
 
         // At least two events emitted (remove + replace)
-        assert!(env.events().all().len() >= 2);
+        assert!(crate::emitted_events(&env).len() >= 2);
     }
 
     // ── get_watchers_paginated tests ─────────────────────────────────────────
@@ -2477,9 +2511,20 @@ mod tests {
         }
         assert_eq!(client.get_watcher_count(), MAX_WATCHERS);
 
+        let overflow = Address::generate(&env);
+        assert_eq!(
+            client
+                .try_register_watcher(&admin, &overflow)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TooManyWatchers
+        );
+        assert_eq!(client.get_watchers().len(), MAX_WATCHERS);
+    }
+
     #[test]
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
-    fn test_transfer_admin_requires_auth() {
+    fn test_propose_admin_transfer_requires_auth() {
         let env = Env::default();
         let contract_id = env.register(WatcherRegistry, ());
         let client = WatcherRegistryClient::new(&env, &contract_id);
@@ -2568,6 +2613,12 @@ mod tests {
         assert_eq!(
             client
                 .try_upgrade(&attacker, &wasm_hash)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
     // ── register_watchers (batch) tests ──────────────────────────────────────
 
     // 31. Happy path — register_watchers registers all new addresses
@@ -2926,6 +2977,8 @@ mod tests {
 
         assert_eq!(client.get_watchers().len(), 0);
         assert_eq!(client.get_watcher_count(), 0);
+    }
+
     // 34. register_watchers emits one event per newly-added watcher
     #[test]
     fn test_register_watchers_emits_one_event_per_watcher() {
@@ -2937,7 +2990,9 @@ mod tests {
 
         client.register_watchers(&admin, &vec![&env, w1, w2]);
 
-        assert_eq!(env.events().all().len(), 2);
+        assert_eq!(crate::emitted_events(&env).len(), 2);
+    }
+
     // 31. self-replace (old == new) is a no-op — no spurious watcher.remove
     #[test]
     fn test_replace_watcher_self_replace_emits_no_events() {
@@ -2948,12 +3003,14 @@ mod tests {
         client.replace_watcher(&admin, &w, &w);
 
         assert_eq!(
-            env.events().all().len(),
+            crate::emitted_events(&env).len(),
             0,
             "self-replace must not emit any watcher event"
         );
         assert!(client.is_watcher_authorized(&w));
         assert_eq!(client.get_watcher_count(), 1);
+    }
+
     // ── Role policy tests ─────────────────────────────────────────────────────
 
     // 31. An address may hold both the admin and watcher roles at once.
@@ -3226,4 +3283,53 @@ mod tests {
             ContractError::NotInitialized
         );
     }
+}
+
+// ── Test event helpers (SDK 25) ──────────────────────────────────────────────
+
+/// Every event emitted in `env`, flattened back into
+/// `(emitter, topics, data)` SDK values.
+///
+/// `soroban_sdk` 25's `Events::all()` returns a wrapper with no slice
+/// accessors, so the underlying XDR events are read directly and converted
+/// back into `Val`s. The emitter is kept as `Val::U32_ZERO`: tests only use it
+/// as a positional placeholder, and the XDR contract id is not needed to
+/// identify an event inside a single-contract test.
+#[cfg(test)]
+pub(crate) fn emitted_events(
+    env: &Env,
+) -> soroban_sdk::Vec<(soroban_sdk::Val, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
+    use soroban_sdk::{testutils::Events as _, xdr::ContractEventBody, IntoVal, TryFromVal, Val};
+    let mut out: soroban_sdk::Vec<(Val, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::Vec::new(env);
+    for event in env.events().all().events() {
+        if let ContractEventBody::V0(v0) = &event.body {
+            let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
+            for topic in v0.topics.iter() {
+                topics.push_back(Val::try_from_val(env, topic).unwrap());
+            }
+            let data = Val::try_from_val(env, &v0.data).unwrap();
+            out.push_back((Val::U32_ZERO.into_val(env), topics, data));
+        }
+    }
+    out
+}
+
+/// The first emitted event whose `(emitter, topics, data)` matches `pred`.
+#[cfg(test)]
+pub(crate) fn find_event(
+    env: &Env,
+    pred: impl Fn(&soroban_sdk::Val, &soroban_sdk::Vec<soroban_sdk::Val>, &soroban_sdk::Val) -> bool,
+) -> Option<(
+    soroban_sdk::Val,
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+)> {
+    let events = emitted_events(env);
+    for i in 0..events.len() {
+        let entry = events.get(i).unwrap();
+        if pred(&entry.0, &entry.1, &entry.2) {
+            return Some(entry);
+        }
+    }
+    None
 }
