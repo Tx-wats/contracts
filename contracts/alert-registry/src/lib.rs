@@ -53,6 +53,8 @@ pub const MAX_TTL: u32 = 535_680;
 /// recipient to accept (approximately 7 days at the nominal 5-second ledger
 /// close time). After that it can only be cancelled or replaced.
 pub const ALERT_TRANSFER_EXPIRY_LEDGERS: u32 = 120_960;
+/// Maximum number of owner-index entries processed by one bulk deactivation call.
+pub const MAX_DEACTIVATIONS_PER_CALL: u32 = 50;
 /// Threshold, in ledgers, below which the contract's instance entry is
 /// extended by [`AlertRegistry::bump_instance_ttl`] and by every write to
 /// instance storage. Approximately 24 hours at the nominal 5-second ledger
@@ -89,6 +91,8 @@ pub enum DataKey {
     /// a given contract, maintained incrementally alongside
     /// [`DataKey::ContractIndex`].
     ContractLiveCount(Address),
+    /// Next owner-index position to inspect for a resumable bulk deactivation.
+    DeactivationCursor(Address),
     /// Monotonic counter used to generate unique alert IDs.
     NextId,
     /// Stores the [`PendingAlertTransfer`] proposed for an alert, until it is
@@ -1926,15 +1930,17 @@ impl AlertRegistry {
 
     /// Deactivate all alerts owned by `caller` in a single call.
     ///
-    /// Iterates the owner's index and sets `active = false` on every live
-    /// alert.  Expired or already-removed entries are silently skipped.
+    /// Iterates the owner's index and sets `active = false` on live alerts.
+    /// Expired or already-removed entries are silently skipped. Each call
+    /// processes at most [`MAX_DEACTIVATIONS_PER_CALL`] index entries; call
+    /// again until it returns `0` to finish a large owner index.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`.
     ///
     /// # Returns
-    /// The number of alerts that were deactivated (`0` if the owner had no
-    /// active alerts).
+    /// The number of alerts deactivated in this pass (`0` if this pass found
+    /// no active alerts).
     ///
     /// # Errors
     /// Returns [`ContractError::Paused`] while the contract is paused, like
@@ -1949,8 +1955,16 @@ impl AlertRegistry {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
         let ids = Self::owner_index(&env, &caller);
+        let start = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::DeactivationCursor(caller.clone()))
+            .unwrap_or(0)
+            .min(ids.len());
+        let end = (start + MAX_DEACTIVATIONS_PER_CALL).min(ids.len());
         let mut count: u32 = 0;
-        for id in ids.iter() {
+        for i in start..end {
+            let id = ids.get(i).unwrap();
             if let Some(mut cfg) = env
                 .storage()
                 .persistent()
@@ -1983,6 +1997,15 @@ impl AlertRegistry {
                     count += 1;
                 }
             }
+        }
+        let cursor_key = DataKey::DeactivationCursor(caller.clone());
+        if end < ids.len() {
+            env.storage().persistent().set(&cursor_key, &end);
+            env.storage()
+                .persistent()
+                .extend_ttl(&cursor_key, DEFAULT_TTL, DEFAULT_TTL);
+        } else {
+            env.storage().persistent().remove(&cursor_key);
         }
         if count > 0 {
             env.events().publish(
@@ -2660,6 +2683,9 @@ impl AlertRegistry {
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DeactivationCursor(owner.clone()));
         if removed {
             let count = Self::owner_live_count(env, owner);
             Self::set_owner_live_count(env, owner, count.saturating_sub(1));

@@ -4292,6 +4292,31 @@ fn test_deactivate_all_alerts_multiple() {
     assert_eq!(client.get_alert_active(&owner, &id3), Some(false));
 }
 
+#[test]
+fn test_deactivate_all_alerts_is_bounded_and_resumable() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    for _ in 0..=MAX_DEACTIVATIONS_PER_CALL {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+    }
+
+    assert_eq!(
+        client.deactivate_all_alerts(&owner),
+        MAX_DEACTIVATIONS_PER_CALL
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+    assert_eq!(client.deactivate_all_alerts(&owner), 1);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}
+
 // 24. deactivate_all_alerts only affects the calling owner's alerts
 #[test]
 fn test_deactivate_all_alerts_other_owner_unaffected() {
