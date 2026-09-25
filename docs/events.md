@@ -307,6 +307,20 @@ read-side queries behind watcher authorization.
 
 ---
 
+### `admin.upgrade`
+
+Emitted after the registry WASM is replaced.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("upgrade")` |
+| Data | `(admin: Address, new_wasm_hash: BytesN<32>)` |
+
+**Status:** ✅ implemented (`upgrade`)
+
+---
+
 ## WatcherRegistry
 
 ### `watcher.register`
@@ -479,6 +493,21 @@ Emitted when the timelock delay applied to sensitive admin actions is changed.
 | Data | `(caller: Address, delay_ledgers: u32)` |
 
 **Status:** ✅ implemented (`set_timelock_delay`, `execute_admin_action`)
+
+---
+
+### `admin.upgrade`
+
+Emitted after the watcher registry WASM is replaced, whether the upgrade was
+called directly or executed through the timelock.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("upgrade")` |
+| Data | `(admin: Address, new_wasm_hash: BytesN<32>)` |
+
+**Status:** ✅ implemented (`upgrade`, `execute_admin_action`)
 
 ---
 
