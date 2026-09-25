@@ -257,6 +257,8 @@ Removes any alert config by ID. Requires admin auth.
 
 Deactivates any alert by ID without deleting its record. Unlike `remove_alert_by_admin`, the alert config and its owner/contract indexes are left intact — only the `active` flag is cleared — so an admin can moderate a single problematic alert (spam, abuse report) while preserving its history. Admin only.
 
+The alert is also **suspended** (`DataKey::AdminSuspended(id)`): the owner cannot reactivate it with `update_alert(..., active = true)` (`AlertSuspended`) until an admin calls `unlock_alert_by_admin`. The suspension stays with the alert if ownership is transferred and is cleared when the alert is removed (#202).
+
 **Requires auth:** `admin`
 
 **Parameters**
@@ -271,6 +273,18 @@ Deactivates any alert by ID without deleting its record. Unlike `remove_alert_by
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the admin.
 
 **Events:** Emits `(Symbol("alert"), Symbol("admin_off"))` with data `(id: u64, admin: Address)`.
+
+---
+
+### `unlock_alert_by_admin` / `is_alert_suspended`
+
+`unlock_alert_by_admin(admin, config_id)` lifts an admin suspension so the owner can reactivate the alert. It does not reactivate the alert itself. Unlocking an alert that is not suspended does nothing. Admin only; blocked while paused.
+
+**Errors:** `AlertNotFound`, `NotInitialized`, `Unauthorized` (not the admin), `Paused`.
+
+**Events:** `(Symbol("alert"), Symbol("admin_on"))` with data `(id: u64, admin: Address)` when a suspension was lifted.
+
+`is_alert_suspended(config_id) -> bool` reports whether an alert is currently suspended.
 
 ---
 ### `remove_alert`
@@ -773,6 +787,7 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `NoPendingTransfer` | 18 | `accept_alert_transfer`, `reject_alert_transfer` or `cancel_alert_transfer` called with no transfer pending |
 | `TransferExpired` | 19 | `accept_alert_transfer` called after the proposal's `expires_at_ledger` |
 | `InvalidTransferRecipient` | 20 | `propose_alert_transfer` named the current owner as the recipient |
+| `AlertSuspended` | 21 | `update_alert` tried to reactivate an alert suspended by `deactivate_alert_by_admin` |
 
 ---
 

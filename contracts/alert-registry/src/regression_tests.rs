@@ -1056,3 +1056,89 @@ fn test_regression_transfer_respects_recipient_per_owner_limit() {
     client.accept_alert_transfer(&recipient, &gift);
     assert_eq!(client.get_alert(&sender, &gift).unwrap().owner, recipient);
 }
+
+// ── #202: owners cannot undo an admin deactivation ───────────────────────────
+
+/// Regression test for #202: `deactivate_alert_by_admin` is for moderation,
+/// but the owner could immediately undo it with `update_alert(.., true)`.
+/// The alert is now suspended until an admin unlocks it.
+#[test]
+fn test_regression_owner_cannot_undo_admin_deactivation() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let id = client.register_alert(
+        &owner,
+        &Address::generate(&env),
+        &str(&env, "Spam"),
+        &hash64(&env),
+        &rules,
+    );
+
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert!(client.is_alert_suspended(&id));
+    assert_eq!(
+        client
+            .try_update_alert(&owner, &id, &rules, &true)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertSuspended
+    );
+    assert_eq!(client.get_alert_active(&owner, &id), Some(false));
+
+    // The owner may still edit the alert as long as it stays inactive.
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &false);
+
+    // Only the admin can lift the suspension; lifting it does not reactivate.
+    assert_eq!(
+        client
+            .try_unlock_alert_by_admin(&owner, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+    client.unlock_alert_by_admin(&admin, &id);
+    assert!(!client.is_alert_suspended(&id));
+    assert_eq!(client.get_alert_active(&owner, &id), Some(false));
+
+    client.update_alert(&owner, &id, &rules, &true);
+    assert_eq!(client.get_alert_active(&owner, &id), Some(true));
+
+    // Unlocking an alert that is not suspended is a no-op.
+    client.unlock_alert_by_admin(&admin, &id);
+}
+
+#[test]
+fn test_regression_admin_suspension_follows_the_alert() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let id = client.register_alert(
+        &owner,
+        &Address::generate(&env),
+        &str(&env, "Spam"),
+        &hash64(&env),
+        &rules,
+    );
+    client.deactivate_alert_by_admin(&admin, &id);
+
+    // Handing the alert to another account does not escape the suspension.
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+    client.accept_alert_transfer(&new_owner, &id);
+    assert_eq!(
+        client
+            .try_update_alert(&new_owner, &id, &rules, &true)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertSuspended
+    );
+
+    // Removing the alert clears the flag with it.
+    client.remove_alert(&new_owner, &id);
+    assert!(!client.is_alert_suspended(&id));
+}

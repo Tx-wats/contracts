@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `unlockAlertByAdmin({ admin, config_id })` and `isAlertSuspended({ config_id })`; `updateAlert` can now fail with `AlertSuspended`. (#202)
 - `pruneExpiredAlerts({ owner })` — permissionless clean-up of expired alerts still counted against an owner's quota. (#209)
 
 ### Changed — BREAKING

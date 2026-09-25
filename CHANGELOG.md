@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Owners could instantly undo `deactivate_alert_by_admin`.** An admin
+  deactivation is now also a suspension (`DataKey::AdminSuspended`): the owner
+  cannot reactivate the alert (`AlertSuspended`, 21) until an admin calls the
+  new `unlock_alert_by_admin`. The suspension survives ownership transfer and
+  is cleared when the alert is removed; `is_alert_suspended` reports it.
+  (issue #202)
 - **Ownership transfers bypassed the recipient's per-owner limit.** Accepting
   a transfer pushed the alert into the recipient's index without checking the
   limit, so colluding accounts could pile any number of alerts onto one owner.
