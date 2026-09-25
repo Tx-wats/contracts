@@ -2713,7 +2713,7 @@ impl AlertRegistry {
 impl AlertRegistry {
     /// Validates a single rule descriptor string.
     ///
-    /// Accepts only `"rule:transfer"` and `"rule:mint"`.
+    /// Accepts the registry's recognized rule descriptors.
     /// Returns [`ContractError::InvalidRuleDescriptor`] on any other string.
     ///
     /// Exposed for testing, integration, and fuzz testing.
@@ -2743,25 +2743,14 @@ impl AlertRegistry {
         if rules.len() > 50 {
             return Err(ContractError::TooManyRules);
         }
-        // With only two recognized descriptors, each may appear at most once.
-        let transfer = String::from_str(env, "rule:transfer");
-        let mint = String::from_str(env, "rule:mint");
-        let mut saw_transfer = false;
-        let mut saw_mint = false;
+        let mut seen: Vec<String> = vec![env];
         for i in 0..rules.len() {
             let rule = rules.get(i).unwrap();
             Self::validate_rule(env, &rule)?;
-            if rule == transfer {
-                if saw_transfer {
-                    return Err(ContractError::DuplicateRule);
-                }
-                saw_transfer = true;
-            } else if rule == mint {
-                if saw_mint {
-                    return Err(ContractError::DuplicateRule);
-                }
-                saw_mint = true;
+            if seen.contains(&rule) {
+                return Err(ContractError::DuplicateRule);
             }
+            seen.push_back(rule);
         }
         Ok(())
     }
