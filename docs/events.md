@@ -282,13 +282,13 @@ Emitted when an alert limit is changed.
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("limit")` |
-| Data | `(admin: Address, kind: Symbol("owner") \| Symbol("contract"), limit: u32)` |
+| Data | `(admin: Address, kind: Symbol("owner") \| Symbol("contract") \| Symbol("global"), limit: u32)` |
 
-The `kind` value identifies whether the per-owner or per-contract limit was
-changed.
+The `kind` value identifies whether the per-owner, per-contract, or global
+limit was changed.
 
 **Status:** ✅ implemented (`set_per_owner_alert_limit`,
-`set_per_contract_alert_limit`)
+`set_per_contract_alert_limit`, `set_global_alert_limit`)
 
 ---
 

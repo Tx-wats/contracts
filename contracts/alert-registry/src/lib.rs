@@ -711,6 +711,9 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("limit"))` with data
+    /// `(admin: Address, Symbol("global"), limit: u32)`.
     pub fn set_global_alert_limit(
         env: Env,
         admin: Address,
@@ -724,6 +727,10 @@ impl AlertRegistry {
             .set(&symbol_short!("GLIMIT"), &limit);
         env.storage().instance().set(&instance_key::GLIMIT, &limit);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("limit")),
+            (admin, symbol_short!("global"), limit),
+        );
         Ok(())
     }
 

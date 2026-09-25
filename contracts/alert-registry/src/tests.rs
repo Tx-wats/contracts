@@ -2359,6 +2359,34 @@ fn test_global_alert_limit_defaults_to_zero_unlimited() {
 }
 
 #[test]
+fn test_set_global_alert_limit_emits_admin_limit_event() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_global_alert_limit(&admin, &11u32);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("limit")
+        })
+        .expect("admin.limit event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(kind, symbol_short!("global"));
+    assert_eq!(emitted_limit, 11u32);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #13)")]
 fn test_global_alert_limit_enforced_across_owners() {
     let (env, client) = setup();
