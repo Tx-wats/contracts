@@ -547,6 +547,10 @@ impl AlertRegistry {
         Self::assert_admin(&env, &admin)?;
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("upgrade")),
+            (admin, new_wasm_hash),
+        );
 
         Ok(())
     }
@@ -641,7 +645,7 @@ impl AlertRegistry {
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
-            (admin, limit),
+            (admin, symbol_short!("owner"), limit),
         );
         Ok(())
     }
@@ -665,7 +669,8 @@ impl AlertRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Events
-    /// Emits `(Symbol("admin"), Symbol("limit"))` with data `(Symbol("contract"), limit: u32)`.
+    /// Emits `(Symbol("admin"), Symbol("limit"))` with data
+    /// `(admin: Address, Symbol("contract"), limit: u32)`.
     pub fn set_per_contract_alert_limit(
         env: Env,
         admin: Address,
@@ -682,7 +687,7 @@ impl AlertRegistry {
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
-            (symbol_short!("contract"), limit),
+            (admin, symbol_short!("contract"), limit),
         );
         Ok(())
     }
@@ -706,6 +711,9 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("limit"))` with data
+    /// `(admin: Address, Symbol("global"), limit: u32)`.
     pub fn set_global_alert_limit(
         env: Env,
         admin: Address,
@@ -719,6 +727,10 @@ impl AlertRegistry {
             .set(&symbol_short!("GLIMIT"), &limit);
         env.storage().instance().set(&instance_key::GLIMIT, &limit);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("limit")),
+            (admin, symbol_short!("global"), limit),
+        );
         Ok(())
     }
 
@@ -775,7 +787,7 @@ impl AlertRegistry {
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("watchreg")),
-            (admin, watcher_registry),
+            (admin, Some(watcher_registry)),
         );
         Ok(())
     }
@@ -800,6 +812,10 @@ impl AlertRegistry {
         env.storage().instance().remove(&symbol_short!("WATCHREG"));
         env.storage().instance().remove(&instance_key::WATCHREG);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("watchreg")),
+            (admin, Option::<Address>::None),
+        );
         Ok(())
     }
 
@@ -3257,7 +3273,9 @@ mod tests {
             .expect("admin.limit event must be emitted");
 
         let (_, _, data) = limit_event;
-        let (kind, emitted_limit): (Symbol, u32) = soroban_sdk::FromVal::from_val(&env, &data);
+        let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+            soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_admin, admin);
         assert_eq!(kind, symbol_short!("contract"));
         assert_eq!(emitted_limit, 7u32);
     }
