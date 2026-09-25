@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `acceptAlertTransfer({ new_owner, config_id })` signed by the recipient. Also
   added: `rejectAlertTransfer`, `cancelAlertTransfer` and
   `getPendingAlertTransfer`. (#201)
+- `bumpInstanceTtl()` — permissionless keep-alive for the contract's instance entry. (#206)
+
+### Changed — BREAKING
+- `deactivateAllAlerts({ caller })` now resolves to `Result<u32>` instead of a
+  bare `u32`: it fails with `Paused` while the contract is paused instead of
+  returning `0`. (#204)
 
 ### Changed — BREAKING (0.2.0)
 - `webhook_hash` / `new_webhook_hash` arguments and the `webhook_hash` /

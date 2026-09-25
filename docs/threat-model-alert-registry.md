@@ -19,7 +19,7 @@ The contract supports:
 | **Webhook Endpoints & Hashes** | SHA-256 hex digests (`webhook_hash` and staged `pending_webhook_hash`) that off-chain watcher nodes use to authenticate destination webhook URLs. |
 | **Owner & Contract Indices** | The lookup indexes mapping owners to alert IDs (`DataKey::OwnerIndex`) and watched contracts to alert IDs (`DataKey::ContractIndex`). |
 | **Active Status Index** | Fast-path boolean lookup table stored under `DataKey::AlertActive(id)`. |
-| **Monotonic ID Counter** | Global auto-incrementing identifier (`DataKey::NextId`) ensuring unique alert IDs. |
+| **Monotonic ID Counter** | Global auto-incrementing identifier (`instance_key::NEXT_ID`, instance storage) ensuring unique alert IDs. |
 | **Admin Authority** | Privileged control over global operational limits (`LIMIT`), administrative removal (`remove_alert_by_admin`), admin transfer (`transfer_admin`), and watcher registry linking (`WATCHREG`). |
 | **Storage State & TTL** | Persistent storage entries kept alive through automatic write-time renewal, owner-authenticated `renew_alert_ttl`, and permissionless `bump_alert`. |
 

@@ -26,7 +26,8 @@ are the operator's responsibility.
   other `#[contracttype]` struct must keep its existing fields with the same
   names and types. Adding a field changes the encoding of every already-stored
   value, so a migration entrypoint is needed rather than a plain upgrade.
-- **Counters must be preserved.** `AlertRegistry`'s `NextId` and
+- **Counters must be preserved.** `AlertRegistry`'s `NEXT_ID` counter
+  (`instance_key::NEXT_ID`, an instance-storage key) and
   `WatcherRegistry`'s `W_CNT` are read as-is after the upgrade; a build that
   interprets them differently will hand out duplicate alert IDs or a wrong
   watcher count.

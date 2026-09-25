@@ -249,6 +249,75 @@ Because these triggers are decoupled, releases must follow the sequence below in
 - [ ] `Publish Contract ABIs` workflow passed and attached ABI JSON files (`alert-registry.json`, `watcher-registry.json`) to the release.
 - [ ] `Publish TypeScript Bindings` workflow passed and published the latest package to npm.
 
+## Merge Policy
+
+### Branch Protection on `main`
+
+The `main` branch is protected. A pull request **cannot be merged** unless all
+of the following conditions are met:
+
+| Requirement | Details |
+|---|---|
+| **`ci` passes** | Full Rust build, tests, Clippy, formatting, README snippet check |
+| **`msrv` passes** | Workspace compiles cleanly on Rust 1.88 |
+| **`Check WASM binary sizes` passes** | Optimised WASM outputs stay under 60 KB |
+| **Branch is up to date** | The PR branch must be rebased or merged against the current `main` tip before merging, so semantic merge conflicts are caught before they land |
+
+These checks correspond to the `ci`, `msrv`, and `wasm-size` jobs in
+`.github/workflows/ci.yml` and `.github/workflows/wasm-size-check.yml`.
+
+### Why
+
+Issues #179–#192 showed that PRs #160–#175 were merged while the workspace did
+not compile. CI was running on every PR but the checks were not *required*, so
+GitHub allowed merging regardless of outcome. Every contributor who branched off
+`main` after those merges inherited a broken tree. Requiring green CI closes
+that gap.
+
+### What to do if your PR is blocked
+
+1. **CI failed** — fix the failure, push a new commit, and wait for CI to re-run.
+   The checks are re-evaluated on every push to the PR branch.
+2. **Branch is out of date** — update your branch against the latest `main`:
+   ```bash
+   git fetch origin
+   git rebase origin/main   # or: git merge origin/main
+   git push --force-with-lease
+   ```
+3. **Flaky check** — if a check failed for a clearly unrelated infrastructure
+   reason (network timeout, rate limit), re-run it from the GitHub Actions UI.
+   Do not merge around the failure.
+
+### Setting up branch protection (maintainers)
+
+If you need to re-apply the branch protection rule (e.g. after a repo transfer),
+run the following with a PAT that has `repo` → `administration` write scope:
+
+```bash
+gh api \
+  --method PUT \
+  -H "Accept: application/vnd.github+json" \
+  /repos/wendyamoni-creator/contracts/branches/main/protection \
+  --input - <<'EOF'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "ci",
+      "msrv",
+      "Check WASM binary sizes"
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": null,
+  "restrictions": null
+}
+EOF
+```
+
+`"strict": true` enforces the up-to-date requirement.
+`"enforce_admins": true` means repository admins are also subject to the rule.
+
 ## Sister Repos
  
 - **Core engine:** https://github.com/Tx-wat/stellar-txwatch-core
