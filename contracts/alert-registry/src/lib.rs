@@ -2258,17 +2258,22 @@ impl AlertRegistry {
         Self::owner_live_count(&env, &owner)
     }
 
-    /// Get the number of live (non-removed, unexpired) alerts targeting
+    /// Get the number of active (non-removed, unexpired) alerts targeting
     /// `target_contract`, aggregated across every contributing owner.
     ///
     /// Keyed by target contract rather than owner. Unlike
-    /// [`AlertRegistry::get_active_alert_count`], this does **not** filter by the
-    /// `active` flag: deactivated-but-not-removed alerts still count.
+    /// [`AlertRegistry::get_non_removed_alert_count`], this filters by the
+    /// `active` flag and excludes deactivated alerts.
     pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
         let ids = Self::contract_index(&env, &target_contract);
         let mut count: u32 = 0;
         for id in ids.iter() {
-            if env.storage().persistent().has(&DataKey::Alert(id)) {
+            if env
+                .storage()
+                .persistent()
+                .get::<DataKey, bool>(&DataKey::AlertActive(id))
+                == Some(true)
+            {
                 count += 1;
             }
         }

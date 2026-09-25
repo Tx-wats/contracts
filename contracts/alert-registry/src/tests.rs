@@ -2508,6 +2508,24 @@ fn test_per_contract_alert_limit_freed_by_removal() {
 }
 
 #[test]
+fn test_per_contract_alert_count_excludes_deactivated_alerts() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    assert_eq!(client.get_active_contract_alert_count(&target), 1u32);
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:transfer")], &false);
+    assert_eq!(client.get_active_contract_alert_count(&target), 0u32);
+}
+
+#[test]
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_set_per_contract_alert_limit_requires_auth() {
     let env = Env::default();
