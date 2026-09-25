@@ -989,7 +989,12 @@ impl WatcherRegistry {
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("upgrade")),
+            (admin, new_wasm_hash),
+        );
 
         Ok(())
     }
@@ -1187,7 +1192,12 @@ impl WatcherRegistry {
                 Self::do_set_timelock_delay(&env, &caller, delay);
             }
             AdminAction::Upgrade(new_wasm_hash) => {
-                env.deployer().update_current_contract_wasm(new_wasm_hash);
+                env.deployer()
+                    .update_current_contract_wasm(new_wasm_hash.clone());
+                env.events().publish(
+                    (symbol_short!("admin"), symbol_short!("upgrade")),
+                    (caller.clone(), new_wasm_hash),
+                );
             }
         }
 

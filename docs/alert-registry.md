@@ -141,6 +141,12 @@ Registers a new alert configuration for a target contract address.
 
 Updates the rules and active status of an existing alert. Only the original owner may call this.
 
+### `set_alert_active`
+
+Updates only the active status of an existing alert. Only the original owner
+may call this. The alert's rules are preserved, making this the safe endpoint
+for pausing or resuming a single alert.
+
 **Requires auth:** `caller` (must match `owner` of the config)
 
 **Parameters**
@@ -149,7 +155,6 @@ Updates the rules and active status of an existing alert. Only the original owne
 |---|---|---|
 | `caller` | `Address` | Must be the alert owner |
 | `config_id` | `u64` | ID of the alert to update |
-| `rules` | `Vec<String>` | New rule descriptors |
 | `active` | `bool` | New active status |
 
 **Returns:** nothing
@@ -204,6 +209,13 @@ Transfers admin authority to a new address. Requires current admin auth.
 ### `get_admin`
 
 Returns the current admin address.
+
+### `get_configuration`
+
+Returns the complete administrative configuration in one call: `admin`,
+`paused`, the per-owner, per-contract, and global alert limits, and the
+optional `watcher_registry` address. This is the preferred read for dashboards
+that display registry configuration.
 
 **Returns:** `Result<Address, ContractError>`
 
@@ -434,6 +446,16 @@ If a `WatcherRegistry` is configured (via `set_watcher_registry`), `querier` mus
 | `config_id` | `u64` | Alert config ID |
 
 **Returns:** `Result<Option<AlertConfig>, ContractError>` — `Ok(Some(config))` if found, `Ok(None)` otherwise.
+
+---
+
+### `get_alerts_by_ids`
+
+Returns alert configurations for a supplied list of IDs in input order,
+omitting IDs whose records no longer exist or have expired. Watcher
+authorization, when configured, is checked once for the entire batch. Use this
+when IDs came from `get_alert_ids_by_owner` or event processing instead of
+calling `get_alert` separately for every ID.
 
 ---
 
@@ -689,6 +711,10 @@ Continue paging by increasing `offset` by `limit` until it reaches
 `get_alert_count()`; a short or empty page does not indicate that later IDs
 cannot match. A tombstone has `active == false` and identifies an alert that
 must be removed from the watcher's local state.
+All paginated alert queries cap `limit` at `MAX_PAGE_SIZE` (100 IDs), so
+passing a larger value is safe and does not create an unbounded RPC simulation.
+
+**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_at >= since`.
 
 ---
 
@@ -813,6 +839,7 @@ This includes admin moderation (`deactivate_alert_by_admin`, `unlock_alert_by_ad
 | `NotAWatcher` | 5 | Watcher-gating is enabled and `querier` is not a registered watcher |
 | `InvalidWebhookHash` | 6 | No longer returned: webhook hashes are `BytesN<32>`, so a wrong length cannot be constructed. Kept so the code is never reused. |
 | `LabelTooLong` | 7 | `label` exceeds 128 bytes |
+| `EmptyLabel` | 22 | `label` is empty |
 | `TooManyRules` | 8 | `rules` exceeds the 50-rule maximum |
 | `InvalidRuleDescriptor` | 9 | A rule is not a recognised descriptor (`rule:transfer`, `rule:mint`) |
 | `OwnerAlertLimitExceeded` | 10 | Owner is at the configured per-owner active alert limit |

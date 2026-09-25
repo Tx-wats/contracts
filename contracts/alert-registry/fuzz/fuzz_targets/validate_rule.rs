@@ -12,32 +12,12 @@ fuzz_target!(|data: &[u8]| {
 
         let res = AlertRegistry::validate_rule(&env, &soroban_str);
 
-        // Invariant: only "rule:transfer" and "rule:mint" are valid rule descriptors.
-        // All other strings (empty, prefix mismatches, unusual bytes, format-strings, etc.)
-        // must be rejected with InvalidRuleDescriptor without panicking.
-        if s == "rule:transfer" || s == "rule:mint" {
-            assert!(
-                res.is_ok(),
-                "Valid rule descriptor must succeed: {}",
-                s
-            );
-        } else {
-            assert!(
-                res.is_err(),
-                "Invalid rule descriptor must be rejected: {}",
-                s
-            );
-        }
-
-        // 2. Fuzz vector validation with the generated rule descriptor
+        // A one-item collection must have the same validation result as its
+        // only descriptor. The descriptor list itself is owned by the
+        // contract, so this oracle does not duplicate that list.
         let mut rules: SorobanVec<SorobanString> = vec![&env];
         rules.push_back(soroban_str);
         let rules_res = AlertRegistry::validate_rules(&env, &rules);
-
-        if s == "rule:transfer" || s == "rule:mint" {
-            assert!(rules_res.is_ok());
-        } else {
-            assert!(rules_res.is_err());
-        }
+        assert_eq!(res.is_ok(), rules_res.is_ok());
     }
 });

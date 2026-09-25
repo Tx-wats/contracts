@@ -1150,6 +1150,25 @@ fn test_regression_deactivate_all_alerts_rejects_while_paused() {
     assert!(!client.get_alert(&owner, &id).unwrap().active);
 }
 
+/// A paused watcher-registry update must fail before probing the supplied
+/// address, so a malformed address cannot trap or replace `Paused`.
+#[test]
+fn test_regression_set_watcher_registry_checks_pause_before_probe() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let invalid_registry = Address::generate(&env);
+    client.initialize(&admin);
+    client.pause(&admin);
+
+    assert_eq!(
+        client
+            .try_set_watcher_registry(&admin, &invalid_registry)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Paused
+    );
+}
+
 /// Remaining TTL of the contract's instance entry.
 fn instance_ttl(env: &Env, client: &AlertRegistryClient) -> u32 {
     use soroban_sdk::testutils::storage::Instance as _;

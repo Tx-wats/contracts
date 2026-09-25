@@ -276,30 +276,48 @@ Emitted when the admin role is transferred to a new address.
 
 ### `admin.limit`
 
-Emitted when the per-owner alert limit is changed.
+Emitted when an alert limit is changed.
 
 | Field | Value |
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("limit")` |
-| Data | `(admin: Address, limit: u32)` |
+| Data | `(admin: Address, kind: Symbol("owner") \| Symbol("contract") \| Symbol("global"), limit: u32)` |
 
-**Status:** ✅ implemented (`set_per_owner_alert_limit`)
+The `kind` value identifies whether the per-owner, per-contract, or global
+limit was changed.
+
+**Status:** ✅ implemented (`set_per_owner_alert_limit`,
+`set_per_contract_alert_limit`, `set_global_alert_limit`)
 
 ---
 
 ### `admin.watchreg`
 
-Emitted when the `WatcherRegistry` contract address is configured, gating the
-read-side queries behind watcher authorization.
+Emitted when watcher-gating is enabled or disabled. A `None` registry means
+gating was disabled.
 
 | Field | Value |
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("watchreg")` |
-| Data | `(admin: Address, watcher_registry: Address)` |
+| Data | `(admin: Address, watcher_registry: Option<Address>)` |
 
-**Status:** ✅ implemented (`set_watcher_registry`)
+**Status:** ✅ implemented (`set_watcher_registry`, `clear_watcher_registry`)
+
+---
+
+### `admin.upgrade`
+
+Emitted after the registry WASM is replaced.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("upgrade")` |
+| Data | `(admin: Address, new_wasm_hash: BytesN<32>)` |
+
+**Status:** ✅ implemented (`upgrade`)
 
 ---
 
@@ -475,6 +493,21 @@ Emitted when the timelock delay applied to sensitive admin actions is changed.
 | Data | `(caller: Address, delay_ledgers: u32)` |
 
 **Status:** ✅ implemented (`set_timelock_delay`, `execute_admin_action`)
+
+---
+
+### `admin.upgrade`
+
+Emitted after the watcher registry WASM is replaced, whether the upgrade was
+called directly or executed through the timelock.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("upgrade")` |
+| Data | `(admin: Address, new_wasm_hash: BytesN<32>)` |
+
+**Status:** ✅ implemented (`upgrade`, `execute_admin_action`)
 
 ---
 
