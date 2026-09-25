@@ -683,6 +683,9 @@ Enables incremental sync for watcher nodes by passing the ledger timestamp of th
 | `offset` | `u32` | Number of alert IDs to skip from the start of ID space |
 | `limit` | `u32` | Maximum number of IDs to scan |
 
+All paginated alert queries cap `limit` at `MAX_PAGE_SIZE` (100 IDs), so
+passing a larger value is safe and does not create an unbounded RPC simulation.
+
 **Returns:** `Vec<AlertConfig>` — live alerts matching `updated_at >= since`.
 
 ---

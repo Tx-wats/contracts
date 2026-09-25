@@ -62,6 +62,8 @@ pub const INSTANCE_BUMP_THRESHOLD: u32 = 17_280;
 /// TTL, in ledgers, the instance entry is extended to. Approximately 31 days,
 /// the protocol maximum. See `docs/ttl.md`.
 pub const INSTANCE_BUMP_AMOUNT: u32 = 535_680;
+/// Maximum number of IDs scanned by a single paginated query.
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 /// Storage key variants used to address persistent and instance entries.
 #[contracttype]
@@ -2106,7 +2108,7 @@ impl AlertRegistry {
 
         let range_start = u64::from(offset).min(total);
         let range_end = u64::from(offset)
-            .saturating_add(u64::from(limit))
+            .saturating_add(u64::from(limit.min(MAX_PAGE_SIZE)))
             .min(total);
 
         let mut out: Vec<AlertConfig> = vec![&env];
@@ -2177,7 +2179,7 @@ impl AlertRegistry {
 
         let range_start = u64::from(offset).min(total);
         let range_end = u64::from(offset)
-            .saturating_add(u64::from(limit))
+            .saturating_add(u64::from(limit.min(MAX_PAGE_SIZE)))
             .min(total);
 
         let mut out: Vec<AlertConfig> = vec![&env];
@@ -2727,7 +2729,9 @@ impl AlertRegistry {
         let mut out: Vec<AlertConfig> = vec![env];
         let count = ids.len();
         let first = offset.min(count);
-        let last = offset.saturating_add(limit).min(count);
+        let last = offset
+            .saturating_add(limit.min(MAX_PAGE_SIZE))
+            .min(count);
         for i in first..last {
             let id = ids.get(i).unwrap();
             if let Some(cfg) = env.storage().persistent().get(&DataKey::Alert(id)) {

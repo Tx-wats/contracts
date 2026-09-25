@@ -1887,6 +1887,40 @@ fn test_configs_paginated_boundaries() {
     assert_eq!(p5.len(), 0);
 }
 
+#[test]
+fn test_paginated_queries_cap_unbounded_limits() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    for i in 0..=MAX_PAGE_SIZE {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64c(&env, char::from(b'a' + (i % 26) as u8)),
+            &vec![&env],
+        );
+    }
+
+    assert_eq!(
+        client
+            .get_alerts_by_owner_paginated(&owner, &owner, &0, &u32::MAX)
+            .len(),
+        MAX_PAGE_SIZE
+    );
+    assert_eq!(
+        client
+            .get_contract_alerts_paginated(&owner, &target, &0, &u32::MAX)
+            .len(),
+        MAX_PAGE_SIZE
+    );
+    assert_eq!(
+        client.get_alerts_modified_since(&0, &0, &u32::MAX).len(),
+        MAX_PAGE_SIZE
+    );
+}
+
 // ── Issue #34 / #201 — alert ownership transfer ────────────────────────────────
 
 #[test]
