@@ -986,6 +986,53 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Update only the active status of an existing alert.
+    ///
+    /// Unlike [`AlertRegistry::update_alert`], this does not accept or replace
+    /// the alert's rules. Use this endpoint when pausing or resuming an alert
+    /// so a client cannot accidentally clear its rules with an empty vector.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must also
+    /// own the alert.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify
+    /// an existing alert, [`ContractError::Unauthorized`] if `caller` is not
+    /// the owner, or [`ContractError::AlertSuspended`] when an admin
+    /// suspension blocks reactivation.
+    pub fn set_alert_active(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        active: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let mut config = Self::load_alert(&env, config_id)?;
+        Self::assert_owner(&config, &caller)?;
+        if active
+            && env
+                .storage()
+                .persistent()
+                .has(&DataKey::AdminSuspended(config_id))
+        {
+            return Err(ContractError::AlertSuspended);
+        }
+
+        config.active = active;
+        config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
+        Self::persist_alert(&env, config_id, &config);
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("update")),
+            (config_id, config.owner, active),
+        );
+        Ok(())
+    }
+
     /// Update the webhook hash for an existing alert.
     ///
     /// Takes effect immediately and discards any rotation staged by

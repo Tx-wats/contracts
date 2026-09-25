@@ -141,6 +141,12 @@ Registers a new alert configuration for a target contract address.
 
 Updates the rules and active status of an existing alert. Only the original owner may call this.
 
+### `set_alert_active`
+
+Updates only the active status of an existing alert. Only the original owner
+may call this. The alert's rules are preserved, making this the safe endpoint
+for pausing or resuming a single alert.
+
 **Requires auth:** `caller` (must match `owner` of the config)
 
 **Parameters**

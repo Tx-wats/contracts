@@ -2693,6 +2693,29 @@ fn test_get_alerts_by_ids_preserves_order_and_skips_missing() {
     assert_eq!(configs.get(0).unwrap().label, str(&env, "second"));
 }
 
+#[test]
+fn test_set_alert_active_preserves_rules() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "alert"),
+        &hash64(&env),
+        &rules,
+    );
+
+    client.set_alert_active(&owner, &id, &false);
+    assert!(!client.get_alert_active(&owner, &id).unwrap());
+    assert_eq!(client.get_alert(&owner, &id).unwrap().rules, rules);
+
+    client.set_alert_active(&owner, &id, &true);
+    assert!(client.get_alert_active(&owner, &id).unwrap());
+    assert_eq!(client.get_alert(&owner, &id).unwrap().rules, rules);
+}
+
 // 10. Paginated queries work without watcher gating
 #[test]
 fn test_paginated_queries_no_gating() {
