@@ -68,6 +68,9 @@ pub const INSTANCE_BUMP_AMOUNT: u32 = 535_680;
 pub enum DataKey {
     /// Stores an [`AlertConfig`] keyed by its numeric ID.
     Alert(u64),
+    /// Stores the last config for a removed alert so incremental sync can
+    /// deliver an inactive tombstone.
+    RemovedAlert(u64),
     /// Stores just the `active` bool separately so it can be read without
     /// deserializing the full [`AlertConfig`].
     AlertActive(u64),
@@ -2069,10 +2072,9 @@ impl AlertRegistry {
     /// * `limit` - Maximum number of IDs to scan starting at `offset`.
     ///
     /// # Returns
-    /// A `Vec<AlertConfig>` containing every live alert in the ID range
-    /// `[offset, offset + limit)` (clamped to the current alert count) with
-    /// `updated_at >= since`. Alerts that have been removed are silently
-    /// omitted.
+    /// A `Vec<AlertConfig>` containing every live alert or removal tombstone
+    /// in the ID range `[offset, offset + limit)` (clamped to the current
+    /// alert count) with `updated_at >= since`.
     ///
     /// # Note
     /// Because multiple ledgers can share the same close-time second, timestamp-based
@@ -2106,6 +2108,11 @@ impl AlertRegistry {
                 .storage()
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
+                .or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get::<DataKey, AlertConfig>(&DataKey::RemovedAlert(id))
+                })
             {
                 if cfg.updated_at >= since {
                     out.push_back(cfg);
@@ -2144,9 +2151,9 @@ impl AlertRegistry {
     /// * `limit` - Maximum number of IDs to scan starting at `offset`.
     ///
     /// # Returns
-    /// A `Vec<AlertConfig>` containing every live alert in the ID range
-    /// `[offset, offset + limit)` (clamped to the current alert count) with
-    /// `updated_ledger >= since_ledger`. Alerts that have been removed are silently omitted.
+    /// A `Vec<AlertConfig>` containing every live alert or removal tombstone
+    /// in the ID range `[offset, offset + limit)` (clamped to the current
+    /// alert count) with `updated_ledger >= since_ledger`.
     ///
     /// # Note
     /// The scan cost of a single call is bounded by `limit`, not by the total
@@ -2178,6 +2185,11 @@ impl AlertRegistry {
                 .storage()
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
+                .or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get::<DataKey, AlertConfig>(&DataKey::RemovedAlert(id))
+                })
             {
                 if cfg.updated_ledger >= since_ledger {
                     out.push_back(cfg);
@@ -2421,6 +2433,19 @@ impl AlertRegistry {
 
     fn remove_alert_record(env: &Env, config: &AlertConfig, config_id: u64, caller: &Address) {
         Self::clear_pending_transfer(env, config_id);
+        let mut tombstone = config.clone();
+        tombstone.pending_webhook_hash = None;
+        tombstone.active = false;
+        tombstone.updated_at = env.ledger().timestamp();
+        tombstone.updated_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::RemovedAlert(config_id), &tombstone);
+        env.storage().persistent().extend_ttl(
+            &DataKey::RemovedAlert(config_id),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
         env.storage()
             .persistent()
             .remove(&DataKey::AdminSuspended(config_id));

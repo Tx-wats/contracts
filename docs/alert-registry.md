@@ -683,10 +683,12 @@ Enables incremental sync for watcher nodes by passing the ledger timestamp of th
 | `offset` | `u32` | Number of alert IDs to skip from the start of ID space |
 | `limit` | `u32` | Maximum number of IDs to scan |
 
-**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_at >= since` among
-the IDs in `[offset, offset + limit)`. Continue paging by increasing `offset` by
-`limit` until it reaches `get_alert_count()`; a short or empty page does not
-indicate that later IDs cannot match.
+**Returns:** `Vec<AlertConfig>` — live alerts and inactive removal tombstones
+matching `updated_at >= since` among the IDs in `[offset, offset + limit)`.
+Continue paging by increasing `offset` by `limit` until it reaches
+`get_alert_count()`; a short or empty page does not indicate that later IDs
+cannot match. A tombstone has `active == false` and identifies an alert that
+must be removed from the watcher's local state.
 
 ---
 

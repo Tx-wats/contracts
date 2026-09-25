@@ -1764,12 +1764,14 @@ fn test_get_alerts_modified_since_ledger_precision() {
     assert_eq!(page2.len(), 1);
     assert_eq!(page2.get(0).unwrap().label, str(&env, "A1"));
 
-    // Removed alerts are excluded
+    // Removed alerts are returned as inactive tombstones
     client.remove_alert(&owner, &id1);
     let res_after_remove = client.get_alerts_modified_since_ledger(&0, &0u32, &u32::MAX);
-    assert_eq!(res_after_remove.len(), 2);
+    assert_eq!(res_after_remove.len(), 3);
     assert_eq!(res_after_remove.get(0).unwrap().label, str(&env, "A0"));
-    assert_eq!(res_after_remove.get(1).unwrap().label, str(&env, "A2"));
+    assert_eq!(res_after_remove.get(1).unwrap().label, str(&env, "A1"));
+    assert!(!res_after_remove.get(1).unwrap().active);
+    assert_eq!(res_after_remove.get(2).unwrap().label, str(&env, "A2"));
 }
 
 #[test]
