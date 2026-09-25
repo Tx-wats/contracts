@@ -9,6 +9,12 @@
 // errors. Intra-doc links inside `#[contractimpl]` must use the full type path
 // (not `Self::`) because the macro copies method docs into generated modules.
 #![warn(rustdoc::broken_intra_doc_links)]
+// `soroban_sdk::events::Events::publish` is deprecated in soroban-sdk 25 in
+// favour of `#[contractevent]`. The migration changes the emitted topic layout
+// (an ABI change for indexers), so it is a decision of its own rather than part
+// of a repair commit — but with `clippy -D warnings` in CI every merge is
+// rejected for it in the meantime. Remove this allow with the migration.
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec, Address,
@@ -105,7 +111,7 @@ pub const MAX_WATCHERS: u32 = 100;
 /// an operational, not a workload, structure.
 pub const MAX_ADMINS: u32 = 10;
 
-/// Maximum timelock delay allowed in ledgers (518_400 ledgers ≈ 30 days at nominal 5s/ledger).
+/// Maximum timelock delay allowed in ledgers (`518_400` ledgers ≈ 30 days at nominal 5s/ledger).
 ///
 /// Prevents governance deadlock where proposals would saturate at `u32::MAX` and
 /// become permanently unexecutable.
@@ -406,6 +412,8 @@ impl WatcherRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
+    /// # Panics
+    /// Panics if the contract's stored admin set is malformed.
     pub fn transfer_admin(
         env: Env,
         admin: Address,
@@ -502,10 +510,8 @@ impl WatcherRegistry {
             .instance()
             .remove(&DataKey::PendingAdminTransfer);
 
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("cancel")),
-            admin,
-        );
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("cancel")), admin);
 
         Ok(())
     }
@@ -538,7 +544,6 @@ impl WatcherRegistry {
         }
         if watchers.len() >= MAX_WATCHERS {
             return Err(ContractError::TooManyWatchers);
-            return Err(ContractError::MaxWatchersReached);
         }
         watchers.push_back(watcher.clone());
         env.storage().instance().set(&DataKey::Watchers, &watchers);
@@ -797,14 +802,17 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
-
-        Self::do_clear_all_watchers(&env);
         Self::assert_not_paused(&env)?;
 
+        // `MIN_WATCHERS` has to be checked before the registry is cleared:
+        // reading the watchers back afterwards always found an empty set, so
+        // the guard never fired and the call succeeded.
         let watchers = Self::load_watchers(&env);
         if !watchers.is_empty() && MIN_WATCHERS > 0 {
             return Err(ContractError::BelowMinWatchers);
         }
+
+        Self::do_clear_all_watchers(&env);
 
         for i in 0..watchers.len() {
             let w = watchers.get(i).unwrap();
@@ -886,6 +894,8 @@ impl WatcherRegistry {
     /// `offset` and `limit` are saturating — an `offset` beyond the end of
     /// the list returns an empty page rather than erroring.
     #[must_use]
+    /// # Panics
+    /// Panics if the contract's stored watcher set is malformed.
     pub fn get_watchers_paginated(env: Env, offset: u32, limit: u32) -> Vec<Address> {
         let watchers = Self::load_watchers(&env);
         let count = watchers.len();
@@ -1270,11 +1280,7 @@ impl WatcherRegistry {
     }
 
     /// Add `new_admin` to the admin set, idempotently and within [`MAX_ADMINS`].
-    fn do_add_admin(
-        env: &Env,
-        caller: &Address,
-        new_admin: Address,
-    ) -> Result<(), ContractError> {
+    fn do_add_admin(env: &Env, caller: &Address, new_admin: Address) -> Result<(), ContractError> {
         let mut admins = Self::load_admins(env);
         for i in 0..admins.len() {
             if admins.get(i).unwrap() == new_admin {
@@ -1365,7 +1371,11 @@ impl WatcherRegistry {
 
     /// Return `Ok(())` if the contract is not paused, `Err(Paused)` otherwise.
     fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
-        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
         if paused {
             return Err(ContractError::Paused);
         }
@@ -1389,6 +1399,58 @@ impl WatcherRegistry {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+// ── Test event helpers (SDK 25) ──────────────────────────────────────────────
+
+/// Every event emitted in `env`, flattened back into
+/// `(emitter, topics, data)` SDK values.
+///
+/// `soroban_sdk` 25's `Events::all()` returns a wrapper with no slice
+/// accessors, so the underlying XDR events are read directly and converted
+/// back into `Val`s. The emitter is kept as `Val::U32_ZERO`: tests only use it
+/// as a positional placeholder, and the XDR contract id is not needed to
+/// identify an event inside a single-contract test.
+#[cfg(test)]
+pub(crate) fn emitted_events(
+    env: &Env,
+) -> soroban_sdk::Vec<(
+    soroban_sdk::Val,
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+)> {
+    use soroban_sdk::{testutils::Events as _, xdr::ContractEventBody, IntoVal, TryFromVal, Val};
+    let mut out: soroban_sdk::Vec<(Val, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::Vec::new(env);
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(v0) = &event.body;
+        let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
+        for topic in v0.topics.iter() {
+            topics.push_back(Val::try_from_val(env, topic).unwrap());
+        }
+        let data = Val::try_from_val(env, &v0.data).unwrap();
+        out.push_back((Val::U32_ZERO.into_val(env), topics, data));
+    }
+    out
+}
+
+/// The first emitted event whose `(emitter, topics, data)` matches `pred`.
+#[cfg(test)]
+pub(crate) fn find_event(
+    env: &Env,
+    pred: impl Fn(&soroban_sdk::Val, &soroban_sdk::Vec<soroban_sdk::Val>, &soroban_sdk::Val) -> bool,
+) -> Option<(
+    soroban_sdk::Val,
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+)> {
+    let events = emitted_events(env);
+    for i in 0..events.len() {
+        let entry = events.get(i).unwrap();
+        if pred(&entry.0, &entry.1, &entry.2) {
+            return Some(entry);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 #[path = "regression_tests.rs"]
 mod regression_tests;
@@ -1396,7 +1458,7 @@ mod regression_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn vec_contains(items: &Vec<Address>, target: &Address) -> bool {
         for i in 0..items.len() {
@@ -1410,10 +1472,11 @@ mod tests {
     fn setup() -> (Env, Address, WatcherRegistryClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        // The contract is deployed through its constructor, which is the only
+        // initialisation path since soroban-sdk 25 (see `__constructor`).
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         (env, admin, client)
     }
 
@@ -1432,13 +1495,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Auth, InvalidAction)")]
-    fn test_initialize_requires_admin_auth() {
-        let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
+    fn test_initialize_after_constructor_is_rejected() {
+        let (env, admin, client) = setup();
+        let other = Address::generate(&env);
+
+        // The constructor already installed an admin, so the legacy
+        // `initialize` entrypoint reports `AlreadyInitialized` and leaves the
+        // admin set alone.
+        assert_eq!(
+            client.try_initialize(&other).unwrap_err().unwrap(),
+            ContractError::AlreadyInitialized
+        );
+        assert_eq!(client.get_admin(), admin);
     }
 
     // 2. Happy path — remove watcher
@@ -1446,10 +1514,14 @@ mod tests {
     fn test_remove_watcher() {
         let (env, admin, client) = setup();
         let watcher = Address::generate(&env);
+        let keeper = Address::generate(&env);
 
+        // A second watcher keeps the MIN_WATCHERS invariant satisfied.
+        client.register_watcher(&admin, &keeper);
         client.register_watcher(&admin, &watcher);
         assert_eq!(client.try_remove_watcher(&admin, &watcher).unwrap(), Ok(()));
         assert!(!client.is_watcher_authorized(&watcher));
+        assert!(client.is_watcher_authorized(&keeper));
     }
 
     // 3. Happy path — two-step transfer admin (replaces entire admin set)
@@ -1609,10 +1681,7 @@ mod tests {
 
         // ...but removing the last remaining watcher is rejected.
         assert_eq!(
-            client
-                .try_remove_watcher(&admin, &w3)
-                .unwrap_err()
-                .unwrap(),
+            client.try_remove_watcher(&admin, &w3).unwrap_err().unwrap(),
             ContractError::BelowMinWatchers
         );
         assert_eq!(client.get_watchers().len(), 1);
@@ -1626,27 +1695,22 @@ mod tests {
     }
 
     #[test]
-    fn test_get_admin_uninitialized() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
+    fn test_get_admin_returns_deploy_admin() {
+        // The admin is installed by the constructor at deployment time.
+        let (env, admin, client) = setup();
+        let _ = env;
 
-        assert_eq!(
-            client.try_get_admin().unwrap_err().unwrap(),
-            ContractError::NotInitialized
-        );
+        assert_eq!(client.get_admin(), admin);
     }
 
-    // 11. get_admin panics with NotInitialized when contract is not initialized
+    // 11. the admin set contains the deployment admin from the start
     #[test]
-    #[should_panic(expected = "Error(Contract, #3)")]
-    fn test_get_admin_not_initialized() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
-        client.get_admin();
+    fn test_admin_set_contains_deploy_admin() {
+        let (env, admin, client) = setup();
+        let _ = env;
+
+        assert_eq!(client.get_admins().len(), 1);
+        assert_eq!(client.get_admins().get(0).unwrap(), admin);
     }
 
     // 12. clear_all_watchers removes all watchers
@@ -2184,7 +2248,9 @@ mod tests {
     fn test_remove_watcher_emits_event() {
         let (env, admin, client) = setup();
         let watcher = Address::generate(&env);
+        let keeper = Address::generate(&env);
 
+        client.register_watcher(&admin, &keeper);
         client.register_watcher(&admin, &watcher);
         client.remove_watcher(&admin, &watcher);
 
@@ -2196,7 +2262,9 @@ mod tests {
     fn test_remove_watcher_event_shape() {
         let (env, admin, client) = setup();
         let watcher = Address::generate(&env);
+        let keeper = Address::generate(&env);
 
+        client.register_watcher(&admin, &keeper);
         client.register_watcher(&admin, &watcher);
         client.remove_watcher(&admin, &watcher);
 
@@ -2242,8 +2310,13 @@ mod tests {
         client.remove_watcher(&admin, &w1);
         assert_eq!(client.get_watcher_count(), 1);
 
-        client.remove_watcher(&admin, &w2);
-        assert_eq!(client.get_watcher_count(), 0);
+        // Removing the last watcher is refused — MIN_WATCHERS keeps the
+        // registry from being emptied by accident.
+        assert_eq!(
+            client.try_remove_watcher(&admin, &w2).unwrap_err().unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert_eq!(client.get_watcher_count(), 1);
     }
 
     // ── replace_watcher tests ─────────────────────────────────────────────────
@@ -2333,8 +2406,6 @@ mod tests {
     // 30. replace_watcher emits watcher.remove and watcher.replace events
     #[test]
     fn test_replace_watcher_emits_events() {
-        use soroban_sdk::testutils::Events as _;
-
         let (env, admin, client) = setup();
         let old = Address::generate(&env);
         let new = Address::generate(&env);
@@ -2526,12 +2597,11 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_propose_admin_transfer_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let new_admin = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         env.set_auths(&[]);
         client.propose_admin_transfer(&admin, &new_admin);
     }
@@ -2540,12 +2610,11 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_accept_admin_transfer_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let new_admin = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         client.propose_admin_transfer(&admin, &new_admin);
         env.set_auths(&[]);
         client.accept_admin_transfer(&new_admin);
@@ -2591,12 +2660,14 @@ mod tests {
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
 
         let overflow = Address::generate(&env);
+        // `MaxAdminsReached` (17) and `TooManyAdmins` (8) describe the same
+        // condition; `add_admin` returns the latter.
         assert_eq!(
             client
                 .try_add_admin(&admin, &overflow)
                 .unwrap_err()
                 .unwrap(),
-            ContractError::MaxAdminsReached
+            ContractError::TooManyAdmins
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
     }
@@ -2696,10 +2767,10 @@ mod tests {
 
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        // Deployed through the constructor (the only init path since soroban-sdk 25).
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
 
         // Let the instance TTL decay before bumping.
         env.ledger().with_mut(|li| li.sequence_number += 1_000);
@@ -2716,11 +2787,10 @@ mod tests {
     #[test]
     fn test_bump_instance_ttl_needs_no_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         env.mock_all_auths();
-        client.initialize(&admin);
         client.register_watcher(&admin, &admin);
 
         env.set_auths(&[]);
@@ -2901,7 +2971,9 @@ mod tests {
         client.set_timelock_delay(&admin, &TEST_DELAY);
         // Raising is allowed directly.
         assert_eq!(
-            client.try_set_timelock_delay(&admin, &(TEST_DELAY * 2)).unwrap(),
+            client
+                .try_set_timelock_delay(&admin, &(TEST_DELAY * 2))
+                .unwrap(),
             Ok(())
         );
         // Lowering (including disabling) is not.
@@ -2922,7 +2994,7 @@ mod tests {
 
     #[test]
     fn test_set_timelock_delay_rejects_exceeding_max() {
-        let (env, admin, client) = setup();
+        let (_env, admin, client) = setup();
 
         // Direct set with u32::MAX is rejected
         assert_eq!(
@@ -2982,8 +3054,6 @@ mod tests {
     // 34. register_watchers emits one event per newly-added watcher
     #[test]
     fn test_register_watchers_emits_one_event_per_watcher() {
-        use soroban_sdk::testutils::Events as _;
-
         let (env, admin, client) = setup();
         let w1 = Address::generate(&env);
         let w2 = Address::generate(&env);
@@ -3038,7 +3108,7 @@ mod tests {
     #[test]
     fn test_contract_address_can_hold_roles() {
         let (env, admin, client) = setup();
-        let contract_addr = env.register(WatcherRegistry, ());
+        let contract_addr = env.register(WatcherRegistry, (Address::generate(&env),));
 
         assert_eq!(
             client.try_register_watcher(&admin, &contract_addr).unwrap(),
@@ -3059,12 +3129,11 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_add_admin_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let new_admin = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         env.set_auths(&[]);
         client.add_admin(&admin, &new_admin);
     }
@@ -3073,12 +3142,11 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_remove_admin_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin1 = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin1.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin2 = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin1);
         client.add_admin(&admin1, &admin2);
         env.set_auths(&[]);
         client.remove_admin(&admin1, &admin2);
@@ -3088,12 +3156,11 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_transfer_admin_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let new_admin = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         env.set_auths(&[]);
         client.transfer_admin(&admin, &new_admin);
     }
@@ -3102,12 +3169,11 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_register_watcher_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let watcher = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         env.set_auths(&[]);
         client.register_watcher(&admin, &watcher);
     }
@@ -3116,12 +3182,11 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_remove_watcher_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let watcher = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         client.register_watcher(&admin, &watcher);
         env.set_auths(&[]);
         client.remove_watcher(&admin, &watcher);
@@ -3131,13 +3196,12 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_replace_watcher_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let old_watcher = Address::generate(&env);
         let new_watcher = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         client.register_watcher(&admin, &old_watcher);
         env.set_auths(&[]);
         client.replace_watcher(&admin, &old_watcher, &new_watcher);
@@ -3147,44 +3211,45 @@ mod tests {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_clear_all_watchers_requires_auth() {
         let env = Env::default();
-        let contract_id = env.register(WatcherRegistry, ());
-        let client = WatcherRegistryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+        let client = WatcherRegistryClient::new(&env, &contract_id);
         let watcher = Address::generate(&env);
         env.mock_all_auths();
-        client.initialize(&admin);
         client.register_watcher(&admin, &watcher);
         env.set_auths(&[]);
         client.clear_all_watchers(&admin);
     }
 
-    // === Pre-initialization coverage
-    // Every admin-gated entrypoint routes through assert_admin, which returns
-    // NotInitialized before initialize() has run; get_admins runs the same check
-    // directly. test_get_admin_uninitialized already covers get_admin, so these
-    // close the gap for the rest of that surface.
+    // === Caller-authorization coverage
+    // The registry is deployed through `__constructor(admin)` (the only init
+    // path since soroban-sdk 25), so an *uninitialised* contract no longer
+    // exists and `NotInitialized` is unreachable. `uninit()` deploys with an
+    // admin no test holds, which exercises the same guard from the other side:
+    // every admin-gated entrypoint routes through `assert_admin` and must
+    // reject an unknown caller with `Unauthorized`.
 
     fn uninit() -> (Env, WatcherRegistryClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(WatcherRegistry, ());
+        let contract_id = env.register(WatcherRegistry, (Address::generate(&env),));
         let client = WatcherRegistryClient::new(&env, &contract_id);
         (env, client)
     }
 
     #[test]
-    fn test_clear_all_watchers_before_initialize() {
+    fn test_clear_all_watchers_rejects_unknown_caller() {
         let (env, client) = uninit();
         let admin = Address::generate(&env);
 
         assert_eq!(
             client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
-            ContractError::NotInitialized
+            ContractError::Unauthorized
         );
     }
 
     #[test]
-    fn test_add_admin_before_initialize() {
+    fn test_add_admin_rejects_unknown_caller() {
         let (env, client) = uninit();
         let caller = Address::generate(&env);
         let new_admin = Address::generate(&env);
@@ -3194,12 +3259,12 @@ mod tests {
                 .try_add_admin(&caller, &new_admin)
                 .unwrap_err()
                 .unwrap(),
-            ContractError::NotInitialized
+            ContractError::Unauthorized
         );
     }
 
     #[test]
-    fn test_remove_admin_before_initialize() {
+    fn test_remove_admin_rejects_unknown_caller() {
         let (env, client) = uninit();
         let caller = Address::generate(&env);
         let target = Address::generate(&env);
@@ -3209,12 +3274,12 @@ mod tests {
                 .try_remove_admin(&caller, &target)
                 .unwrap_err()
                 .unwrap(),
-            ContractError::NotInitialized
+            ContractError::Unauthorized
         );
     }
 
     #[test]
-    fn test_transfer_admin_before_initialize() {
+    fn test_transfer_admin_rejects_unknown_caller() {
         let (env, client) = uninit();
         let admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
@@ -3224,12 +3289,12 @@ mod tests {
                 .try_transfer_admin(&admin, &new_admin)
                 .unwrap_err()
                 .unwrap(),
-            ContractError::NotInitialized
+            ContractError::Unauthorized
         );
     }
 
     #[test]
-    fn test_register_watcher_before_initialize() {
+    fn test_register_watcher_rejects_unknown_caller() {
         let (env, client) = uninit();
         let admin = Address::generate(&env);
         let watcher = Address::generate(&env);
@@ -3239,12 +3304,12 @@ mod tests {
                 .try_register_watcher(&admin, &watcher)
                 .unwrap_err()
                 .unwrap(),
-            ContractError::NotInitialized
+            ContractError::Unauthorized
         );
     }
 
     #[test]
-    fn test_remove_watcher_before_initialize() {
+    fn test_remove_watcher_rejects_unknown_caller() {
         let (env, client) = uninit();
         let admin = Address::generate(&env);
         let watcher = Address::generate(&env);
@@ -3254,12 +3319,12 @@ mod tests {
                 .try_remove_watcher(&admin, &watcher)
                 .unwrap_err()
                 .unwrap(),
-            ContractError::NotInitialized
+            ContractError::Unauthorized
         );
     }
 
     #[test]
-    fn test_replace_watcher_before_initialize() {
+    fn test_replace_watcher_rejects_unknown_caller() {
         let (env, client) = uninit();
         let admin = Address::generate(&env);
         let old_watcher = Address::generate(&env);
@@ -3270,66 +3335,17 @@ mod tests {
                 .try_replace_watcher(&admin, &old_watcher, &new_watcher)
                 .unwrap_err()
                 .unwrap(),
-            ContractError::NotInitialized
+            ContractError::Unauthorized
         );
     }
 
     #[test]
-    fn test_get_admins_before_initialize() {
+    fn test_get_admins_reads_the_deploy_admin_set() {
+        // Unlike the admin-gated entrypoints, the read-only getter takes no
+        // caller and therefore never rejects; it reports the admin installed by
+        // the constructor.
         let (_env, client) = uninit();
 
-        assert_eq!(
-            client.try_get_admins().unwrap_err().unwrap(),
-            ContractError::NotInitialized
-        );
+        assert_eq!(client.get_admins().len(), 1);
     }
-}
-
-// ── Test event helpers (SDK 25) ──────────────────────────────────────────────
-
-/// Every event emitted in `env`, flattened back into
-/// `(emitter, topics, data)` SDK values.
-///
-/// `soroban_sdk` 25's `Events::all()` returns a wrapper with no slice
-/// accessors, so the underlying XDR events are read directly and converted
-/// back into `Val`s. The emitter is kept as `Val::U32_ZERO`: tests only use it
-/// as a positional placeholder, and the XDR contract id is not needed to
-/// identify an event inside a single-contract test.
-#[cfg(test)]
-pub(crate) fn emitted_events(
-    env: &Env,
-) -> soroban_sdk::Vec<(soroban_sdk::Val, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
-    use soroban_sdk::{testutils::Events as _, xdr::ContractEventBody, IntoVal, TryFromVal, Val};
-    let mut out: soroban_sdk::Vec<(Val, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::Vec::new(env);
-    for event in env.events().all().events() {
-        if let ContractEventBody::V0(v0) = &event.body {
-            let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
-            for topic in v0.topics.iter() {
-                topics.push_back(Val::try_from_val(env, topic).unwrap());
-            }
-            let data = Val::try_from_val(env, &v0.data).unwrap();
-            out.push_back((Val::U32_ZERO.into_val(env), topics, data));
-        }
-    }
-    out
-}
-
-/// The first emitted event whose `(emitter, topics, data)` matches `pred`.
-#[cfg(test)]
-pub(crate) fn find_event(
-    env: &Env,
-    pred: impl Fn(&soroban_sdk::Val, &soroban_sdk::Vec<soroban_sdk::Val>, &soroban_sdk::Val) -> bool,
-) -> Option<(
-    soroban_sdk::Val,
-    soroban_sdk::Vec<soroban_sdk::Val>,
-    soroban_sdk::Val,
-)> {
-    let events = emitted_events(env);
-    for i in 0..events.len() {
-        let entry = events.get(i).unwrap();
-        if pred(&entry.0, &entry.1, &entry.2) {
-            return Some(entry);
-        }
-    }
-    None
 }

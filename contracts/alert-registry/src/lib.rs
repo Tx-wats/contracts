@@ -9,10 +9,16 @@
 // errors. Intra-doc links inside `#[contractimpl]` must use the full type path
 // (not `Self::`) because the macro copies method docs into generated modules.
 #![warn(rustdoc::broken_intra_doc_links)]
+// `soroban_sdk::events::Events::publish` is deprecated in soroban-sdk 25 in
+// favour of `#[contractevent]`. The migration changes the emitted topic layout
+// (an ABI change for indexers), so it is a decision of its own rather than part
+// of a repair commit — but with `clippy -D warnings` in CI every merge is
+// rejected for it in the meantime. Remove this allow with the migration.
+#![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
-    symbol_short, vec, Address, BytesN, Env, String, Vec,
+    contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec, Address,
+    BytesN, Env, String, Vec,
 };
 
 contractmeta!(key = "Name", val = "AlertRegistry");
@@ -20,14 +26,46 @@ contractmeta!(key = "Version", val = "0.2.0");
 
 // ── Storage keys ────────────────────────────────────────────────────────────
 
+// ── Test event helpers (SDK 25) ──────────────────────────────────────────────
+
+/// Every event emitted in `env`, flattened back into
+/// `(emitter, topics, data)` SDK values.
+///
+/// `soroban_sdk` 25's `Events::all()` returns a wrapper with no slice
+/// accessors, so the underlying XDR events are read directly and converted
+/// back into `Val`s. The emitter is kept as `Val::U32_ZERO`: tests only use it
+/// as a positional placeholder, and the XDR contract id is not needed to
+/// identify an event inside a single-contract test.
+#[cfg(test)]
+pub(crate) fn emitted_events(
+    env: &Env,
+) -> soroban_sdk::Vec<(
+    soroban_sdk::Val,
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+)> {
+    use soroban_sdk::{testutils::Events as _, xdr::ContractEventBody, IntoVal, TryFromVal, Val};
+    let mut out: soroban_sdk::Vec<(Val, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::Vec::new(env);
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(v0) = &event.body;
+        let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
+        for topic in v0.topics.iter() {
+            topics.push_back(Val::try_from_val(env, topic).unwrap());
+        }
+        let data = Val::try_from_val(env, &v0.data).unwrap();
+        out.push_back((Val::U32_ZERO.into_val(env), topics, data));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
+mod proptests;
+#[cfg(test)]
 #[path = "regression_tests.rs"]
 mod regression_tests;
-#[cfg(test)]
-mod proptests;
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
 
@@ -248,10 +286,8 @@ impl AlertRegistry {
             .instance()
             .set(&symbol_short!("ADMIN"), &admin);
 
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("init")),
-            (admin,),
-        );
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("init")), (admin,));
     }
 
     /// Initialize the optional admin role for the registry. Can only be called once.
@@ -269,10 +305,8 @@ impl AlertRegistry {
             .instance()
             .set(&symbol_short!("ADMIN"), &admin);
 
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("init")),
-            (admin,),
-        );
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("init")), (admin,));
         Ok(())
     }
 
@@ -605,18 +639,38 @@ impl AlertRegistry {
         rules: Vec<String>,
     ) -> Result<u64, ContractError> {
         owner.require_auth();
-        Self::assert_not_paused(&env)?;
+        Self::register_alert_inner(&env, owner, target_contract, label, webhook_hash, rules)
+    }
+
+    /// Shared body of [`AlertRegistry::register_alert`] and
+    /// [`AlertRegistry::batch_register_alert`].
+    ///
+    /// Auth is checked by the public entry points so that a batch containing
+    /// several alerts for the same owner requires that owner's authorization
+    /// only once — requiring the same address twice inside a single invocation
+    /// is rejected by the host (`Auth, ExistingValue`, "frame is already
+    /// authorized"), which made any batch of two or more alerts for one owner
+    /// fail.
+    fn register_alert_inner(
+        env: &Env,
+        owner: Address,
+        target_contract: Address,
+        label: String,
+        webhook_hash: BytesN<32>,
+        rules: Vec<String>,
+    ) -> Result<u64, ContractError> {
+        Self::assert_not_paused(env)?;
 
         if label.len() > 128 {
             return Err(ContractError::LabelTooLong);
         }
 
-        Self::validate_rules(&env, &rules)?;
-        Self::assert_global_alert_limit(&env)?;
-        Self::assert_per_owner_limit(&env, &owner)?;
-        Self::assert_per_contract_limit(&env, &target_contract)?;
+        Self::validate_rules(env, &rules)?;
+        Self::assert_global_alert_limit(env)?;
+        Self::assert_per_owner_limit(env, &owner)?;
+        Self::assert_per_contract_limit(env, &target_contract)?;
 
-        let id = Self::next_id(&env);
+        let id = Self::next_id(env);
         let now = env.ledger().timestamp();
 
         let config = AlertConfig {
@@ -632,9 +686,9 @@ impl AlertRegistry {
             active: true,
         };
 
-        Self::push_owner_index(&env, &owner, id)?;
-        Self::push_contract_index(&env, &target_contract, id)?;
-        Self::persist_alert(&env, id, &config);
+        Self::push_owner_index(env, &owner, id)?;
+        Self::push_contract_index(env, &target_contract, id)?;
+        Self::persist_alert(env, id, &config);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("register")),
@@ -843,7 +897,11 @@ impl AlertRegistry {
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("wh_cancel"))` with data `(id: u64, caller: Address)`.
-    pub fn cancel_webhook_proposal(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
+    pub fn cancel_webhook_proposal(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+    ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
 
@@ -1119,15 +1177,33 @@ impl AlertRegistry {
     /// The new alerts' numeric IDs, in the same order as `inputs`.
     /// # Errors
     /// Returns the same errors as [`AlertRegistry::register_alert`] for the failing item.
+    /// # Panics
+    /// Panics if the contract's stored alert indexes are malformed.
     pub fn batch_register_alert(
         env: Env,
         inputs: Vec<AlertInput>,
     ) -> Result<Vec<u64>, ContractError> {
+        // Authorize each distinct owner once (see `register_alert_inner`).
+        let mut authorized: Vec<Address> = vec![&env];
+        for i in 0..inputs.len() {
+            let owner = inputs.get(i).unwrap().owner;
+            let mut already = false;
+            for j in 0..authorized.len() {
+                if authorized.get(j).unwrap() == owner {
+                    already = true;
+                }
+            }
+            if !already {
+                owner.require_auth();
+                authorized.push_back(owner);
+            }
+        }
+
         let mut ids: Vec<u64> = vec![&env];
         for i in 0..inputs.len() {
             let input = inputs.get(i).unwrap();
-            let id = Self::register_alert(
-                env.clone(),
+            let id = Self::register_alert_inner(
+                &env,
                 input.owner,
                 input.target_contract,
                 input.label,
@@ -1152,6 +1228,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if any `config_ids` entry does not identify an existing alert.
     /// Returns [`ContractError::Unauthorized`] if `caller` does not own every alert in `config_ids`.
+    /// # Panics
+    /// Panics if the contract's stored alert indexes are malformed.
     pub fn batch_remove_alert(
         env: Env,
         caller: Address,
@@ -1398,8 +1476,6 @@ impl AlertRegistry {
             .map(|cfg| cfg.owner))
     }
 
-
-
     /// Deactivate all alerts owned by `caller` in a single call.
     ///
     /// Iterates the owner's index and sets `active = false` on every live
@@ -1551,7 +1627,12 @@ impl AlertRegistry {
     /// advancing `offset` by `limit` each call until fewer than `limit`
     /// results are returned.
     #[must_use]
-    pub fn get_alerts_modified_since(env: Env, since: u64, offset: u32, limit: u32) -> Vec<AlertConfig> {
+    pub fn get_alerts_modified_since(
+        env: Env,
+        since: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<AlertConfig> {
         let total: u64 = env
             .storage()
             .instance()
@@ -1676,6 +1757,8 @@ impl AlertRegistry {
     /// removals and deactivations. If you only need the number of live
     /// (non-removed) alerts regardless of the `active` flag, use
     /// [`AlertRegistry::get_non_removed_alert_count`], which is an O(1) lookup.
+    /// # Panics
+    /// Panics if the contract's stored owner index is malformed.
     #[must_use]
     pub fn get_active_alert_count(env: Env, owner: Address) -> u32 {
         let ids = Self::owner_index(&env, &owner);
@@ -1791,7 +1874,10 @@ impl AlertRegistry {
     /// Reject registration once the number of currently active alerts
     /// targeting `target_contract` (across all contributing owners) reaches
     /// the configured per-contract limit. A limit of `0` means no limit.
-    fn assert_per_contract_limit(env: &Env, target_contract: &Address) -> Result<(), ContractError> {
+    fn assert_per_contract_limit(
+        env: &Env,
+        target_contract: &Address,
+    ) -> Result<(), ContractError> {
         let limit = Self::get_per_contract_alert_limit(env.clone());
         if limit > 0
             && Self::get_active_contract_alert_count(env.clone(), target_contract.clone()) >= limit
@@ -2144,53 +2230,3 @@ impl AlertRegistry {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
-
-// ── Test event helpers (SDK 25) ──────────────────────────────────────────────
-
-/// Every event emitted in `env`, flattened back into
-/// `(emitter, topics, data)` SDK values.
-///
-/// `soroban_sdk` 25's `Events::all()` returns a wrapper with no slice
-/// accessors, so the underlying XDR events are read directly and converted
-/// back into `Val`s. The emitter is kept as `Val::U32_ZERO`: tests only use it
-/// as a positional placeholder, and the XDR contract id is not needed to
-/// identify an event inside a single-contract test.
-#[cfg(test)]
-pub(crate) fn emitted_events(
-    env: &Env,
-) -> soroban_sdk::Vec<(soroban_sdk::Val, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
-    use soroban_sdk::{testutils::Events as _, xdr::ContractEventBody, IntoVal, TryFromVal, Val};
-    let mut out: soroban_sdk::Vec<(Val, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::Vec::new(env);
-    for event in env.events().all().events() {
-        if let ContractEventBody::V0(v0) = &event.body {
-            let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
-            for topic in v0.topics.iter() {
-                topics.push_back(Val::try_from_val(env, topic).unwrap());
-            }
-            let data = Val::try_from_val(env, &v0.data).unwrap();
-            out.push_back((Val::U32_ZERO.into_val(env), topics, data));
-        }
-    }
-    out
-}
-
-/// The first emitted event whose `(emitter, topics, data)` matches `pred`.
-#[cfg(test)]
-pub(crate) fn find_event(
-    env: &Env,
-    pred: impl Fn(&soroban_sdk::Val, &soroban_sdk::Vec<soroban_sdk::Val>, &soroban_sdk::Val) -> bool,
-) -> Option<(
-    soroban_sdk::Val,
-    soroban_sdk::Vec<soroban_sdk::Val>,
-    soroban_sdk::Val,
-)> {
-    let events = emitted_events(env);
-    for i in 0..events.len() {
-        let entry = events.get(i).unwrap();
-        if pred(&entry.0, &entry.1, &entry.2) {
-            return Some(entry);
-        }
-    }
-    None
-}

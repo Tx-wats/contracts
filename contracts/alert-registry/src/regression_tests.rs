@@ -3,16 +3,17 @@ use crate::AlertRegistryClient;
 use crate::ContractError;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events as _, Ledger as _},
+    testutils::{Address as _, Ledger as _},
     vec, Address, Env, FromVal, String, Symbol,
 };
 
-fn setup() -> (Env, AlertRegistryClient<'static>) {
+fn setup() -> (Env, AlertRegistryClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(AlertRegistry, ());
+    let admin = Address::generate(&env);
+    let contract_id = env.register(AlertRegistry, (admin.clone(),));
     let client = AlertRegistryClient::new(&env, &contract_id);
-    (env, client)
+    (env, client, admin)
 }
 
 fn hash64(env: &Env) -> soroban_sdk::BytesN<32> {
@@ -37,7 +38,7 @@ fn str(env: &Env, s: &str) -> String {
 /// and not silently ignored.
 #[test]
 fn test_regression_update_alert_discarding_rule_validation_errors() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -71,7 +72,7 @@ fn test_regression_update_alert_discarding_rule_validation_errors() {
 /// the active status lookup, the owner index, and the target contract index, and emits the remove event.
 #[test]
 fn test_regression_missing_remove_alert_body() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -114,7 +115,7 @@ fn test_regression_missing_remove_alert_body() {
 /// check is that the 32 digest bytes are stored and returned unchanged.
 #[test]
 fn test_regression_update_webhook_accepted_invalid_length_hashes() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -126,7 +127,7 @@ fn test_regression_update_webhook_accepted_invalid_length_hashes() {
         &vec![&env, str(&env, "rule:transfer")],
     );
 
-    let digest: [u8; 32] = core::array::from_fn(|i| i as u8);
+    let digest: [u8; 32] = core::array::from_fn(|i| u8::try_from(i).unwrap_or(0));
     let new_hash = soroban_sdk::BytesN::from_array(&env, &digest);
     assert_eq!(
         client.try_update_webhook(&owner, &id, &new_hash).unwrap(),
@@ -148,7 +149,7 @@ fn test_regression_update_webhook_accepted_invalid_length_hashes() {
 /// Ensures large offset/limit combinations saturate rather than overflowing with arithmetic panic.
 #[test]
 fn test_regression_configs_paginated_overflow_on_offset_plus_limit() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -177,20 +178,17 @@ fn test_regression_configs_paginated_overflow_on_offset_plus_limit() {
 /// Ensures `transfer_admin` emits `("admin", "transfer")` event with old and new admin addresses.
 #[test]
 fn test_regression_transfer_admin_emitted_no_event() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
+    let (env, client, admin) = setup();
     let new_admin = Address::generate(&env);
 
-    client.initialize(&admin);
-
-    let events_before = crate::emitted_events(&env).len();
     assert_eq!(
         client.try_transfer_admin(&admin, &new_admin).unwrap(),
         Ok(())
     );
 
-    let all_events = crate::emitted_events(&env);
-    let new_events = all_events.slice(events_before..all_events.len());
+    // The SDK test environment exposes the events of the most recent
+    // invocation, so assert on those rather than on a before/after delta.
+    let new_events = crate::emitted_events(&env);
     assert_eq!(new_events.len(), 1);
 
     let (_, topics, _) = new_events.get(0).unwrap();
@@ -207,12 +205,9 @@ fn test_regression_transfer_admin_emitted_no_event() {
 /// Ensures admin can remove any alert and clean up all index entries.
 #[test]
 fn test_regression_remove_alert_by_admin_missing() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
+    let (env, client, admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
-
-    client.initialize(&admin);
 
     let id = client.register_alert(
         &owner,
@@ -238,7 +233,7 @@ fn test_regression_remove_alert_by_admin_missing() {
 /// Ensures toggling `active` bool via `update_alert` correctly synchronizes `DataKey::AlertActive`.
 #[test]
 fn test_regression_update_alert_keeps_alert_active_in_sync() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -270,7 +265,7 @@ fn test_regression_update_alert_keeps_alert_active_in_sync() {
 /// Ensures `renew_alert_ttl` does NOT advance `updated_at`, preserving sync integrity for incremental syncs.
 #[test]
 fn test_regression_renew_alert_ttl_preserves_updated_at() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -307,7 +302,7 @@ fn test_regression_renew_alert_ttl_preserves_updated_at() {
 /// discards the staged rotation, so the confirm has nothing to promote.
 #[test]
 fn test_regression_update_webhook_clears_stale_pending_hash() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -358,7 +353,7 @@ enum LegacyDataKey {
 /// exceed the per-owner alert limit).
 #[test]
 fn test_regression_owner_live_count_migrates_legacy_key() {
-    let (env, client) = setup();
+    let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
@@ -432,9 +427,7 @@ fn alert_entry_ttls(
 /// the alert depends on must be back at the full `DEFAULT_TTL`.
 #[test]
 fn test_regression_every_mutator_refreshes_all_alert_ttls() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (env, client, admin) = setup();
     let owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
     let target = Address::generate(&env);

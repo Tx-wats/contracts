@@ -41,15 +41,20 @@ pub fn str_repeat(env: &Env, ch: char, n: usize) -> String {
 
 // ── Setup helpers ─────────────────────────────────────────────────────────────
 
-/// Set up a bare [`AlertRegistry`] environment (no admin initialised).
+/// Set up an [`AlertRegistry`] environment.
 ///
-/// Returns `(env, client)`.
-pub fn setup_alert_registry() -> (Env, AlertRegistryClient<'static>) {
+/// The contract is deployed through its constructor, so the returned client is
+/// already initialised with the returned admin.
+///
+/// Returns `(env, client, admin)`.
+pub fn setup_alert_registry() -> (Env, AlertRegistryClient<'static>, Address) {
+    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(AlertRegistry, ());
+    let admin = Address::generate(&env);
+    let contract_id = env.register(AlertRegistry, (admin.clone(),));
     let client = AlertRegistryClient::new(&env, &contract_id);
-    (env, client)
+    (env, client, admin)
 }
 
 /// Set up a [`WatcherRegistry`] environment with the admin already initialised.
@@ -68,17 +73,21 @@ pub fn setup_watcher_registry() -> (Env, Address, WatcherRegistryClient<'static>
 /// Set up both registries in a single shared environment — suitable for
 /// cross-contract / integration tests.
 ///
-/// Returns `(env, alert_client, watcher_client)`.
+/// Returns `(env, alert_client, watcher_client, admin)`; both contracts are
+/// deployed through their constructors with `admin`.
 pub fn setup_both() -> (
     Env,
     AlertRegistryClient<'static>,
     WatcherRegistryClient<'static>,
+    Address,
 ) {
+    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
     env.mock_all_auths();
-    let alert_id = env.register(AlertRegistry, ());
-    let watcher_id = env.register(WatcherRegistry, ());
+    let admin = Address::generate(&env);
+    let alert_id = env.register(AlertRegistry, (admin.clone(),));
+    let watcher_id = env.register(WatcherRegistry, (admin.clone(),));
     let alert_client = AlertRegistryClient::new(&env, &alert_id);
     let watcher_client = WatcherRegistryClient::new(&env, &watcher_id);
-    (env, alert_client, watcher_client)
+    (env, alert_client, watcher_client, admin)
 }

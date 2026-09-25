@@ -16,18 +16,21 @@ use test_utils::{hash64, hash64c};
 /// `Val::U32_ZERO`: these tests only use it as a positional placeholder.
 fn emitted_events(
     env: &soroban_sdk::Env,
-) -> soroban_sdk::Vec<(soroban_sdk::Val, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
-    use soroban_sdk::{xdr::ContractEventBody, IntoVal, TryFromVal, Val};
+) -> soroban_sdk::Vec<(
+    soroban_sdk::Val,
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+)> {
+    use soroban_sdk::{testutils::Events as _, xdr::ContractEventBody, IntoVal, TryFromVal, Val};
     let mut out: soroban_sdk::Vec<(Val, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::Vec::new(env);
     for event in env.events().all().events() {
-        if let ContractEventBody::V0(v0) = &event.body {
-            let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
-            for topic in v0.topics.iter() {
-                topics.push_back(Val::try_from_val(env, topic).unwrap());
-            }
-            let data = Val::try_from_val(env, &v0.data).unwrap();
-            out.push_back((Val::U32_ZERO.into_val(env), topics, data));
+        let ContractEventBody::V0(v0) = &event.body;
+        let mut topics: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(env);
+        for topic in v0.topics.iter() {
+            topics.push_back(Val::try_from_val(env, topic).unwrap());
         }
+        let data = Val::try_from_val(env, &v0.data).unwrap();
+        out.push_back((Val::U32_ZERO.into_val(env), topics, data));
     }
     out
 }
@@ -54,19 +57,17 @@ fn find_event(
 // `setup_both` returns (env, alert_client, watcher_client) — same shape as the
 // old local `setup()` function, so all tests below compile unchanged.
 
-/// An authorized watcher can query AlertRegistry and see registered alerts
+/// An authorized watcher can query `AlertRegistry` and see registered alerts
 /// when no watcher-gating is configured (open access mode).
 #[test]
 fn test_authorized_watcher_can_query_alert_registry_open_mode() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
     // Initialize watcher registry and authorize the watcher
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
 
     // Register an alert in the alert registry
@@ -98,12 +99,9 @@ fn test_authorized_watcher_can_query_alert_registry_open_mode() {
 /// An unauthorized address is not a watcher and cannot be confused with one.
 #[test]
 fn test_unauthorized_address_not_a_watcher() {
-    let (env, _alert_client, watcher_client) = setup();
+    let (env, _alert_client, watcher_client, _admin) = setup();
 
-    let admin = Address::generate(&env);
     let stranger = Address::generate(&env);
-
-    watcher_client.initialize(&admin);
 
     assert!(!watcher_client.is_watcher_authorized(&stranger));
 }
@@ -111,14 +109,12 @@ fn test_unauthorized_address_not_a_watcher() {
 /// Removing a watcher revokes their authorization while alert data is unaffected.
 #[test]
 fn test_removed_watcher_loses_authorization_alert_data_intact() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
 
     alert_client.register_alert(
@@ -129,7 +125,9 @@ fn test_removed_watcher_loses_authorization_alert_data_intact() {
         &vec![&env],
     );
 
-    // Remove the watcher
+    // Remove the watcher (a keeper keeps MIN_WATCHERS satisfied)
+    let keeper = Address::generate(&env);
+    watcher_client.register_watcher(&admin, &keeper);
     watcher_client.remove_watcher(&admin, &watcher);
     assert!(!watcher_client.is_watcher_authorized(&watcher));
 
@@ -145,19 +143,16 @@ fn test_removed_watcher_loses_authorization_alert_data_intact() {
 /// When watcher-gating is enabled, a registered watcher can read alert data.
 #[test]
 fn test_watcher_gating_registered_watcher_can_read() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
     // Set up watcher registry
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
 
     // Initialize alert registry and point it at the watcher registry
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
@@ -181,17 +176,14 @@ fn test_watcher_gating_registered_watcher_can_read() {
 /// When watcher-gating is enabled, an unregistered address is rejected.
 #[test]
 fn test_watcher_gating_unregistered_address_rejected() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let stranger = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
     // stranger is NOT registered as a watcher
 
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
@@ -215,17 +207,14 @@ fn test_watcher_gating_unregistered_address_rejected() {
 /// When watcher-gating is enabled, a removed watcher loses read access.
 #[test]
 fn test_watcher_gating_removed_watcher_loses_access() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
 
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
@@ -245,7 +234,9 @@ fn test_watcher_gating_removed_watcher_loses_access() {
         1
     );
 
-    // Remove the watcher
+    // Remove the watcher (a keeper keeps MIN_WATCHERS satisfied)
+    let keeper = Address::generate(&env);
+    watcher_client.register_watcher(&admin, &keeper);
     watcher_client.remove_watcher(&admin, &watcher);
 
     // Now rejected
@@ -258,21 +249,18 @@ fn test_watcher_gating_removed_watcher_loses_access() {
     );
 }
 
-/// Watcher-gating also applies to get_alerts_by_owner.
+/// Watcher-gating also applies to `get_alerts_by_owner`.
 #[test]
 fn test_watcher_gating_get_alerts_by_owner() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let stranger = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
 
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
@@ -297,36 +285,63 @@ fn test_watcher_gating_get_alerts_by_owner() {
     );
 }
 
-/// Watcher-gating also applies to get_alert (#42) — a non-watcher must be
+/// Watcher-gating also applies to `get_alert` (#42) — a non-watcher must be
 /// rejected the same way the already-gated query functions reject one.
 #[test]
 fn test_watcher_gating_get_alert_rejects_non_watcher() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    watcher_client.register_watcher(&admin, &watcher);
+    // stranger is NOT registered as a watcher
+
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    let id = alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    // The registered watcher can read the alert
+    assert!(alert_client.get_alert(&watcher, &id).is_some());
+
+    // The stranger is rejected by the same query
+    assert_eq!(
+        alert_client
+            .try_get_alert(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
 /// When watcher-gating is enabled, every gated query function rejects a
 /// non-watcher caller with `NotAWatcher`. This exercises all four gated
 /// entry points, not just `get_alerts_for_contract`.
 #[test]
 fn test_gated_mode_rejects_non_watcher() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
+    let watcher = Address::generate(&env);
     let stranger = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
     // stranger is NOT registered as a watcher
 
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
     let id = alert_client.register_alert(
-    alert_client.register_alert(
         &owner,
         &target,
         &String::from_str(&env, "Alert"),
@@ -345,7 +360,6 @@ fn test_gated_mode_rejects_non_watcher() {
             .unwrap(),
         AlertError::NotAWatcher
     );
-}
 
     assert_eq!(
         alert_client
@@ -356,21 +370,18 @@ fn test_gated_mode_rejects_non_watcher() {
     );
 }
 
-/// Watcher-gating also applies to get_alert_active (#42).
+/// Watcher-gating also applies to `get_alert_active` (#42).
 #[test]
 fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let stranger = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
 
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
@@ -393,7 +404,6 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
             .unwrap(),
         AlertError::NotAWatcher
     );
-}
 
     assert_eq!(
         alert_client
@@ -418,28 +428,64 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
     );
 }
 
-/// Watcher-gating also applies to get_active_alerts_for_contract (#42) —
+/// Watcher-gating also applies to `get_active_alerts_for_contract` (#42) —
 /// previously this function took no querier and stayed fully open even when
 /// gating was configured, defeating gating for anyone who used it instead of
-/// the already-gated get_alerts_for_contract.
+/// the already-gated `get_alerts_for_contract`.
 #[test]
 fn test_watcher_gating_get_active_alerts_for_contract_rejects_non_watcher() {
-/// When watcher-gating is enabled, a registered watcher is accepted by every
-/// gated query function.
-#[test]
-fn test_gated_mode_accepts_registered_watcher() {
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let stranger = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
+    watcher_client.register_watcher(&admin, &watcher);
+    // stranger is NOT registered as a watcher
+
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    // A registered watcher still sees the alert
+    assert_eq!(
+        alert_client
+            .get_active_alerts_for_contract(&watcher, &target)
+            .len(),
+        1
+    );
+
+    // The stranger is rejected on the same query
+    assert_eq!(
+        alert_client
+            .try_get_active_alerts_for_contract(&stranger, &target)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
+/// When watcher-gating is enabled, a registered watcher is accepted by every
+/// gated query function.
+#[test]
+fn test_gated_mode_accepts_registered_watcher() {
+    let (env, alert_client, watcher_client, admin) = setup();
+
+    let watcher = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
     watcher_client.register_watcher(&admin, &watcher);
 
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
@@ -467,11 +513,7 @@ fn test_gated_mode_accepts_registered_watcher() {
             .unwrap(),
         AlertError::NotAWatcher
     );
-}
 
-            .unwrap_err()
-            .unwrap(),
-        AlertError::NotAWatcher
     assert_eq!(
         alert_client
             .get_alerts_for_contract(&watcher, &target)
@@ -500,14 +542,15 @@ fn test_gated_mode_accepts_registered_watcher() {
 /// trust immediately.
 #[test]
 fn test_remove_watcher_emits_event_with_correct_address() {
-    use soroban_sdk::{symbol_short, testutils::Events as _};
+    use soroban_sdk::symbol_short;
 
-    let (env, _alert_client, watcher_client) = setup();
+    let (env, _alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
+    // A second watcher keeps the registry's MIN_WATCHERS invariant satisfied.
+    let keeper = Address::generate(&env);
+    watcher_client.register_watcher(&admin, &keeper);
     watcher_client.register_watcher(&admin, &watcher);
     watcher_client.remove_watcher(&admin, &watcher);
 
@@ -530,19 +573,16 @@ fn test_remove_watcher_emits_event_with_correct_address() {
 /// watcher immediately loses access to gated alert queries.
 #[test]
 fn test_remove_watcher_event_and_immediate_access_revocation() {
-    use soroban_sdk::{symbol_short, testutils::Events as _};
+    use soroban_sdk::symbol_short;
 
-    let (env, alert_client, watcher_client) = setup();
+    let (env, alert_client, watcher_client, admin) = setup();
 
-    let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
-    watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
 
-    alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
@@ -562,7 +602,10 @@ fn test_remove_watcher_event_and_immediate_access_revocation() {
         1
     );
 
-    // Remove the watcher — this must emit the event
+    // Remove the watcher — this must emit the event. A keeper watcher is
+    // registered first so the registry's MIN_WATCHERS invariant holds.
+    let keeper = Address::generate(&env);
+    watcher_client.register_watcher(&admin, &keeper);
     watcher_client.remove_watcher(&admin, &watcher);
 
     // Verify the event was emitted
@@ -589,11 +632,11 @@ fn test_remove_watcher_event_and_immediate_access_revocation() {
 
 // ── Feature B: bump_alert cross-contract ─────────────────────────────────────
 
-/// bump_alert can be called by any address (no auth required) and keeps the
+/// `bump_alert` can be called by any address (no auth required) and keeps the
 /// alert alive without modifying its content.
 #[test]
 fn test_bump_alert_by_third_party() {
-    let (env, alert_client, _watcher_client) = setup();
+    let (env, alert_client, _watcher_client, _admin) = setup();
 
     let owner = Address::generate(&env);
     let keeper = Address::generate(&env); // third-party keeper service

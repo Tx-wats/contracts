@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e1aa3bc589b63a3be4fa9bf294349cd28175a86312dbea447f52f7e4e4a798ed # shrinks to initial_char = 'A', propose1_char = 'A', propose2_char = 'A'
+cc 22d6217af81e5ab03438bb57ba32bd67e929f17120cff215d654a612fe26c0a3 # shrinks to alert_count = 1, offset = 0, limit = 1
+cc 1c357dfaa53fbdc76bd3a79f7221aa507b511a22c2ed383de845a7753fd9af81 # shrinks to num_alerts = 2, since_offset = 0
+cc b9f8379e2792641458d99945fd8de7da491c31f210b08e83e7342f51335b0f45 # shrinks to requested_ttl = 0
+cc e0c76e468b9011717adb01a2dea579d25acb831c670661ae1b009c88a3d31c4b # shrinks to actions = [Register { owner_idx: 0, target_idx: 0, label: "a", hash_char: 'A', rules_count: 0 }]
