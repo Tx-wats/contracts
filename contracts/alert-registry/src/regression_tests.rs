@@ -842,3 +842,129 @@ fn test_regression_alert_active_survives_repeated_edits() {
     client.cancel_webhook_proposal(&owner, &id);
     check("cancel_webhook_proposal");
 }
+
+// ── #209: expired alerts must not consume the owner's quota forever ──────────
+
+/// Simulate an alert record expiring (as opposed to being removed): the
+/// `Alert(id)` entry disappears while its index entries, live counter and
+/// `AlertActive` flag are left behind. The test host never archives entries on
+/// its own, so the expiry is applied directly.
+fn expire_alert_record(env: &Env, client: &AlertRegistryClient, id: u64) {
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&crate::DataKey::Alert(id));
+    });
+}
+
+fn register(env: &Env, client: &AlertRegistryClient, owner: &Address, label: &str) -> u64 {
+    client.register_alert(
+        owner,
+        &Address::generate(env),
+        &str(env, label),
+        &hash64(env),
+        &vec![env, str(env, "rule:transfer")],
+    )
+}
+
+/// Regression test for #209 (expiry, then prune, then register): expired
+/// alerts used to keep counting against the per-owner limit, locking the owner
+/// out of `register_alert` for good. Hitting the limit now prunes expired IDs
+/// first, so the owner can register again.
+#[test]
+fn test_regression_expired_alerts_release_quota_on_register() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &2);
+    let owner = Address::generate(&env);
+
+    let expired = register(&env, &client, &owner, "Expires");
+    let kept = register(&env, &client, &owner, "Kept");
+    expire_alert_record(&env, &client, expired);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 2);
+
+    let replacement = register(&env, &client, &owner, "Replacement");
+
+    assert_eq!(
+        client.get_alert_ids_by_owner(&owner),
+        vec![&env, kept, replacement]
+    );
+    assert_eq!(client.get_non_removed_alert_count(&owner), 2);
+    assert_eq!(client.get_alert_active(&owner, &expired), None);
+
+    // At the limit with nothing expired, registration is still refused.
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &Address::generate(&env),
+                &str(&env, "Over"),
+                &hash64(&env),
+                &vec![&env, str(&env, "rule:transfer")],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::OwnerAlertLimitExceeded
+    );
+}
+
+/// Regression test for #209: `remove_alert` used to return `AlertNotFound`
+/// for an expired alert, so the owner could not clean it up. It now drops the
+/// dangling entry from the caller's own index.
+#[test]
+fn test_regression_remove_alert_cleans_up_expired_record() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let id = register(&env, &client, &owner, "Expires");
+    expire_alert_record(&env, &client, id);
+
+    // Only the owner whose index holds the ID can clean it up.
+    assert_eq!(
+        client
+            .try_remove_alert(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertNotFound
+    );
+    assert_eq!(client.get_non_removed_alert_count(&owner), 1);
+
+    client.remove_alert(&owner, &id);
+    assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 0);
+    assert_eq!(client.get_alert_active(&owner, &id), None);
+
+    // Once cleaned up, the ID is gone for good.
+    assert_eq!(
+        client.try_remove_alert(&owner, &id).unwrap_err().unwrap(),
+        ContractError::AlertNotFound
+    );
+}
+
+/// Regression test for #209: `prune_expired_alerts` is a permissionless
+/// clean-up that only touches IDs whose record is gone.
+#[test]
+fn test_regression_prune_expired_alerts() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let a = register(&env, &client, &owner, "A");
+    let b = register(&env, &client, &owner, "B");
+    let c = register(&env, &client, &owner, "C");
+    expire_alert_record(&env, &client, a);
+    expire_alert_record(&env, &client, c);
+
+    assert_eq!(client.prune_expired_alerts(&owner), 2);
+    assert_eq!(client.get_alert_ids_by_owner(&owner), vec![&env, b]);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 1);
+    assert!(
+        client.get_alert(&owner, &b).is_some(),
+        "live alerts are untouched"
+    );
+
+    assert_eq!(
+        client.prune_expired_alerts(&owner),
+        0,
+        "nothing left to prune"
+    );
+}

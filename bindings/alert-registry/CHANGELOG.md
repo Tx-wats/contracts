@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `pruneExpiredAlerts({ owner })` — permissionless clean-up of expired alerts still counted against an owner's quota. (#209)
+
 ### Changed — BREAKING
 - `transferAlertOwnership` is removed. Ownership transfers are now two-step:
   `proposeAlertTransfer({ caller, config_id, new_owner })` by the owner, then

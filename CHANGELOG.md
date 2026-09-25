@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Expired alerts permanently consumed the owner's quota.** An alert whose
+  record expired (instead of being removed) stayed in the owner index and live
+  counter, still counted by the per-owner limit, and could not be removed
+  (`AlertNotFound`), eventually locking the owner out of `register_alert`.
+  `register_alert` now prunes expired IDs when the owner is at the limit, a
+  permissionless `prune_expired_alerts(owner)` does the same on demand, and
+  `remove_alert` cleans up an expired record in the caller's own index.
+  (issue #209)
 - **`AlertActive` TTL refresh.** The code fix landed with #213
   (`persist_alert` rewrites and extends the flag on every mutation). A
   ledger-advancement regression test now edits an alert repeatedly while the

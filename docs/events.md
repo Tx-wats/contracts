@@ -149,6 +149,20 @@ Emitted when an alert's watched contract is changed via `update_target_contract`
 
 ---
 
+### `alert.pruned`
+
+Emitted when dangling IDs of expired alerts are removed from an owner's index, by `prune_expired_alerts` or by `register_alert` when the owner is at the per-owner limit.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("pruned")` |
+| Data | `(owner: Address, count: u32)` |
+
+**Status:** ✅ implemented (`prune_expired_alerts`)
+
+---
+
 ### `alert.xfer_prop`
 
 Emitted when an owner proposes transferring an alert. Ownership is unchanged until the recipient accepts.

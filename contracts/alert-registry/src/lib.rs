@@ -996,25 +996,59 @@ impl AlertRegistry {
     ///
     /// Also removes the alert ID from the owner and contract indexes.
     ///
+    /// If the alert's record no longer exists but its ID is still in the
+    /// caller's owner index (the record expired instead of being removed),
+    /// the dangling index entry is cleaned up instead, releasing the quota
+    /// slot it was holding.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must also be
     /// the original owner of the alert.
     /// # Errors
-    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` is neither an
+    /// existing alert nor a dangling entry in the caller's owner index.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     pub fn remove_alert(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
 
-        let config: AlertConfig = env
+        let Some(config) = env
             .storage()
             .persistent()
-            .get(&DataKey::Alert(config_id))
-            .ok_or(ContractError::AlertNotFound)?;
+            .get::<DataKey, AlertConfig>(&DataKey::Alert(config_id))
+        else {
+            if Self::owner_index(&env, &caller).contains(config_id) {
+                Self::drop_dangling_ids(&env, &caller, &vec![&env, config_id]);
+                env.events().publish(
+                    (symbol_short!("alert"), symbol_short!("remove")),
+                    (config_id, caller),
+                );
+                return Ok(());
+            }
+            return Err(ContractError::AlertNotFound);
+        };
 
         Self::assert_owner(&config, &caller)?;
         Self::remove_alert_record(&env, &config, config_id, &caller);
         Ok(())
+    }
+
+    /// Drop IDs from `owner`'s index whose alert record no longer exists
+    /// (it expired instead of being removed), decrementing the owner's live
+    /// counter so the quota slots they held are released.
+    ///
+    /// Callable by anyone and requires no auth: it only removes entries that
+    /// point at nothing. [`AlertRegistry::register_alert`] also runs it
+    /// automatically when an owner is at the per-owner limit.
+    ///
+    /// # Returns
+    /// The number of dangling IDs removed.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("pruned"))` with data
+    /// `(owner: Address, count: u32)` when at least one ID was removed.
+    pub fn prune_expired_alerts(env: Env, owner: Address) -> u32 {
+        Self::prune_owner_index(&env, &owner)
     }
 
     /// Remove any alert config from storage (admin only).
@@ -1975,10 +2009,63 @@ impl AlertRegistry {
 
     fn assert_per_owner_limit(env: &Env, owner: &Address) -> Result<(), ContractError> {
         let limit = Self::get_per_owner_alert_limit(env.clone());
-        if limit > 0 && Self::get_non_removed_alert_count(env.clone(), owner.clone()) >= limit {
+        if limit == 0 || Self::owner_live_count(env, owner) < limit {
+            return Ok(());
+        }
+        // Only pay for a scan of the owner's index when they are at the limit:
+        // expired alerts may be holding slots that should be released.
+        Self::prune_owner_index(env, owner);
+        if Self::owner_live_count(env, owner) >= limit {
             return Err(ContractError::OwnerAlertLimitExceeded);
         }
         Ok(())
+    }
+
+    /// Find IDs in `owner`'s index whose alert record no longer exists and
+    /// drop them. Returns how many were dropped.
+    fn prune_owner_index(env: &Env, owner: &Address) -> u32 {
+        let mut dangling: Vec<u64> = vec![env];
+        for id in Self::owner_index(env, owner).iter() {
+            if !env.storage().persistent().has(&DataKey::Alert(id)) {
+                dangling.push_back(id);
+            }
+        }
+        if dangling.is_empty() {
+            return 0;
+        }
+        Self::drop_dangling_ids(env, owner, &dangling);
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("pruned")),
+            (owner.clone(), dangling.len()),
+        );
+        dangling.len()
+    }
+
+    /// Remove `ids` (whose records are gone) from `owner`'s index, decrement
+    /// the live counter accordingly, and clear any leftover per-alert entries.
+    ///
+    /// The contract index cannot be cleaned here: the target contract was only
+    /// recorded in the expired record. Its dangling IDs are harmless, since
+    /// contract-level counts check that each record exists.
+    fn drop_dangling_ids(env: &Env, owner: &Address, ids: &Vec<u64>) {
+        let storage = env.storage().persistent();
+        let mut kept: Vec<u64> = vec![env];
+        let mut dropped: u32 = 0;
+        for id in Self::owner_index(env, owner).iter() {
+            if ids.contains(id) {
+                dropped += 1;
+            } else {
+                kept.push_back(id);
+            }
+        }
+        for id in ids.iter() {
+            storage.remove(&DataKey::AlertActive(id));
+            storage.remove(&DataKey::PendingTransfer(id));
+        }
+        storage.set(&DataKey::OwnerIndex(owner.clone()), &kept);
+        storage.extend_ttl(&DataKey::OwnerIndex(owner.clone()), DEFAULT_TTL, DEFAULT_TTL);
+        let count = Self::owner_live_count(env, owner);
+        Self::set_owner_live_count(env, owner, count.saturating_sub(dropped));
     }
 
     /// Reject registration once the number of currently active alerts

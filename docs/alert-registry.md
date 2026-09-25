@@ -290,6 +290,26 @@ Permanently removes an alert config. Only the original owner may call this.
 
 **Errors:** Returns `ContractError::AlertNotFound` if ID does not exist; `ContractError::Unauthorized` if caller is not the owner.
 
+**Expired alerts:** if the alert's record has expired (rather than been removed) but its ID is still in the caller's owner index, `remove_alert` removes that dangling index entry and releases the quota slot it held, instead of returning `AlertNotFound`. Any other caller still gets `AlertNotFound`.
+
+---
+
+### `prune_expired_alerts`
+
+Removes IDs from `owner`'s index whose alert record no longer exists (expired instead of being removed), decrements the owner's live counter, and clears leftover `AlertActive` and pending-transfer entries. Callable by anyone with no auth, since it only removes entries that point at nothing. `register_alert` runs the same clean-up automatically when the owner is at the per-owner limit, so expired alerts can no longer lock an owner out.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `owner` | `Address` | Owner whose index is cleaned up |
+
+**Returns:** `u32` — the number of dangling IDs removed
+
+**Events:** Emits `(Symbol("alert"), Symbol("pruned"))` with data `(owner: Address, count: u32)` when at least one ID was removed.
+
+**Limitation:** the expired alert's `ContractIndex` entry cannot be removed, because the target contract was only recorded in the expired record. It does not count against any limit: per-contract counts only count IDs whose record exists.
+
 ---
 
 ### Alert ownership transfers
