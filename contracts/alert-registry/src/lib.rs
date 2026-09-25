@@ -64,6 +64,8 @@ pub const INSTANCE_BUMP_THRESHOLD: u32 = 17_280;
 /// TTL, in ledgers, the instance entry is extended to. Approximately 31 days,
 /// the protocol maximum. See `docs/ttl.md`.
 pub const INSTANCE_BUMP_AMOUNT: u32 = 535_680;
+/// Maximum number of IDs scanned by a single paginated query.
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 /// Storage key variants used to address persistent and instance entries.
 #[contracttype]
@@ -134,6 +136,8 @@ pub mod instance_key {
     pub const CLIMIT: Symbol = symbol_short!("CLIMIT");
     /// `u32` ceiling on the total number of alerts ever registered (`0` = none).
     pub const GLIMIT: Symbol = symbol_short!("GLIMIT");
+    /// `u64` number of currently live alert records.
+    pub const LIVE: Symbol = symbol_short!("LIVE");
     /// `Address` of the optional `WatcherRegistry` used for read gating.
     pub const WATCHREG: Symbol = symbol_short!("WATCHREG");
 }
@@ -953,6 +957,10 @@ impl AlertRegistry {
         Self::push_owner_index(&env, &owner, id)?;
         Self::push_contract_index(&env, &target_contract, id)?;
         Self::persist_alert(&env, id, &config);
+        Self::set_live_alert_count(
+            &env,
+            Self::get_live_alert_count(&env).saturating_add(1),
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("register")),
@@ -1774,6 +1782,9 @@ impl AlertRegistry {
 
         for i in 0..config_ids.len() {
             let config_id = config_ids.get(i).unwrap();
+            if config_ids.iter().take(i).any(|id| id == config_id) {
+                continue;
+            }
             let config: AlertConfig = env
                 .storage()
                 .persistent()
@@ -2254,7 +2265,7 @@ impl AlertRegistry {
 
         let range_start = u64::from(offset).min(total);
         let range_end = u64::from(offset)
-            .saturating_add(u64::from(limit))
+            .saturating_add(u64::from(limit.min(MAX_PAGE_SIZE)))
             .min(total);
 
         let mut out: Vec<AlertConfig> = vec![&env];
@@ -2325,7 +2336,7 @@ impl AlertRegistry {
 
         let range_start = u64::from(offset).min(total);
         let range_end = u64::from(offset)
-            .saturating_add(u64::from(limit))
+            .saturating_add(u64::from(limit.min(MAX_PAGE_SIZE)))
             .min(total);
 
         let mut out: Vec<AlertConfig> = vec![&env];
@@ -2522,6 +2533,10 @@ impl AlertRegistry {
         storage.extend_ttl(&DataKey::OwnerIndex(owner.clone()), DEFAULT_TTL, DEFAULT_TTL);
         let count = Self::owner_live_count(env, owner);
         Self::set_owner_live_count(env, owner, count.saturating_sub(dropped));
+        Self::set_live_alert_count(
+            env,
+            Self::get_live_alert_count(env).saturating_sub(u64::from(dropped)),
+        );
     }
 
     /// Reject registration once the number of currently active alerts
@@ -2538,6 +2553,8 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Reject registration once the number of currently live alerts reaches
+    /// the configured global ceiling. A limit of `0` means no ceiling.
     /// Read the per-contract live-alert counter, lazily rebuilding it for
     /// contracts written before the counter was introduced.
     fn contract_live_count(env: &Env, target: &Address) -> u32 {
@@ -2566,7 +2583,7 @@ impl AlertRegistry {
     /// configured global ceiling. A limit of `0` means no ceiling.
     fn assert_global_alert_limit(env: &Env) -> Result<(), ContractError> {
         let limit = Self::get_global_alert_limit(env.clone());
-        if limit > 0 && Self::get_alert_count(env.clone()) >= u64::from(limit) {
+        if limit > 0 && Self::get_live_alert_count(env) >= u64::from(limit) {
             return Err(ContractError::GlobalAlertLimitExceeded);
         }
         Ok(())
@@ -2606,6 +2623,10 @@ impl AlertRegistry {
 
         Self::remove_from_owner_index(env, &config.owner, config_id);
         Self::remove_from_contract_index(env, &config.target_contract, config_id);
+        Self::set_live_alert_count(
+            env,
+            Self::get_live_alert_count(env).saturating_sub(1),
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("remove")),
@@ -2676,6 +2697,18 @@ impl AlertRegistry {
             .set(&instance_key::NEXT_ID, &(id + 1));
         Self::extend_instance_ttl(env);
         id
+    }
+
+    fn get_live_alert_count(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&instance_key::LIVE)
+            .unwrap_or(0u64)
+    }
+
+    fn set_live_alert_count(env: &Env, count: u64) {
+        env.storage().instance().set(&instance_key::LIVE, &count);
+        Self::extend_instance_ttl(env);
     }
 
     /// Keep the instance entry (admin, counter, limits, pause flag, watcher
@@ -2884,7 +2917,9 @@ impl AlertRegistry {
         let mut out: Vec<AlertConfig> = vec![env];
         let count = ids.len();
         let first = offset.min(count);
-        let last = offset.saturating_add(limit).min(count);
+        let last = offset
+            .saturating_add(limit.min(MAX_PAGE_SIZE))
+            .min(count);
         for i in first..last {
             let id = ids.get(i).unwrap();
             if let Some(cfg) = env.storage().persistent().get(&DataKey::Alert(id)) {
@@ -3212,7 +3247,7 @@ mod tests {
     }
 
     #[test]
-    fn test_global_alert_limit_not_decremented_by_removal() {
+    fn test_global_alert_limit_is_released_by_removal() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -3229,21 +3264,14 @@ mod tests {
         );
         client.remove_alert(&owner, &id);
 
-        // The ceiling tracks the monotonic ever-registered count, not the
-        // live count, so a freed-up slot from removal does not reopen room.
-        assert_eq!(
-            client
-                .try_register_alert(
-                    &owner,
-                    &target,
-                    &str(&env, "Alert2"),
-                    &hash64c(&env, '2'),
-                    &vec![&env, str(&env, "rule:mint")],
-                )
-                .unwrap_err()
-                .unwrap(),
-            ContractError::GlobalAlertLimitExceeded
+        let replacement = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert2"),
+            &hash64c(&env, '2'),
+            &vec![&env, str(&env, "rule:mint")],
         );
+        assert_eq!(replacement, 1);
     }
 
     #[test]

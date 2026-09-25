@@ -1943,6 +1943,40 @@ fn test_configs_paginated_boundaries() {
     assert_eq!(p5.len(), 0);
 }
 
+#[test]
+fn test_paginated_queries_cap_unbounded_limits() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    for i in 0..=MAX_PAGE_SIZE {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64c(&env, char::from(b'a' + (i % 26) as u8)),
+            &vec![&env],
+        );
+    }
+
+    assert_eq!(
+        client
+            .get_alerts_by_owner_paginated(&owner, &owner, &0, &u32::MAX)
+            .len(),
+        MAX_PAGE_SIZE
+    );
+    assert_eq!(
+        client
+            .get_contract_alerts_paginated(&owner, &target, &0, &u32::MAX)
+            .len(),
+        MAX_PAGE_SIZE
+    );
+    assert_eq!(
+        client.get_alerts_modified_since(&0, &0, &u32::MAX).len(),
+        MAX_PAGE_SIZE
+    );
+}
+
 // ── Issue #34 / #201 — alert ownership transfer ────────────────────────────────
 
 #[test]
@@ -2332,6 +2366,24 @@ fn test_batch_remove_alert_not_found() {
     );
 }
 
+#[test]
+fn test_batch_remove_alert_ignores_duplicate_ids() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.batch_remove_alert(&owner, &vec![&env, id, id]);
+
+    assert!(client.get_alert(&owner, &id).unwrap().is_none());
+}
+
 // ── Consolidated tests from lib.rs ──────────────────────────────────────
 
 fn setup_with_watcher_registry() -> (
@@ -2422,7 +2474,7 @@ fn test_global_alert_limit_enforced_across_owners() {
 }
 
 #[test]
-fn test_global_alert_limit_not_decremented_by_removal() {
+fn test_global_alert_limit_is_released_by_removal() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
@@ -2439,21 +2491,14 @@ fn test_global_alert_limit_not_decremented_by_removal() {
     );
     client.remove_alert(&owner, &id);
 
-    // The ceiling tracks the monotonic ever-registered count, not the
-    // live count, so a freed-up slot from removal does not reopen room.
-    assert_eq!(
-        client
-            .try_register_alert(
-                &owner,
-                &target,
-                &str(&env, "Alert2"),
-                &hash64c(&env, '2'),
-                &vec![&env, str(&env, "rule:mint")],
-            )
-            .unwrap_err()
-            .unwrap(),
-        ContractError::GlobalAlertLimitExceeded
+    let replacement = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert2"),
+        &hash64c(&env, '2'),
+        &vec![&env, str(&env, "rule:mint")],
     );
+    assert_eq!(replacement, 1);
 }
 
 #[test]
