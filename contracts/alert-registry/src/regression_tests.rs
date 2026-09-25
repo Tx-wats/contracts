@@ -1112,6 +1112,135 @@ fn test_regression_owner_cannot_undo_admin_deactivation() {
 
 #[test]
 fn test_regression_admin_suspension_follows_the_alert() {
+/// Regression test for #204:
+/// `deactivate_all_alerts` returned a plain `0` while paused, which callers
+/// could not tell apart from "owner had no active alerts". It now returns
+/// `Err(Paused)` like every other mutator and leaves the alerts untouched.
+#[test]
+fn test_regression_deactivate_all_alerts_rejects_while_paused() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Paused Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.pause(&admin);
+    assert_eq!(
+        client
+            .try_deactivate_all_alerts(&owner)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Paused
+    );
+    assert!(
+        client.get_alert(&owner, &id).unwrap().active,
+        "a rejected call must not deactivate anything"
+    );
+
+    client.unpause(&admin);
+    assert_eq!(client.deactivate_all_alerts(&owner), 1);
+    assert!(!client.get_alert(&owner, &id).unwrap().active);
+}
+
+/// Remaining TTL of the contract's instance entry.
+fn instance_ttl(env: &Env, client: &AlertRegistryClient) -> u32 {
+    use soroban_sdk::testutils::storage::Instance as _;
+    env.as_contract(&client.address, || env.storage().instance().get_ttl())
+}
+
+fn advance_ledgers(env: &Env, ledgers: u32) {
+    env.ledger().with_mut(|li| li.sequence_number += ledgers);
+}
+
+/// Regression test for #206 (ledger advancement, see #266):
+/// AlertRegistry never extended its instance entry, so a deployment that
+/// went quiet would archive it and take the admin, the ID counter and the
+/// limits with it. `bump_instance_ttl` lets a keeper extend it to the full
+/// `INSTANCE_BUMP_AMOUNT` before it expires.
+#[test]
+fn test_regression_bump_instance_ttl_keeps_instance_alive() {
+    let (env, client) = setup();
+    let initial_ttl = instance_ttl(&env, &client);
+    assert!(initial_ttl < crate::INSTANCE_BUMP_THRESHOLD);
+
+    // Just before expiry, a permissionless bump restores the full TTL.
+    advance_ledgers(&env, initial_ttl - 1);
+    client.bump_instance_ttl();
+    assert_eq!(instance_ttl(&env, &client), crate::INSTANCE_BUMP_AMOUNT);
+
+    // Well past the point where the un-bumped entry would have expired, the
+    // instance is still live with the expected remaining lifetime. (The test
+    // host does not archive entries, so the TTL itself is the assertion.)
+    let past_original_expiry = initial_ttl + 1_000;
+    advance_ledgers(&env, past_original_expiry);
+    assert_eq!(
+        instance_ttl(&env, &client),
+        crate::INSTANCE_BUMP_AMOUNT - past_original_expiry
+    );
+}
+
+/// Regression test for #206: every write to instance storage (the ID counter
+/// in `next_id` and the admin setters) extends the instance entry.
+#[test]
+fn test_regression_instance_writes_extend_instance_ttl() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.initialize(&admin);
+    assert_eq!(instance_ttl(&env, &client), crate::INSTANCE_BUMP_AMOUNT);
+
+    // Age the entry below the bump threshold, then write through next_id.
+    let age_below_threshold = crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1;
+    advance_ledgers(&env, age_below_threshold);
+    assert!(instance_ttl(&env, &client) < crate::INSTANCE_BUMP_THRESHOLD);
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Counter Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(
+        instance_ttl(&env, &client),
+        crate::INSTANCE_BUMP_AMOUNT,
+        "register_alert"
+    );
+
+    // Same for an admin setter.
+    advance_ledgers(&env, age_below_threshold);
+    client.set_global_alert_limit(&admin, &100);
+    assert_eq!(
+        instance_ttl(&env, &client),
+        crate::INSTANCE_BUMP_AMOUNT,
+        "set_global_alert_limit"
+    );
+}
+
+/// Remaining TTL of a persistent entry in the registry's storage.
+fn persistent_ttl(env: &Env, client: &AlertRegistryClient, key: &crate::DataKey) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    env.as_contract(&client.address, || env.storage().persistent().get_ttl(key))
+}
+
+/// Regression test for #210:
+/// `deactivate_alert_by_admin`, `update_target_contract` and
+/// `transfer_alert_ownership` must refresh every index the alert belongs to,
+/// including the index it is moved **out of**. The owner/target it is moved
+/// into is covered by `test_regression_every_mutator_refreshes_all_alert_ttls`;
+/// this covers the index left behind, which still holds the owner's or
+/// target's other alerts.
+#[test]
+fn test_regression_mutators_refresh_indexes_they_leave() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
@@ -1375,4 +1504,118 @@ fn test_regression_every_mutator_rejects_while_paused() {
     assert!(client.get_pending_alert_transfer(&transferring).is_some());
     client.unpause(&admin);
     client.update_label(&owner, &id, &str(&env, "After unpause"));
+    let target = Address::generate(&env);
+    let new_target = Address::generate(&env);
+    let register = |label: &str| {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, label),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        )
+    };
+    let moved = register("Moved");
+    let stays = register("Stays");
+    let age = |env: &Env| env.ledger().with_mut(|li| li.sequence_number += 1_000);
+    let full = crate::DEFAULT_TTL;
+
+    // Admin deactivation refreshes both indexes the alert is in.
+    age(&env);
+    client.deactivate_alert_by_admin(&admin, &stays);
+    assert_eq!(
+        persistent_ttl(&env, &client, &crate::DataKey::OwnerIndex(owner.clone())),
+        full,
+        "deactivate_alert_by_admin: owner index"
+    );
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::ContractIndex(target.clone())
+        ),
+        full,
+        "deactivate_alert_by_admin: contract index"
+    );
+
+    // Retargeting refreshes the old target's index, which still holds `stays`.
+    age(&env);
+    client.update_target_contract(&owner, &moved, &new_target);
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::ContractIndex(target.clone())
+        ),
+        full,
+        "update_target_contract: old contract index"
+    );
+    assert_eq!(
+        persistent_ttl(&env, &client, &crate::DataKey::OwnerIndex(owner.clone())),
+        full,
+        "update_target_contract: owner index"
+    );
+
+    // Transferring refreshes the old owner's index and live counter.
+    age(&env);
+    client.transfer_alert_ownership(&owner, &moved, &new_owner);
+    assert_eq!(
+        persistent_ttl(&env, &client, &crate::DataKey::OwnerIndex(owner.clone())),
+        full,
+        "transfer_alert_ownership: old owner index"
+    );
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::OwnerLiveCount(owner.clone())
+        ),
+        full,
+        "transfer_alert_ownership: old owner live count"
+    );
+    assert_eq!(
+        persistent_ttl(
+            &env,
+            &client,
+            &crate::DataKey::ContractIndex(new_target.clone())
+        ),
+        full,
+        "transfer_alert_ownership: contract index"
+    );
+}
+
+/// Regression test for #211:
+/// instance keys are now read and written through the `instance_key`
+/// constants instead of ad-hoc `symbol_short!` literals. The constants must
+/// stay byte-identical to the literals, or an upgraded contract would lose the
+/// admin, counter and limits already stored by a deployed one.
+#[test]
+fn test_regression_instance_keys_match_legacy_symbols() {
+    use crate::instance_key;
+    use soroban_sdk::symbol_short;
+
+    assert_eq!(instance_key::ADMIN, symbol_short!("ADMIN"));
+    assert_eq!(instance_key::NEXT_ID, symbol_short!("NEXT_ID"));
+    assert_eq!(instance_key::PAUSED, symbol_short!("PAUSED"));
+    assert_eq!(instance_key::LIMIT, symbol_short!("LIMIT"));
+    assert_eq!(instance_key::CLIMIT, symbol_short!("CLIMIT"));
+    assert_eq!(instance_key::GLIMIT, symbol_short!("GLIMIT"));
+    assert_eq!(instance_key::WATCHREG, symbol_short!("WATCHREG"));
+
+    // State written under the literal keys (as a deployed pre-#211 build
+    // would have left it) is read back through the new constants.
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    env.as_contract(&client.address, || {
+        let storage = env.storage().instance();
+        storage.set(&symbol_short!("ADMIN"), &admin);
+        storage.set(&symbol_short!("NEXT_ID"), &7u64);
+        storage.set(&symbol_short!("LIMIT"), &3u32);
+        storage.set(&symbol_short!("PAUSED"), &true);
+    });
+
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(client.get_alert_count(), 7);
+    assert_eq!(client.get_per_owner_alert_limit(), 3);
+    assert!(client.is_paused());
 }

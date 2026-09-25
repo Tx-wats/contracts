@@ -82,6 +82,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ledger-advancement regression test now keeps an alert alive across several
   TTL periods with keep-alive calls only and checks the counter never lapses
   and the per-owner limit still holds. (issue #207)
+- **Ad-hoc `symbol_short!` instance keys consolidated.** The seven instance keys
+  (`ADMIN`, `NEXT_ID`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG`) are now
+  constants in `alert_registry::instance_key`, so a mistyped key no longer
+  compiles. The symbol values are byte-identical, so existing deployments need
+  no migration (they are not `DataKey` variants, whose encoding would differ).
+  The dead `DataKey::NextId` variant, which never stored anything, is removed
+  and the docs that pointed at it are corrected. (issue #211)
+- **Index TTL refresh in `deactivate_alert_by_admin`, `update_target_contract`
+  and `transfer_alert_ownership`.** The code fix landed with the
+  `persist_alert` / `touch_alert` refactor (#213); a regression test now also
+  covers the indexes an alert is moved *out of* (the old owner's index and
+  live counter, and the old target's contract index). (issue #210)
+- **AlertRegistry never extended its instance storage TTL.** The admin, ID
+  counter, limits, pause flag and watcher registry address all live in the
+  instance entry, so an idle deployment could archive it and make every alert
+  unreachable. The instance is now extended to `INSTANCE_BUMP_AMOUNT` on every
+  instance write (`next_id` and all admin setters), and a permissionless
+  `bump_instance_ttl` is available for keepers, mirroring `WatcherRegistry`.
+  Covered by ledger-advancement tests. (issue #206)
+- **`deactivate_all_alerts` silently returned `0` when paused.** Callers could
+  not tell a paused contract from an owner with no active alerts. It now
+  returns `Result<u32, ContractError>` and fails with `Paused`, like every other
+  mutator (the generated Rust client still unwraps to `u32`; use
+  `try_deactivate_all_alerts` to observe the error). (issue #204)
 - **`update_webhook` left a stale pending hash that later overwrote it.**
   `propose_webhook(B)` → `update_webhook(C)` → `confirm_webhook()` promoted the
   stale `B` over the direct update to `C`. `update_webhook` now clears

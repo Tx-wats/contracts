@@ -53,6 +53,15 @@ pub const MAX_TTL: u32 = 535_680;
 /// recipient to accept (approximately 7 days at the nominal 5-second ledger
 /// close time). After that it can only be cancelled or replaced.
 pub const ALERT_TRANSFER_EXPIRY_LEDGERS: u32 = 120_960;
+/// Threshold, in ledgers, below which the contract's instance entry is
+/// extended by [`AlertRegistry::bump_instance_ttl`] and by every write to
+/// instance storage. Approximately 24 hours at the nominal 5-second ledger
+/// close time. Mirrors `WatcherRegistry`.
+pub const INSTANCE_BUMP_THRESHOLD: u32 = 17_280;
+
+/// TTL, in ledgers, the instance entry is extended to. Approximately 31 days,
+/// the protocol maximum. See `docs/ttl.md`.
+pub const INSTANCE_BUMP_AMOUNT: u32 = 535_680;
 
 /// Storage key variants used to address persistent and instance entries.
 #[contracttype]
@@ -87,6 +96,38 @@ pub enum DataKey {
     /// [`AlertRegistry::unlock_alert_by_admin`]. A separate key rather than an
     /// [`AlertConfig`] field, so stored configs keep their encoding.
     AdminSuspended(u64),
+    /// Stores the `Address` proposed as the next admin by
+    /// [`AlertRegistry::propose_admin_transfer`], pending its own acceptance
+    /// via [`AlertRegistry::accept_admin_transfer`].
+    PendingAdminTransfer,
+}
+
+/// Keys of the entries in the contract's **instance** storage.
+///
+/// Each constant is the exact `symbol_short!` the contract has always used, so
+/// the on-chain encoding is unchanged and no migration is needed; routing every
+/// access through these names turns a mistyped key into a compile error.
+/// They are deliberately not [`DataKey`] variants: a variant is encoded as
+/// `[Symbol("Name"), ...]`, not as the bare symbol, so it would orphan the
+/// values already stored under these keys.
+pub mod instance_key {
+    use soroban_sdk::{symbol_short, Symbol};
+
+    /// `Address` of the admin (see [`crate::AlertRegistry::get_admin`]).
+    pub const ADMIN: Symbol = symbol_short!("ADMIN");
+    /// `u64` monotonic counter used to generate alert IDs; also the value of
+    /// [`crate::AlertRegistry::get_alert_count`].
+    pub const NEXT_ID: Symbol = symbol_short!("NEXT_ID");
+    /// `bool` circuit-breaker flag set by `pause` / `unpause`.
+    pub const PAUSED: Symbol = symbol_short!("PAUSED");
+    /// `u32` per-owner alert limit (`0` = unlimited).
+    pub const LIMIT: Symbol = symbol_short!("LIMIT");
+    /// `u32` per-contract alert limit (`0` = unlimited).
+    pub const CLIMIT: Symbol = symbol_short!("CLIMIT");
+    /// `u32` ceiling on the total number of alerts ever registered (`0` = none).
+    pub const GLIMIT: Symbol = symbol_short!("GLIMIT");
+    /// `Address` of the optional `WatcherRegistry` used for read gating.
+    pub const WATCHREG: Symbol = symbol_short!("WATCHREG");
 }
 
 /// Errors returned by `AlertRegistry` entry points.
@@ -151,6 +192,10 @@ pub enum ContractError {
     /// Returned by `update_alert` when the owner tries to reactivate an alert
     /// that an admin suspended with `deactivate_alert_by_admin`.
     AlertSuspended = 21,
+    /// Returned by `accept_admin_transfer` or `cancel_admin_transfer` when no
+    /// admin transfer is currently pending, or when the accepting address does
+    /// not match the proposed address.
+    NoPendingTransfer = 16,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -281,9 +326,7 @@ impl AlertRegistry {
     ///
     /// Running atomically with deployment prevents front-running the initialization window.
     pub fn __constructor(env: Env, admin: Address) {
-        env.storage()
-            .instance()
-            .set(&symbol_short!("ADMIN"), &admin);
+        env.storage().instance().set(&instance_key::ADMIN, &admin);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("init")),
@@ -296,15 +339,21 @@ impl AlertRegistry {
     /// Kept for backwards compatibility. If the contract was initialized
     /// via [`Self::__constructor`] during deployment, calling this again returns
     /// [`ContractError::AlreadyInitialized`].
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`. This prevents a
+    /// front-running attack where an arbitrary account claims the admin role
+    /// during the window between deployment and legitimate initialization.
     /// # Errors
     /// Returns [`ContractError::AlreadyInitialized`] if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
         if env.storage().instance().has(&symbol_short!("ADMIN")) {
+        if env.storage().instance().has(&instance_key::ADMIN) {
             return Err(ContractError::AlreadyInitialized);
         }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("ADMIN"), &admin);
+        env.storage().instance().set(&instance_key::ADMIN, &admin);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("init")),
@@ -314,6 +363,15 @@ impl AlertRegistry {
     }
 
     /// Transfer the admin role to a new address (admin only).
+    ///
+    /// # Deprecation
+    /// This function transfers admin in a single call without the new admin's
+    /// signature. A typo'd `new_admin` permanently locks the contract. Use the
+    /// two-step [`Self::propose_admin_transfer`] /
+    /// [`Self::accept_admin_transfer`] flow instead, which requires the
+    /// incoming admin to prove key ownership before the transfer takes effect.
+    ///
+    /// Kept for backwards compatibility; scheduled for removal in v0.3.0.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
@@ -327,7 +385,8 @@ impl AlertRegistry {
         Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
-            .set(&symbol_short!("ADMIN"), &new_admin);
+            .set(&instance_key::ADMIN, &new_admin);
+        Self::extend_instance_ttl(&env);
 
         // Admin handover is security-relevant: emit it so off-chain watchers
         // can react to a change of control.
@@ -338,12 +397,139 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Propose transferring the admin role to `new_admin` (current admin only).
+    ///
+    /// The transfer does not take effect until `new_admin` calls
+    /// [`Self::accept_admin_transfer`] with their own signature, proving key
+    /// ownership before control passes. This prevents a typo'd or unowned
+    /// address from permanently locking upgrade, pause, and every limit setter.
+    ///
+    /// Calling this again while a proposal is already pending overwrites the
+    /// previous proposal with the new `new_admin`. To withdraw a proposal
+    /// entirely, call [`Self::cancel_admin_transfer`].
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be the
+    /// current admin.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if `admin` is not the current admin.
+    ///
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("propose"))` with data
+    /// `(admin: Address, new_admin: Address)`.
+    pub fn propose_admin_transfer(
+        env: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminTransfer, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("propose")),
+            (admin, new_admin),
+        );
+
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer proposed via [`Self::propose_admin_transfer`].
+    ///
+    /// Requires `new_admin`'s own signature, proving key control before
+    /// `ADMIN` storage is updated. Emits `(Symbol("admin"), Symbol("transfer"))`
+    /// with data `(new_admin: Address)` once the handover completes.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `new_admin`.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending or
+    /// the pending proposal names a different address than `new_admin`.
+    ///
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("transfer"))` with data `(new_admin: Address)`.
+    pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminTransfer)
+            .ok_or(ContractError::NoPendingTransfer)?;
+
+        if pending != new_admin {
+            return Err(ContractError::NoPendingTransfer);
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ADMIN"), &new_admin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("transfer")),
+            new_admin,
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending admin transfer proposed via [`Self::propose_admin_transfer`]
+    /// (current admin only).
+    ///
+    /// The pending proposal is cleared; the current admin is unchanged.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be the
+    /// current admin.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if `admin` is not the current admin.
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is currently pending.
+    ///
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("cancel"))` with data `(admin: Address)`.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::PendingAdminTransfer)
+        {
+            return Err(ContractError::NoPendingTransfer);
+        }
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("cancel")),
+            admin,
+        );
+
+        Ok(())
+    }
+
     /// Replace this contract's WASM with `new_wasm_hash` (admin only).
     ///
     /// The new WASM must already be installed on-chain. Storage is untouched by
     /// the upgrade, so the new build **must** keep the existing [`DataKey`]
-    /// layout and `NextId` counter — the host cannot verify this, and a build
-    /// that changes them will read the existing entries as garbage. See
+    /// layout and [`instance_key`] entries (including the `NEXT_ID` counter)
+    /// — the host cannot verify this, and a build that changes them will read
+    /// the existing entries as garbage. See
     /// `docs/upgrade-guide.md`.
     ///
     /// Requires the admin role to have been initialized: an uninitialized
@@ -365,13 +551,26 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Extend the TTL of the contract's instance entry, which holds the admin,
+    /// the alert ID counter, the alert limits, the pause flag and the watcher
+    /// registry address. If it is archived, every alert becomes unreachable
+    /// until the entry is restored.
+    ///
+    /// Callable by anyone and requires no auth: it only refreshes the entry's
+    /// lifetime and never reads or changes registry state. Every write to
+    /// instance storage already extends it, so this is for deployments that
+    /// go quiet; have a keeper call it periodically (see `docs/ttl.md`).
+    pub fn bump_instance_ttl(env: Env) {
+        Self::extend_instance_ttl(&env);
+    }
+
     /// Get the current admin address.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     pub fn get_admin(env: Env) -> Result<Address, ContractError> {
         env.storage()
             .instance()
-            .get(&symbol_short!("ADMIN"))
+            .get(&instance_key::ADMIN)
             .ok_or(ContractError::NotInitialized)
     }
 
@@ -393,9 +592,8 @@ impl AlertRegistry {
     pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("PAUSED"), &true);
+        env.storage().instance().set(&instance_key::PAUSED, &true);
+        Self::extend_instance_ttl(&env);
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("pause")), admin);
         Ok(())
@@ -410,9 +608,8 @@ impl AlertRegistry {
     pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("PAUSED"), &false);
+        env.storage().instance().set(&instance_key::PAUSED, &false);
+        Self::extend_instance_ttl(&env);
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("unpause")), admin);
         Ok(())
@@ -423,7 +620,7 @@ impl AlertRegistry {
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .instance()
-            .get(&symbol_short!("PAUSED"))
+            .get(&instance_key::PAUSED)
             .unwrap_or(false)
     }
 
@@ -439,9 +636,8 @@ impl AlertRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_not_paused(&env)?;
-        env.storage()
-            .instance()
-            .set(&symbol_short!("LIMIT"), &limit);
+        env.storage().instance().set(&instance_key::LIMIT, &limit);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
@@ -454,7 +650,7 @@ impl AlertRegistry {
     pub fn get_per_owner_alert_limit(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("LIMIT"))
+            .get(&instance_key::LIMIT)
             .unwrap_or(0u32)
     }
 
@@ -481,6 +677,8 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("CLIMIT"), &limit);
+        env.storage().instance().set(&instance_key::CLIMIT, &limit);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
@@ -493,7 +691,7 @@ impl AlertRegistry {
     pub fn get_per_contract_alert_limit(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("CLIMIT"))
+            .get(&instance_key::CLIMIT)
             .unwrap_or(0u32)
     }
 
@@ -519,6 +717,8 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .set(&symbol_short!("GLIMIT"), &limit);
+        env.storage().instance().set(&instance_key::GLIMIT, &limit);
+        Self::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -526,7 +726,7 @@ impl AlertRegistry {
     pub fn get_global_alert_limit(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("GLIMIT"))
+            .get(&instance_key::GLIMIT)
             .unwrap_or(0u32)
     }
 
@@ -570,7 +770,8 @@ impl AlertRegistry {
 
         env.storage()
             .instance()
-            .set(&symbol_short!("WATCHREG"), &watcher_registry);
+            .set(&instance_key::WATCHREG, &watcher_registry);
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("watchreg")),
@@ -597,13 +798,15 @@ impl AlertRegistry {
         Self::assert_admin(&env, &admin)?;
         Self::assert_not_paused(&env)?;
         env.storage().instance().remove(&symbol_short!("WATCHREG"));
+        env.storage().instance().remove(&instance_key::WATCHREG);
+        Self::extend_instance_ttl(&env);
         Ok(())
     }
 
     /// Return the configured `WatcherRegistry` contract address, or `None` if
     /// watcher-gating has not been enabled.
     pub fn get_watcher_registry(env: Env) -> Option<Address> {
-        env.storage().instance().get(&symbol_short!("WATCHREG"))
+        env.storage().instance().get(&instance_key::WATCHREG)
     }
 
     /// Return `true` if watcher-gating is currently enabled (a `WatcherRegistry`
@@ -1726,17 +1929,21 @@ impl AlertRegistry {
     /// Requires a valid Stellar auth signature from `caller`.
     ///
     /// # Returns
-    /// The number of alerts that were deactivated.
+    /// The number of alerts that were deactivated (`0` if the owner had no
+    /// active alerts).
+    ///
+    /// # Errors
+    /// Returns [`ContractError::Paused`] while the contract is paused, like
+    /// every other mutator, so a paused call is never mistaken for an owner
+    /// with nothing to deactivate.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("bulk_off"))` with data
     /// `(caller: Address, count: u32)` when at least one alert was deactivated.
     /// No event is emitted if `count` is `0`.
-    pub fn deactivate_all_alerts(env: Env, caller: Address) -> u32 {
+    pub fn deactivate_all_alerts(env: Env, caller: Address) -> Result<u32, ContractError> {
         caller.require_auth();
-        if Self::is_paused(env.clone()) {
-            return 0;
-        }
+        Self::assert_not_paused(&env)?;
         let ids = Self::owner_index(&env, &caller);
         let mut count: u32 = 0;
         for id in ids.iter() {
@@ -1779,7 +1986,7 @@ impl AlertRegistry {
                 (caller, count),
             );
         }
-        count
+        Ok(count)
     }
 
     /// Move an alert to watch a different target contract.
@@ -1885,7 +2092,7 @@ impl AlertRegistry {
         let total: u64 = env
             .storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64);
 
         let range_start = u64::from(offset).min(total);
@@ -1956,7 +2163,7 @@ impl AlertRegistry {
         let total: u64 = env
             .storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64);
 
         let range_start = u64::from(offset).min(total);
@@ -1990,7 +2197,7 @@ impl AlertRegistry {
     pub fn get_alert_count(env: Env) -> u64 {
         env.storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64)
     }
 
@@ -2062,8 +2269,7 @@ impl AlertRegistry {
     /// watcher. Returns `Ok(())` when no registry is configured (gating is
     /// disabled) or when the querier passes the check.
     fn assert_watcher_if_configured(env: &Env, querier: &Address) -> Result<(), ContractError> {
-        let maybe_registry: Option<Address> =
-            env.storage().instance().get(&symbol_short!("WATCHREG"));
+        let maybe_registry: Option<Address> = env.storage().instance().get(&instance_key::WATCHREG);
 
         if let Some(registry_addr) = maybe_registry {
             let client = ExtWatcherClient::new(env, &registry_addr);
@@ -2086,7 +2292,7 @@ impl AlertRegistry {
         let paused: bool = env
             .storage()
             .instance()
-            .get(&symbol_short!("PAUSED"))
+            .get(&instance_key::PAUSED)
             .unwrap_or(false);
         if paused {
             return Err(ContractError::Paused);
@@ -2095,14 +2301,10 @@ impl AlertRegistry {
     }
 
     fn assert_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
-        if !env.storage().instance().has(&symbol_short!("ADMIN")) {
+        if !env.storage().instance().has(&instance_key::ADMIN) {
             return Err(ContractError::NotInitialized);
         }
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("ADMIN"))
-            .unwrap();
+        let admin: Address = env.storage().instance().get(&instance_key::ADMIN).unwrap();
         if admin == *caller {
             Ok(())
         } else {
@@ -2186,7 +2388,7 @@ impl AlertRegistry {
     }
 
     /// Reject registration once the total number of alerts ever registered
-    /// (the monotonic [`NextId`](DataKey::NextId) counter) reaches the
+    /// (the monotonic [`instance_key::NEXT_ID`] counter) reaches the
     /// configured global ceiling. A limit of `0` means no ceiling.
     fn assert_global_alert_limit(env: &Env) -> Result<(), ContractError> {
         let limit = Self::get_global_alert_limit(env.clone());
@@ -2289,12 +2491,22 @@ impl AlertRegistry {
         let id: u64 = env
             .storage()
             .instance()
-            .get(&symbol_short!("NEXT_ID"))
+            .get(&instance_key::NEXT_ID)
             .unwrap_or(0u64);
         env.storage()
             .instance()
-            .set(&symbol_short!("NEXT_ID"), &(id + 1));
+            .set(&instance_key::NEXT_ID, &(id + 1));
+        Self::extend_instance_ttl(env);
         id
+    }
+
+    /// Keep the instance entry (admin, counter, limits, pause flag, watcher
+    /// registry) alive. Called on every write to instance storage; see
+    /// [`AlertRegistry::bump_instance_ttl`] for deployments that go quiet.
+    fn extend_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Load the list of alert IDs owned by `owner`, or an empty vec.
@@ -4048,6 +4260,338 @@ mod tests {
         );
     }
 
+    // ── Two-step admin transfer (#196) ───────────────────────────────────────
+
+    // Happy path: propose → accept hands control to new_admin
+    #[test]
+    fn test_propose_accept_admin_transfer_happy_path() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap(),
+            Ok(())
+        );
+        // old admin retains control before acceptance
+        assert_eq!(client.get_admin(), admin);
+
+        assert_eq!(
+            client.try_accept_admin_transfer(&new_admin).unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_admin(), new_admin);
+
+        // new_admin can exercise admin privileges
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        assert_eq!(
+            client.try_remove_alert_by_admin(&new_admin, &id).unwrap(),
+            Ok(())
+        );
+    }
+
+    // old admin loses privileges once the transfer is accepted
+    #[test]
+    fn test_old_admin_rejected_after_two_step_transfer() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.accept_admin_transfer(&new_admin);
+
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        assert_eq!(
+            client
+                .try_remove_alert_by_admin(&admin, &id)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // accept by the wrong address is rejected with NoPendingTransfer
+    #[test]
+    fn test_accept_admin_transfer_wrong_address() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // admin is unchanged
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // accept with no pending proposal is rejected with NoPendingTransfer
+    #[test]
+    fn test_accept_admin_transfer_none_pending() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // cancel clears the proposal; subsequent accept is rejected
+    #[test]
+    fn test_cancel_admin_transfer() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(
+            client.try_cancel_admin_transfer(&admin).unwrap(),
+            Ok(())
+        );
+
+        // the cancelled proposal can no longer be accepted
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // admin is unchanged
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // cancel with no pending proposal is rejected with NoPendingTransfer
+    #[test]
+    fn test_cancel_admin_transfer_none_pending() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // proposing again overwrites the previous pending address
+    #[test]
+    fn test_propose_admin_transfer_overwrite() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let first_candidate = Address::generate(&env);
+        let second_candidate = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &first_candidate);
+        // overwrite with a different address
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&admin, &second_candidate)
+                .unwrap(),
+            Ok(())
+        );
+
+        // the first candidate can no longer accept
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&first_candidate)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // the second candidate can accept
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&second_candidate)
+                .unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_admin(), second_candidate);
+    }
+
+    // non-admin cannot propose a transfer
+    #[test]
+    fn test_propose_admin_transfer_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&attacker, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // non-admin cannot cancel a pending transfer
+    #[test]
+    fn test_cancel_admin_transfer_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // propose emits admin.propose event; accept emits admin.transfer event
+    #[test]
+    fn test_propose_and_accept_admin_transfer_events() {
+        use soroban_sdk::{symbol_short, testutils::Events as _, FromVal, Symbol};
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        let events = env.events().all();
+        let propose_event = events.iter().find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("propose")
+        });
+        assert!(propose_event.is_some(), "admin.propose event must be emitted");
+
+        client.accept_admin_transfer(&new_admin);
+
+        let events = env.events().all();
+        let transfer_event = events.iter().find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("transfer")
+        });
+        assert!(
+            transfer_event.is_some(),
+            "admin.transfer event must be emitted"
+        );
+
+        let (_, _, data) = transfer_event.unwrap();
+        let emitted_new_admin: Address = FromVal::from_val(&env, &data);
+        assert_eq!(emitted_new_admin, new_admin);
+    }
+
+    // cancel emits admin.cancel event
+    #[test]
+    fn test_cancel_admin_transfer_emits_event() {
+        use soroban_sdk::{symbol_short, testutils::Events as _, Symbol};
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.cancel_admin_transfer(&admin);
+
+        let events = env.events().all();
+        let cancel_event = events.iter().find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("cancel")
+        });
+        assert!(cancel_event.is_some(), "admin.cancel event must be emitted");
+    }
+
+    // auth-failure: propose_admin_transfer requires admin's auth signature
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_propose_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        env.set_auths(&[]);
+        client.propose_admin_transfer(&admin, &new_admin);
+    }
+
+    // auth-failure: accept_admin_transfer requires new_admin's auth signature
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_accept_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        env.set_auths(&[]);
+        client.accept_admin_transfer(&new_admin);
+    }
+
+    // auth-failure: cancel_admin_transfer requires admin's auth signature
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_cancel_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        env.set_auths(&[]);
+        client.cancel_admin_transfer(&admin);
+    }
+
     // ── get_alerts_modified_since ─────────────────────────────────────────────
 
     // 18. Returns all alerts when since == 0
@@ -4244,6 +4788,22 @@ mod tests {
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
+
+    // #195 — initialize must require a valid signature from the admin address so
+    // that no one can front-run the initialization window after deployment and
+    // claim the admin role without owning the corresponding key.
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_initialize_requires_auth() {
+        let env = Env::default();
+        // No mock_all_auths — any require_auth() call will fail.
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // Calling initialize without a valid signature must panic with
+        // Error(Auth, InvalidAction), not succeed and hand over admin control.
+        client.initialize(&admin);
+    }
 
     #[test]
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
