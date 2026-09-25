@@ -81,6 +81,12 @@ pub enum DataKey {
     OwnerLiveCount(Address),
     /// Stores the list of alert IDs watching a given contract address.
     ContractIndex(Address),
+    /// Monotonic counter used to generate unique alert IDs.
+    NextId,
+    /// Stores the `Address` proposed as the next admin by
+    /// [`AlertRegistry::propose_admin_transfer`], pending its own acceptance
+    /// via [`AlertRegistry::accept_admin_transfer`].
+    PendingAdminTransfer,
 }
 
 /// Keys of the entries in the contract's **instance** storage.
@@ -162,6 +168,10 @@ pub enum ContractError {
     /// Returned by `validate_rules` when the same rule descriptor appears more
     /// than once in an alert's rule list.
     DuplicateRule = 15,
+    /// Returned by `accept_admin_transfer` or `cancel_admin_transfer` when no
+    /// admin transfer is currently pending, or when the accepting address does
+    /// not match the proposed address.
+    NoPendingTransfer = 16,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -294,9 +304,16 @@ impl AlertRegistry {
     /// Kept for backwards compatibility. If the contract was initialized
     /// via [`Self::__constructor`] during deployment, calling this again returns
     /// [`ContractError::AlreadyInitialized`].
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`. This prevents a
+    /// front-running attack where an arbitrary account claims the admin role
+    /// during the window between deployment and legitimate initialization.
     /// # Errors
     /// Returns [`ContractError::AlreadyInitialized`] if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        if env.storage().instance().has(&symbol_short!("ADMIN")) {
         if env.storage().instance().has(&instance_key::ADMIN) {
             return Err(ContractError::AlreadyInitialized);
         }
@@ -311,6 +328,15 @@ impl AlertRegistry {
     }
 
     /// Transfer the admin role to a new address (admin only).
+    ///
+    /// # Deprecation
+    /// This function transfers admin in a single call without the new admin's
+    /// signature. A typo'd `new_admin` permanently locks the contract. Use the
+    /// two-step [`Self::propose_admin_transfer`] /
+    /// [`Self::accept_admin_transfer`] flow instead, which requires the
+    /// incoming admin to prove key ownership before the transfer takes effect.
+    ///
+    /// Kept for backwards compatibility; scheduled for removal in v0.3.0.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
@@ -333,6 +359,132 @@ impl AlertRegistry {
             (symbol_short!("admin"), symbol_short!("transfer")),
             (admin, new_admin),
         );
+        Ok(())
+    }
+
+    /// Propose transferring the admin role to `new_admin` (current admin only).
+    ///
+    /// The transfer does not take effect until `new_admin` calls
+    /// [`Self::accept_admin_transfer`] with their own signature, proving key
+    /// ownership before control passes. This prevents a typo'd or unowned
+    /// address from permanently locking upgrade, pause, and every limit setter.
+    ///
+    /// Calling this again while a proposal is already pending overwrites the
+    /// previous proposal with the new `new_admin`. To withdraw a proposal
+    /// entirely, call [`Self::cancel_admin_transfer`].
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be the
+    /// current admin.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if `admin` is not the current admin.
+    ///
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("propose"))` with data
+    /// `(admin: Address, new_admin: Address)`.
+    pub fn propose_admin_transfer(
+        env: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminTransfer, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("propose")),
+            (admin, new_admin),
+        );
+
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer proposed via [`Self::propose_admin_transfer`].
+    ///
+    /// Requires `new_admin`'s own signature, proving key control before
+    /// `ADMIN` storage is updated. Emits `(Symbol("admin"), Symbol("transfer"))`
+    /// with data `(new_admin: Address)` once the handover completes.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `new_admin`.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending or
+    /// the pending proposal names a different address than `new_admin`.
+    ///
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("transfer"))` with data `(new_admin: Address)`.
+    pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminTransfer)
+            .ok_or(ContractError::NoPendingTransfer)?;
+
+        if pending != new_admin {
+            return Err(ContractError::NoPendingTransfer);
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ADMIN"), &new_admin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("transfer")),
+            new_admin,
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending admin transfer proposed via [`Self::propose_admin_transfer`]
+    /// (current admin only).
+    ///
+    /// The pending proposal is cleared; the current admin is unchanged.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be the
+    /// current admin.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if `admin` is not the current admin.
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is currently pending.
+    ///
+    /// # Events
+    /// Emits `(Symbol("admin"), Symbol("cancel"))` with data `(admin: Address)`.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::PendingAdminTransfer)
+        {
+            return Err(ContractError::NoPendingTransfer);
+        }
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("cancel")),
+            admin,
+        );
+
         Ok(())
     }
 
@@ -3718,6 +3870,338 @@ mod tests {
         );
     }
 
+    // ── Two-step admin transfer (#196) ───────────────────────────────────────
+
+    // Happy path: propose → accept hands control to new_admin
+    #[test]
+    fn test_propose_accept_admin_transfer_happy_path() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap(),
+            Ok(())
+        );
+        // old admin retains control before acceptance
+        assert_eq!(client.get_admin(), admin);
+
+        assert_eq!(
+            client.try_accept_admin_transfer(&new_admin).unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_admin(), new_admin);
+
+        // new_admin can exercise admin privileges
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        assert_eq!(
+            client.try_remove_alert_by_admin(&new_admin, &id).unwrap(),
+            Ok(())
+        );
+    }
+
+    // old admin loses privileges once the transfer is accepted
+    #[test]
+    fn test_old_admin_rejected_after_two_step_transfer() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.accept_admin_transfer(&new_admin);
+
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        assert_eq!(
+            client
+                .try_remove_alert_by_admin(&admin, &id)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // accept by the wrong address is rejected with NoPendingTransfer
+    #[test]
+    fn test_accept_admin_transfer_wrong_address() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // admin is unchanged
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // accept with no pending proposal is rejected with NoPendingTransfer
+    #[test]
+    fn test_accept_admin_transfer_none_pending() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // cancel clears the proposal; subsequent accept is rejected
+    #[test]
+    fn test_cancel_admin_transfer() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(
+            client.try_cancel_admin_transfer(&admin).unwrap(),
+            Ok(())
+        );
+
+        // the cancelled proposal can no longer be accepted
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // admin is unchanged
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // cancel with no pending proposal is rejected with NoPendingTransfer
+    #[test]
+    fn test_cancel_admin_transfer_none_pending() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    // proposing again overwrites the previous pending address
+    #[test]
+    fn test_propose_admin_transfer_overwrite() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let first_candidate = Address::generate(&env);
+        let second_candidate = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &first_candidate);
+        // overwrite with a different address
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&admin, &second_candidate)
+                .unwrap(),
+            Ok(())
+        );
+
+        // the first candidate can no longer accept
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&first_candidate)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        // the second candidate can accept
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&second_candidate)
+                .unwrap(),
+            Ok(())
+        );
+        assert_eq!(client.get_admin(), second_candidate);
+    }
+
+    // non-admin cannot propose a transfer
+    #[test]
+    fn test_propose_admin_transfer_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&attacker, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // non-admin cannot cancel a pending transfer
+    #[test]
+    fn test_cancel_admin_transfer_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        assert_eq!(
+            client
+                .try_cancel_admin_transfer(&attacker)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // propose emits admin.propose event; accept emits admin.transfer event
+    #[test]
+    fn test_propose_and_accept_admin_transfer_events() {
+        use soroban_sdk::{symbol_short, testutils::Events as _, FromVal, Symbol};
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+
+        let events = env.events().all();
+        let propose_event = events.iter().find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("propose")
+        });
+        assert!(propose_event.is_some(), "admin.propose event must be emitted");
+
+        client.accept_admin_transfer(&new_admin);
+
+        let events = env.events().all();
+        let transfer_event = events.iter().find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("transfer")
+        });
+        assert!(
+            transfer_event.is_some(),
+            "admin.transfer event must be emitted"
+        );
+
+        let (_, _, data) = transfer_event.unwrap();
+        let emitted_new_admin: Address = FromVal::from_val(&env, &data);
+        assert_eq!(emitted_new_admin, new_admin);
+    }
+
+    // cancel emits admin.cancel event
+    #[test]
+    fn test_cancel_admin_transfer_emits_event() {
+        use soroban_sdk::{symbol_short, testutils::Events as _, Symbol};
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.cancel_admin_transfer(&admin);
+
+        let events = env.events().all();
+        let cancel_event = events.iter().find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("cancel")
+        });
+        assert!(cancel_event.is_some(), "admin.cancel event must be emitted");
+    }
+
+    // auth-failure: propose_admin_transfer requires admin's auth signature
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_propose_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        env.set_auths(&[]);
+        client.propose_admin_transfer(&admin, &new_admin);
+    }
+
+    // auth-failure: accept_admin_transfer requires new_admin's auth signature
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_accept_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        env.set_auths(&[]);
+        client.accept_admin_transfer(&new_admin);
+    }
+
+    // auth-failure: cancel_admin_transfer requires admin's auth signature
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_cancel_admin_transfer_requires_auth() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.propose_admin_transfer(&admin, &new_admin);
+        env.set_auths(&[]);
+        client.cancel_admin_transfer(&admin);
+    }
+
     // ── get_alerts_modified_since ─────────────────────────────────────────────
 
     // 18. Returns all alerts when since == 0
@@ -3914,6 +4398,22 @@ mod tests {
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
+
+    // #195 — initialize must require a valid signature from the admin address so
+    // that no one can front-run the initialization window after deployment and
+    // claim the admin role without owning the corresponding key.
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_initialize_requires_auth() {
+        let env = Env::default();
+        // No mock_all_auths — any require_auth() call will fail.
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // Calling initialize without a valid signature must panic with
+        // Error(Auth, InvalidAction), not succeed and hand over admin control.
+        client.initialize(&admin);
+    }
 
     #[test]
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
