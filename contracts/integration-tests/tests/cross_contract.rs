@@ -252,14 +252,6 @@ fn test_watcher_gating_get_alerts_by_owner() {
     );
 }
 
-/// Watcher-gating also applies to get_alert (#42) — a non-watcher must be
-/// rejected the same way the already-gated query functions reject one.
-#[test]
-fn test_watcher_gating_get_alert_rejects_non_watcher() {
-    let (env, alert_client, watcher_client) = setup();
-
-    let admin = Address::generate(&env);
-    let watcher = Address::generate(&env);
 /// When watcher-gating is enabled, every gated query function rejects a
 /// non-watcher caller with `NotAWatcher`. This exercises all four gated
 /// entry points, not just `get_alerts_for_contract`.
@@ -281,7 +273,6 @@ fn test_gated_mode_rejects_non_watcher() {
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
     let id = alert_client.register_alert(
-    alert_client.register_alert(
         &owner,
         &target,
         &String::from_str(&env, "Alert"),
@@ -296,6 +287,10 @@ fn test_gated_mode_rejects_non_watcher() {
     assert_eq!(
         alert_client
             .try_get_alert(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
     assert_eq!(
         alert_client
             .try_get_alerts_for_contract(&stranger, &target)
@@ -338,6 +333,10 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
     assert_eq!(
         alert_client
             .try_get_alert_active(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
     assert_eq!(
         alert_client
             .try_get_alerts_by_owner(&stranger, &owner)
@@ -361,12 +360,6 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
     );
 }
 
-/// Watcher-gating also applies to get_active_alerts_for_contract (#42) —
-/// previously this function took no querier and stayed fully open even when
-/// gating was configured, defeating gating for anyone who used it instead of
-/// the already-gated get_alerts_for_contract.
-#[test]
-fn test_watcher_gating_get_active_alerts_for_contract_rejects_non_watcher() {
 /// When watcher-gating is enabled, a registered watcher is accepted by every
 /// gated query function.
 #[test]
@@ -409,6 +402,7 @@ fn test_gated_mode_accepts_registered_watcher() {
             .unwrap_err()
             .unwrap(),
         AlertError::NotAWatcher
+    );
     assert_eq!(
         alert_client
             .get_alerts_for_contract(&watcher, &target)

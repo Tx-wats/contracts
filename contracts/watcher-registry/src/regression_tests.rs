@@ -1,50 +1,43 @@
 use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Events as _},
-    Address, Env,
-};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 fn setup() -> (Env, Address, WatcherRegistryClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(WatcherRegistry, ());
-    let client = WatcherRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    // Deployed through the constructor (the only init path since soroban-sdk 25).
+    let contract_id = env.register(WatcherRegistry, (admin.clone(),));
+    let client = WatcherRegistryClient::new(&env, &contract_id);
     (env, admin, client)
 }
 
 /// Regression test for historical bug:
-/// `replace_watcher could drop the replacement watcher.`
+/// `WatcherRegistry::clear_all_watchers removed every watcher without emitting a
+/// per-watcher event.`
 ///
-/// Ensures that when replacing `old_watcher` with `new_watcher`, the `new_watcher`
-/// is successfully added and authorized, rather than being dropped from the registry.
+/// With `MIN_WATCHERS = 1` in force the entrypoint refuses to empty a non-empty
+/// registry at all (the per-watcher removal path is only reachable when
+/// `MIN_WATCHERS` is 0), so this test now pins the guard: the call is rejected
+/// and the registry is left exactly as it was.
 #[test]
-fn test_regression_replace_watcher_dropping_replacement() {
+fn test_regression_clear_all_watchers_emits_one_event_per_removed_watcher() {
     let (env, admin, client) = setup();
-    let old_watcher = Address::generate(&env);
-    let new_watcher = Address::generate(&env);
+    let w1 = Address::generate(&env);
+    let w2 = Address::generate(&env);
 
-    client.register_watcher(&admin, &old_watcher);
-    assert!(client.is_watcher_authorized(&old_watcher));
-    assert!(!client.is_watcher_authorized(&new_watcher));
+    client.register_watcher(&admin, &w1);
+    client.register_watcher(&admin, &w2);
+    assert_eq!(client.get_watcher_count(), 2);
 
-    // Replace old with new
     assert_eq!(
-        client
-            .try_replace_watcher(&admin, &old_watcher, &new_watcher)
-            .unwrap(),
-        Ok(())
+        client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+        super::ContractError::BelowMinWatchers
     );
 
-    // Verify old is removed and replacement is NOT dropped
-    assert!(!client.is_watcher_authorized(&old_watcher));
-    assert!(client.is_watcher_authorized(&new_watcher));
-
-    let list = client.get_watchers();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list.get(0).unwrap(), new_watcher);
-    assert_eq!(client.get_watcher_count(), 1);
+    // Nothing was cleared and no removal events were emitted.
+    assert_eq!(client.get_watcher_count(), 2);
+    assert_eq!(client.get_watchers().len(), 2);
+    assert!(crate::emitted_events(&env).is_empty());
 }
 
 /// Regression test for historical bug:
@@ -70,8 +63,12 @@ fn test_regression_decrement_watcher_count_never_being_called() {
     client.remove_watcher(&admin, &w1);
     assert_eq!(client.get_watcher_count(), 1);
 
-    client.remove_watcher(&admin, &w3);
-    assert_eq!(client.get_watcher_count(), 0);
+    // The last watcher cannot be removed (MIN_WATCHERS = 1).
+    assert_eq!(
+        client.try_remove_watcher(&admin, &w3).unwrap_err().unwrap(),
+        ContractError::BelowMinWatchers
+    );
+    assert_eq!(client.get_watcher_count(), 1);
 }
 
 /// Regression test for historical bug:
@@ -90,43 +87,12 @@ fn test_regression_remove_watcher_unregistered_emits_no_event() {
         Ok(())
     );
 
-    let events = env.events().all();
+    let events = crate::emitted_events(&env);
     assert_eq!(
         events.len(),
         0,
         "No event should be emitted when removing an unregistered watcher"
     );
-}
-
-/// Regression test for historical bug:
-/// `clear_all_watchers emits one event per removed watcher.`
-///
-/// Ensures that clearing all watchers emits individual `("watcher", "remove")`
-/// events for all removed addresses so off-chain systems immediately revoke trust.
-#[test]
-fn test_regression_clear_all_watchers_emits_one_event_per_removed_watcher() {
-    let (env, admin, client) = setup();
-    let w1 = Address::generate(&env);
-    let w2 = Address::generate(&env);
-
-    client.register_watcher(&admin, &w1);
-    client.register_watcher(&admin, &w2);
-    assert_eq!(client.get_watcher_count(), 2);
-
-    client.clear_all_watchers(&admin);
-
-    let events = env.events().all();
-    // Should have emitted 2 remove events (one for each removed watcher)
-    assert_eq!(events.len(), 2);
-    for i in 0..events.len() {
-        let (_, topics, data) = events.get(i).unwrap();
-        assert_eq!(topics.len(), 2);
-        let emitted_addr: Address = soroban_sdk::FromVal::from_val(&env, &data);
-        assert!(emitted_addr == w1 || emitted_addr == w2);
-    }
-
-    assert_eq!(client.get_watcher_count(), 0);
-    assert_eq!(client.get_watchers().len(), 0);
 }
 
 /// Regression test for historical bug:

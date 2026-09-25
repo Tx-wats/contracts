@@ -24,10 +24,9 @@ use soroban_sdk::{
 fn create_env_and_client() -> (Env, Address, AlertRegistryClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(AlertRegistry, ());
-    let client = AlertRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let contract_id = env.register(AlertRegistry, (admin.clone(),));
+    let client = AlertRegistryClient::new(&env, &contract_id);
     (env, admin, client)
 }
 
@@ -630,7 +629,9 @@ fn run_state_machine(actions: Vec<AlertAction>) {
                 );
             } else {
                 // Invariant: Live alert matches expected state machine model
-                let on_chain = client.get_alert(&owners[0], &id).expect("Live alert must exist");
+                let on_chain = client
+                    .get_alert(&owners[0], &id)
+                    .expect("Live alert must exist");
                 assert_eq!(on_chain.owner, owners[alert.owner_idx]);
                 assert_eq!(on_chain.target_contract, targets[alert.target_idx]);
                 assert_eq!(on_chain.label, make_str(&env, &alert.label));
