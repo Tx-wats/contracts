@@ -3273,7 +3273,9 @@ mod tests {
             .expect("admin.limit event must be emitted");
 
         let (_, _, data) = limit_event;
-        let (kind, emitted_limit): (Symbol, u32) = soroban_sdk::FromVal::from_val(&env, &data);
+        let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+            soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_admin, admin);
         assert_eq!(kind, symbol_short!("contract"));
         assert_eq!(emitted_limit, 7u32);
     }
