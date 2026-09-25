@@ -155,7 +155,6 @@ for pausing or resuming a single alert.
 |---|---|---|
 | `caller` | `Address` | Must be the alert owner |
 | `config_id` | `u64` | ID of the alert to update |
-| `rules` | `Vec<String>` | New rule descriptors |
 | `active` | `bool` | New active status |
 
 **Returns:** nothing
