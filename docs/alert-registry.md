@@ -312,6 +312,28 @@ Removes IDs from `owner`'s index whose alert record no longer exists (expired in
 
 ---
 
+### `update_target_contract`
+
+Moves an alert to watch a different contract: updates `target_contract`, migrates the alert ID from the old contract's index to the new one, and clears any pending ownership transfer. Only the owner may call this.
+
+**Requires auth:** `caller` (must match `owner` of the config)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert to retarget |
+| `new_target` | `Address` | Contract address to watch instead |
+
+**Returns:** nothing
+
+**Errors:** `AlertNotFound` if the ID does not exist; `Unauthorized` if the caller is not the owner; `ContractAlertLimitExceeded` if `new_target` is already at the per-contract alert limit (retargeting counts against the limit exactly like registering, #199; moving to the alert's current target is never blocked); `Paused` while the contract is paused.
+
+**Events:** Emits `(Symbol("alert"), Symbol("retarget"))` with data `(id: u64, old_target: Address, new_target: Address)`.
+
+---
+
 ### Alert ownership transfers
 
 Ownership moves in two steps so nobody can be made the owner of alerts they did not agree to take (which would fill their per-owner quota and add webhooks they do not control to their alert list). The owner proposes, the recipient accepts. A proposal expires after `ALERT_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers, ≈ 7 days), and is cleared when the alert is removed or retargeted. `transfer_alert_ownership` was replaced by this flow in #201.

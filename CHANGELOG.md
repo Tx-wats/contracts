@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **`update_target_contract` bypassed the per-contract alert limit.** Alerts
+  registered against throwaway targets could all be retargeted at one
+  contract. Retargeting now checks the new target's limit like
+  `register_alert` does (`ContractAlertLimitExceeded`). (issue #199)
 - **Expired alerts permanently consumed the owner's quota.** An alert whose
   record expired (instead of being removed) stayed in the owner index and live
   counter, still counted by the per-owner limit, and could not be removed

@@ -968,3 +968,47 @@ fn test_regression_prune_expired_alerts() {
         "nothing left to prune"
     );
 }
+
+// ── #199: retargeting respects the per-contract limit ────────────────────────
+
+/// Regression test for #199: `update_target_contract` used to move an alert
+/// into any contract's index without checking the per-contract limit, so
+/// alerts registered against throwaway targets could all be retargeted at one
+/// victim contract.
+#[test]
+fn test_regression_retarget_respects_per_contract_limit() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_contract_alert_limit(&admin, &1);
+
+    let owner = Address::generate(&env);
+    let victim = Address::generate(&env);
+    let throwaway = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    client.register_alert(&owner, &victim, &str(&env, "Fills"), &hash64(&env), &rules);
+    let other = client.register_alert(
+        &owner,
+        &throwaway,
+        &str(&env, "Moves"),
+        &hash64(&env),
+        &rules,
+    );
+
+    assert_eq!(
+        client
+            .try_update_target_contract(&owner, &other, &victim)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::ContractAlertLimitExceeded
+    );
+    assert_eq!(
+        client.get_alert(&owner, &other).unwrap().target_contract,
+        throwaway
+    );
+    assert_eq!(client.get_active_contract_alert_count(&victim), 1);
+
+    // Retargeting to the alert's current target is not blocked by its own slot.
+    client.update_target_contract(&owner, &other, &throwaway);
+}

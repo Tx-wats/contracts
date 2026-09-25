@@ -1701,6 +1701,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
+    /// Returns [`ContractError::ContractAlertLimitExceeded`] if `new_target` is
+    /// already at the per-contract alert limit.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("retarget"))` with data
@@ -1721,6 +1723,14 @@ impl AlertRegistry {
             .ok_or(ContractError::AlertNotFound)?;
 
         Self::assert_owner(&config, &caller)?;
+
+        // Moving into a target counts against its limit exactly like
+        // registering there would; otherwise alerts registered against
+        // throwaway targets could all be retargeted at one contract (#199).
+        // Retargeting to the current target takes no extra slot.
+        if new_target != config.target_contract {
+            Self::assert_per_contract_limit(&env, &new_target)?;
+        }
 
         let old_target = config.target_contract.clone();
         config.target_contract = new_target.clone();
