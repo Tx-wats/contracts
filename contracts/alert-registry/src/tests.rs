@@ -3426,6 +3426,49 @@ fn test_update_label_not_found() {
     );
 }
 
+#[test]
+fn test_register_alert_rejects_empty_label() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, ""),
+                &hash64(&env),
+                &vec![&env],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::EmptyLabel
+    );
+}
+
+#[test]
+fn test_update_label_rejects_empty_label() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_update_label(&owner, &id, &str(&env, ""))
+            .unwrap_err()
+            .unwrap(),
+        ContractError::EmptyLabel
+    );
+}
+
 // 21. update_label — label exceeding 128 bytes is rejected
 #[test]
 #[should_panic(expected = "Error(Contract, #7)")]
@@ -4445,6 +4488,31 @@ fn test_deactivate_all_alerts_multiple() {
     assert_eq!(client.get_alert_active(&owner, &id1), Some(false));
     assert_eq!(client.get_alert_active(&owner, &id2), Some(false));
     assert_eq!(client.get_alert_active(&owner, &id3), Some(false));
+}
+
+#[test]
+fn test_deactivate_all_alerts_is_bounded_and_resumable() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    for _ in 0..=MAX_DEACTIVATIONS_PER_CALL {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+    }
+
+    assert_eq!(
+        client.deactivate_all_alerts(&owner),
+        MAX_DEACTIVATIONS_PER_CALL
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+    assert_eq!(client.deactivate_all_alerts(&owner), 1);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
 }
 
 // 24. deactivate_all_alerts only affects the calling owner's alerts
