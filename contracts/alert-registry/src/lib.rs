@@ -126,6 +126,8 @@ pub mod instance_key {
     pub const CLIMIT: Symbol = symbol_short!("CLIMIT");
     /// `u32` ceiling on the total number of alerts ever registered (`0` = none).
     pub const GLIMIT: Symbol = symbol_short!("GLIMIT");
+    /// `u64` number of currently live alert records.
+    pub const LIVE: Symbol = symbol_short!("LIVE");
     /// `Address` of the optional `WatcherRegistry` used for read gating.
     pub const WATCHREG: Symbol = symbol_short!("WATCHREG");
 }
@@ -884,6 +886,10 @@ impl AlertRegistry {
         Self::push_owner_index(&env, &owner, id)?;
         Self::push_contract_index(&env, &target_contract, id)?;
         Self::persist_alert(&env, id, &config);
+        Self::set_live_alert_count(
+            &env,
+            Self::get_live_alert_count(&env).saturating_add(1),
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("register")),
@@ -2375,6 +2381,10 @@ impl AlertRegistry {
         storage.extend_ttl(&DataKey::OwnerIndex(owner.clone()), DEFAULT_TTL, DEFAULT_TTL);
         let count = Self::owner_live_count(env, owner);
         Self::set_owner_live_count(env, owner, count.saturating_sub(dropped));
+        Self::set_live_alert_count(
+            env,
+            Self::get_live_alert_count(env).saturating_sub(u64::from(dropped)),
+        );
     }
 
     /// Reject registration once the number of currently active alerts
@@ -2390,12 +2400,11 @@ impl AlertRegistry {
         Ok(())
     }
 
-    /// Reject registration once the total number of alerts ever registered
-    /// (the monotonic [`instance_key::NEXT_ID`] counter) reaches the
-    /// configured global ceiling. A limit of `0` means no ceiling.
+    /// Reject registration once the number of currently live alerts reaches
+    /// the configured global ceiling. A limit of `0` means no ceiling.
     fn assert_global_alert_limit(env: &Env) -> Result<(), ContractError> {
         let limit = Self::get_global_alert_limit(env.clone());
-        if limit > 0 && Self::get_alert_count(env.clone()) >= u64::from(limit) {
+        if limit > 0 && Self::get_live_alert_count(env) >= u64::from(limit) {
             return Err(ContractError::GlobalAlertLimitExceeded);
         }
         Ok(())
@@ -2435,6 +2444,10 @@ impl AlertRegistry {
 
         Self::remove_from_owner_index(env, &config.owner, config_id);
         Self::remove_from_contract_index(env, &config.target_contract, config_id);
+        Self::set_live_alert_count(
+            env,
+            Self::get_live_alert_count(env).saturating_sub(1),
+        );
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("remove")),
@@ -2501,6 +2514,18 @@ impl AlertRegistry {
             .set(&instance_key::NEXT_ID, &(id + 1));
         Self::extend_instance_ttl(env);
         id
+    }
+
+    fn get_live_alert_count(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&instance_key::LIVE)
+            .unwrap_or(0u64)
+    }
+
+    fn set_live_alert_count(env: &Env, count: u64) {
+        env.storage().instance().set(&instance_key::LIVE, &count);
+        Self::extend_instance_ttl(env);
     }
 
     /// Keep the instance entry (admin, counter, limits, pause flag, watcher
