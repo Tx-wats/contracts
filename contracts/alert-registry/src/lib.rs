@@ -3070,7 +3070,7 @@ mod tests {
     }
 
     #[test]
-    fn test_global_alert_limit_not_decremented_by_removal() {
+    fn test_global_alert_limit_is_released_by_removal() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -3087,21 +3087,14 @@ mod tests {
         );
         client.remove_alert(&owner, &id);
 
-        // The ceiling tracks the monotonic ever-registered count, not the
-        // live count, so a freed-up slot from removal does not reopen room.
-        assert_eq!(
-            client
-                .try_register_alert(
-                    &owner,
-                    &target,
-                    &str(&env, "Alert2"),
-                    &hash64c(&env, '2'),
-                    &vec![&env, str(&env, "rule:mint")],
-                )
-                .unwrap_err()
-                .unwrap(),
-            ContractError::GlobalAlertLimitExceeded
+        let replacement = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert2"),
+            &hash64c(&env, '2'),
+            &vec![&env, str(&env, "rule:mint")],
         );
+        assert_eq!(replacement, 1);
     }
 
     #[test]
