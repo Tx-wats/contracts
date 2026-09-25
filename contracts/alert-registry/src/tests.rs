@@ -2752,6 +2752,56 @@ fn test_get_alert_ids_by_owner() {
     assert_eq!(client.get_alert_ids_by_owner(&other).len(), 0);
 }
 
+#[test]
+fn test_get_alerts_by_ids_preserves_order_and_skips_missing() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let first = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "first"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    let second = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "second"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    client.remove_alert(&owner, &first);
+
+    let configs =
+        client.get_alerts_by_ids(&Address::generate(&env), &vec![&env, 999, second, first]);
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs.get(0).unwrap().label, str(&env, "second"));
+}
+
+#[test]
+fn test_set_alert_active_preserves_rules() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "alert"),
+        &hash64(&env),
+        &rules,
+    );
+
+    client.set_alert_active(&owner, &id, &false);
+    assert!(!client.get_alert_active(&owner, &id).unwrap());
+    assert_eq!(client.get_alert(&owner, &id).unwrap().rules, rules);
+
+    client.set_alert_active(&owner, &id, &true);
+    assert!(client.get_alert_active(&owner, &id).unwrap());
+    assert_eq!(client.get_alert(&owner, &id).unwrap().rules, rules);
+}
+
 // 10. Paginated queries work without watcher gating
 #[test]
 fn test_paginated_queries_no_gating() {
@@ -2976,6 +3026,25 @@ fn test_get_watcher_registry_none_before_set() {
     let (_env, client) = setup();
     assert!(client.get_watcher_registry().is_none());
     assert!(!client.is_watcher_gating_enabled());
+}
+
+#[test]
+fn test_get_configuration_returns_all_settings() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &11u32);
+    client.set_per_contract_alert_limit(&admin, &22u32);
+    client.set_global_alert_limit(&admin, &33u32);
+    client.pause(&admin);
+
+    let config = client.get_configuration();
+    assert_eq!(config.admin, admin);
+    assert!(config.paused);
+    assert_eq!(config.per_owner_alert_limit, 11);
+    assert_eq!(config.per_contract_alert_limit, 22);
+    assert_eq!(config.global_alert_limit, 33);
+    assert!(config.watcher_registry.is_none());
 }
 
 // 16. set_watcher_registry persists and get_watcher_registry returns it

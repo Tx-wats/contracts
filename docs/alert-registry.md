@@ -141,6 +141,12 @@ Registers a new alert configuration for a target contract address.
 
 Updates the rules and active status of an existing alert. Only the original owner may call this.
 
+### `set_alert_active`
+
+Updates only the active status of an existing alert. Only the original owner
+may call this. The alert's rules are preserved, making this the safe endpoint
+for pausing or resuming a single alert.
+
 **Requires auth:** `caller` (must match `owner` of the config)
 
 **Parameters**
@@ -149,7 +155,6 @@ Updates the rules and active status of an existing alert. Only the original owne
 |---|---|---|
 | `caller` | `Address` | Must be the alert owner |
 | `config_id` | `u64` | ID of the alert to update |
-| `rules` | `Vec<String>` | New rule descriptors |
 | `active` | `bool` | New active status |
 
 **Returns:** nothing
@@ -204,6 +209,13 @@ Transfers admin authority to a new address. Requires current admin auth.
 ### `get_admin`
 
 Returns the current admin address.
+
+### `get_configuration`
+
+Returns the complete administrative configuration in one call: `admin`,
+`paused`, the per-owner, per-contract, and global alert limits, and the
+optional `watcher_registry` address. This is the preferred read for dashboards
+that display registry configuration.
 
 **Returns:** `Result<Address, ContractError>`
 
@@ -434,6 +446,16 @@ If a `WatcherRegistry` is configured (via `set_watcher_registry`), `querier` mus
 | `config_id` | `u64` | Alert config ID |
 
 **Returns:** `Result<Option<AlertConfig>, ContractError>` — `Ok(Some(config))` if found, `Ok(None)` otherwise.
+
+---
+
+### `get_alerts_by_ids`
+
+Returns alert configurations for a supplied list of IDs in input order,
+omitting IDs whose records no longer exist or have expired. Watcher
+authorization, when configured, is checked once for the entire batch. Use this
+when IDs came from `get_alert_ids_by_owner` or event processing instead of
+calling `get_alert` separately for every ID.
 
 ---
 

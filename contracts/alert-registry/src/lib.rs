@@ -266,6 +266,27 @@ pub struct AlertInput {
     pub rules: Vec<String>,
 }
 
+/// Current administrative configuration for the registry.
+///
+/// Returned by [`AlertRegistry::get_configuration`] so dashboards can render
+/// all registry settings with one read.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegistryConfiguration {
+    /// Current admin address.
+    pub admin: Address,
+    /// Whether state-mutating calls are paused.
+    pub paused: bool,
+    /// Maximum active alerts per owner, or `0` for unlimited.
+    pub per_owner_alert_limit: u32,
+    /// Maximum live alerts per target contract, or `0` for unlimited.
+    pub per_contract_alert_limit: u32,
+    /// Maximum alerts ever registered, or `0` for unlimited.
+    pub global_alert_limit: u32,
+    /// Configured watcher registry, if watcher-gating is enabled.
+    pub watcher_registry: Option<Address>,
+}
+
 // ── Contract ─────────────────────────────────────────────────────────────────
 
 /// On-chain registry for alert configurations.
@@ -576,6 +597,24 @@ impl AlertRegistry {
             .instance()
             .get(&instance_key::ADMIN)
             .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Return the complete administrative configuration in one read.
+    ///
+    /// This is intended for dashboards and monitoring clients that would
+    /// otherwise need to make separate calls for each setting.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    pub fn get_configuration(env: Env) -> Result<RegistryConfiguration, ContractError> {
+        Ok(RegistryConfiguration {
+            admin: Self::get_admin(env.clone())?,
+            paused: Self::is_paused(env.clone()),
+            per_owner_alert_limit: Self::get_per_owner_alert_limit(env.clone()),
+            per_contract_alert_limit: Self::get_per_contract_alert_limit(env.clone()),
+            global_alert_limit: Self::get_global_alert_limit(env.clone()),
+            watcher_registry: Self::get_watcher_registry(env),
+        })
     }
 
     /// Pause the contract, rejecting all state-mutating calls until [`AlertRegistry::unpause`] is called.
@@ -959,6 +998,53 @@ impl AlertRegistry {
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("update")),
             (config_id, config.owner.clone(), active),
+        );
+        Ok(())
+    }
+
+    /// Update only the active status of an existing alert.
+    ///
+    /// Unlike [`AlertRegistry::update_alert`], this does not accept or replace
+    /// the alert's rules. Use this endpoint when pausing or resuming an alert
+    /// so a client cannot accidentally clear its rules with an empty vector.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must also
+    /// own the alert.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify
+    /// an existing alert, [`ContractError::Unauthorized`] if `caller` is not
+    /// the owner, or [`ContractError::AlertSuspended`] when an admin
+    /// suspension blocks reactivation.
+    pub fn set_alert_active(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        active: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let mut config = Self::load_alert(&env, config_id)?;
+        Self::assert_owner(&config, &caller)?;
+        if active
+            && env
+                .storage()
+                .persistent()
+                .has(&DataKey::AdminSuspended(config_id))
+        {
+            return Err(ContractError::AlertSuspended);
+        }
+
+        config.active = active;
+        config.updated_at = env.ledger().timestamp();
+        config.updated_ledger = env.ledger().sequence();
+        Self::persist_alert(&env, config_id, &config);
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("update")),
+            (config_id, config.owner, active),
         );
         Ok(())
     }
@@ -1799,6 +1885,24 @@ impl AlertRegistry {
     #[must_use]
     pub fn get_alert_ids_by_owner(env: Env, owner: Address) -> Vec<u64> {
         Self::owner_index(&env, &owner)
+    }
+
+    /// Retrieve alert configs for a list of IDs in one call.
+    ///
+    /// IDs are returned in the same order as `ids`; records that no longer
+    /// exist or have expired are silently omitted. If a `WatcherRegistry` is
+    /// configured, `querier` is authorized once for the whole batch.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_alerts_by_ids(
+        env: Env,
+        querier: Address,
+        ids: Vec<u64>,
+    ) -> Result<Vec<AlertConfig>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
+        Ok(Self::configs_for_ids(&env, &ids))
     }
 
     /// Get a page of alert configs for a target contract (offset + limit).
@@ -2729,7 +2833,7 @@ impl AlertRegistry {
 impl AlertRegistry {
     /// Validates a single rule descriptor string.
     ///
-    /// Accepts only `"rule:transfer"` and `"rule:mint"`.
+    /// Accepts the registry's recognized rule descriptors.
     /// Returns [`ContractError::InvalidRuleDescriptor`] on any other string.
     ///
     /// Exposed for testing, integration, and fuzz testing.
@@ -2759,25 +2863,14 @@ impl AlertRegistry {
         if rules.len() > 50 {
             return Err(ContractError::TooManyRules);
         }
-        // With only two recognized descriptors, each may appear at most once.
-        let transfer = String::from_str(env, "rule:transfer");
-        let mint = String::from_str(env, "rule:mint");
-        let mut saw_transfer = false;
-        let mut saw_mint = false;
+        let mut seen: Vec<String> = vec![env];
         for i in 0..rules.len() {
             let rule = rules.get(i).unwrap();
             Self::validate_rule(env, &rule)?;
-            if rule == transfer {
-                if saw_transfer {
-                    return Err(ContractError::DuplicateRule);
-                }
-                saw_transfer = true;
-            } else if rule == mint {
-                if saw_mint {
-                    return Err(ContractError::DuplicateRule);
-                }
-                saw_mint = true;
+            if seen.contains(&rule) {
+                return Err(ContractError::DuplicateRule);
             }
+            seen.push_back(rule);
         }
         Ok(())
     }
