@@ -379,6 +379,12 @@ impl AlertRegistry {
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
     /// compromised — mutations can be frozen while the incident is investigated.
+    ///
+    /// Every state-mutating entry point returns [`ContractError::Paused`] while
+    /// paused, with these deliberate exemptions:
+    /// - `pause` / `unpause`, so the circuit-breaker can be operated;
+    /// - `initialize`, the one-time admin bootstrap;
+    /// - `upgrade`, so a hot-fix can be deployed during an incident.
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
     /// # Errors
@@ -471,6 +477,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("CLIMIT"), &limit);
@@ -508,6 +515,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("GLIMIT"), &limit);
@@ -553,13 +561,13 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let probe = ExtWatcherClient::new(&env, &watcher_registry);
         if probe.try_is_watcher_authorized(&admin).is_err() {
             return Err(ContractError::InvalidWatcherRegistry);
         }
 
-        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&symbol_short!("WATCHREG"), &watcher_registry);
@@ -587,6 +595,7 @@ impl AlertRegistry {
     pub fn clear_watcher_registry(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage().instance().remove(&symbol_short!("WATCHREG"));
         Ok(())
     }
@@ -1063,11 +1072,15 @@ impl AlertRegistry {
     /// # Returns
     /// The number of dangling IDs removed.
     ///
+    /// # Errors
+    /// Returns [`ContractError::Paused`] while the contract is paused.
+    ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("pruned"))` with data
     /// `(owner: Address, count: u32)` when at least one ID was removed.
-    pub fn prune_expired_alerts(env: Env, owner: Address) -> u32 {
-        Self::prune_owner_index(&env, &owner)
+    pub fn prune_expired_alerts(env: Env, owner: Address) -> Result<u32, ContractError> {
+        Self::assert_not_paused(&env)?;
+        Ok(Self::prune_owner_index(&env, &owner))
     }
 
     /// Remove any alert config from storage (admin only).
@@ -1122,6 +1135,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -1323,6 +1337,7 @@ impl AlertRegistry {
         config_id: u64,
     ) -> Result<(), ContractError> {
         new_owner.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let pending = Self::pending_transfer(&env, config_id)?;
         if pending.new_owner != new_owner {
@@ -1354,6 +1369,7 @@ impl AlertRegistry {
         config_id: u64,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let config = Self::load_alert(&env, config_id)?;
         Self::assert_owner(&config, &caller)?;
@@ -1431,6 +1447,7 @@ impl AlertRegistry {
         config_ids: Vec<u64>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         for i in 0..config_ids.len() {
             let config_id = config_ids.get(i).unwrap();

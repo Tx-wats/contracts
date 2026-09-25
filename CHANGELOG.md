@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Pause enforcement was inconsistent.** `set_per_contract_alert_limit`,
+  `set_global_alert_limit`, `clear_watcher_registry`,
+  `deactivate_alert_by_admin`, `batch_remove_alert`, `reject_alert_transfer`,
+  `cancel_alert_transfer` and `prune_expired_alerts` (now
+  `Result<u32, ContractError>`) returned success while paused; they now return
+  `Paused`, and `set_watcher_registry` checks pause before probing the registry.
+  `pause`, `unpause`, `initialize` and `upgrade` are documented exemptions. A
+  table-driven test calls every mutator while paused. (issue #203)
 - **Owners could instantly undo `deactivate_alert_by_admin`.** An admin
   deactivation is now also a suspension (`DataKey::AdminSuspended`): the owner
   cannot reactivate the alert (`AlertSuspended`, 21) until an admin calls the

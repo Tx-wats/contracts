@@ -766,6 +766,20 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 
 ---
 
+## Pause
+
+`pause(admin)` freezes the registry during an incident: **every state-mutating entry point returns `ContractError::Paused`** until `unpause(admin)`. Reads keep working. The only exemptions are deliberate (#203):
+
+| Exempt entry point | Why |
+|---|---|
+| `pause`, `unpause` | The circuit-breaker itself must stay operable. |
+| `initialize` | One-time admin bootstrap. |
+| `upgrade` | Lets a hot-fix be deployed while paused. |
+
+This includes admin moderation (`deactivate_alert_by_admin`, `unlock_alert_by_admin`, `remove_alert_by_admin`), limit and watcher-registry configuration, alert transfers (propose, accept, reject, cancel), `batch_remove_alert` and `prune_expired_alerts`. `deactivate_all_alerts` currently returns `0` instead of an error while paused (tracked separately in #204).
+
+---
+
 ## Errors
 
 | Variant | Code | Description |
