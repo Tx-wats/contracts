@@ -780,7 +780,7 @@ impl AlertRegistry {
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("watchreg")),
-            (admin, watcher_registry),
+            (admin, Some(watcher_registry)),
         );
         Ok(())
     }
@@ -805,6 +805,10 @@ impl AlertRegistry {
         env.storage().instance().remove(&symbol_short!("WATCHREG"));
         env.storage().instance().remove(&instance_key::WATCHREG);
         Self::extend_instance_ttl(&env);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("watchreg")),
+            (admin, Option::<Address>::None),
+        );
         Ok(())
     }
 

@@ -294,16 +294,16 @@ changed.
 
 ### `admin.watchreg`
 
-Emitted when the `WatcherRegistry` contract address is configured, gating the
-read-side queries behind watcher authorization.
+Emitted when watcher-gating is enabled or disabled. A `None` registry means
+gating was disabled.
 
 | Field | Value |
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("watchreg")` |
-| Data | `(admin: Address, watcher_registry: Address)` |
+| Data | `(admin: Address, watcher_registry: Option<Address>)` |
 
-**Status:** ✅ implemented (`set_watcher_registry`)
+**Status:** ✅ implemented (`set_watcher_registry`, `clear_watcher_registry`)
 
 ---
 

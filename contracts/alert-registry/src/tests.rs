@@ -1323,8 +1323,46 @@ fn test_set_watcher_registry_emits_event() {
 
     client.set_watcher_registry(&admin, &registry_id);
 
-    assert!(!env.events().all().is_empty());
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| topics.len() == 2)
+        .expect("admin.watchreg event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, emitted_registry): (Address, Option<Address>) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(emitted_registry, Some(registry_id.clone()));
     assert_eq!(client.get_watcher_registry(), Some(registry_id));
+}
+
+#[test]
+fn test_clear_watcher_registry_emits_disable_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let registry_id = env.register(watcher_registry::WatcherRegistry, ());
+    let registry_client =
+        watcher_registry::WatcherRegistryClient::new(&env, &registry_id);
+    registry_client.initialize(&admin);
+    client.set_watcher_registry(&admin, &registry_id);
+    client.clear_watcher_registry(&admin);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| topics.len() == 2)
+        .expect("admin.watchreg event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, emitted_registry): (Address, Option<Address>) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert!(emitted_registry.is_none());
 }
 
 #[test]
