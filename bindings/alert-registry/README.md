@@ -77,6 +77,7 @@ The bindings provide TypeScript types and methods for all AlertRegistry contract
 
 ### Read Methods
 - `get_alert` - Get a single alert by ID (requires `querier`; gated when a `WatcherRegistry` is configured)
+- `get_config` - Every admin setting (admin, paused, limits, watcher registry) in one call
 - `get_alert_active` - Get just the active flag for an alert by ID (requires `querier`; gated when a `WatcherRegistry` is configured)
 - `get_alerts_for_contract` - Get all alerts for a contract
 - `get_active_alerts_for_contract` - Get only active alerts for a contract (requires `querier`; gated when a `WatcherRegistry` is configured)

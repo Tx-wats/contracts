@@ -3218,3 +3218,66 @@ fn test_set_alert_active_updates_ledger_and_timestamp() {
     // The altered alert is the one the ledger-keyed sync has to pick up.
     assert_eq!(catch_up.get(0).unwrap().updated_ledger, 1005);
 }
+
+// ── get_config ───────────────────────────────────────────────────────────────
+
+/// A freshly deployed registry reports the constructor admin and the defaults.
+#[test]
+fn test_get_config_defaults() {
+    let (_env, client, admin) = setup();
+
+    let config = client.get_config();
+    assert_eq!(config.admin, admin);
+    assert!(!config.paused);
+    assert_eq!(config.global_alert_limit, 0);
+    assert_eq!(config.per_owner_alert_limit, 0);
+    assert_eq!(config.per_contract_alert_limit, 0);
+    assert!(config.watcher_registry.is_none());
+}
+
+/// One call returns what used to take six, and it tracks every change.
+#[test]
+fn test_get_config_reflects_every_admin_setting() {
+    let (env, client, admin) = setup();
+    let watcher_registry = env.register(watcher_registry::WatcherRegistry, (admin.clone(),));
+
+    client.set_global_alert_limit(&admin, &7u32);
+    client.set_per_owner_alert_limit(&admin, &3u32);
+    client.set_per_contract_alert_limit(&admin, &5u32);
+    client.set_watcher_registry(&admin, &watcher_registry);
+    client.pause(&admin);
+
+    let config = client.get_config();
+    assert_eq!(config.admin, admin);
+    assert!(config.paused);
+    assert_eq!(config.global_alert_limit, 7);
+    assert_eq!(config.per_owner_alert_limit, 3);
+    assert_eq!(config.per_contract_alert_limit, 5);
+    assert_eq!(config.watcher_registry, Some(watcher_registry));
+
+    // …and the values still agree with the individual getters.
+    assert_eq!(config.global_alert_limit, client.get_global_alert_limit());
+    assert_eq!(
+        config.per_owner_alert_limit,
+        client.get_per_owner_alert_limit()
+    );
+    assert_eq!(
+        config.per_contract_alert_limit,
+        client.get_per_contract_alert_limit()
+    );
+    assert_eq!(config.paused, client.is_paused());
+}
+
+/// Unpausing is reflected too — the struct is rebuilt on every call.
+#[test]
+fn test_get_config_tracks_unpause() {
+    let (_env, client, admin) = setup();
+
+    client.pause(&admin);
+    assert!(client.get_config().paused);
+
+    client.unpause(&admin);
+    let config = client.get_config();
+    assert!(!config.paused);
+    assert_eq!(config.admin, admin);
+}

@@ -41,6 +41,7 @@ describe("AlertRegistry bindings", () => {
     expect(typeof client.get_alert).toBe("function");
     expect(typeof client.get_alerts_for_contract).toBe("function");
     expect(typeof client.get_alerts_by_owner).toBe("function");
+    expect(typeof client.get_config).toBe("function");
     expect(typeof client.get_alert_count).toBe("function");
     expect(typeof client.get_active_alert_count).toBe("function");
     expect(typeof client.get_admin).toBe("function");

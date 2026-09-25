@@ -185,6 +185,31 @@ instead of `update_alert` when you only want to pause or resume an alert:
 move, so ledger-keyed sync picks the change up.
 
 ---
+### `get_config`
+
+Returns every admin-controlled setting in one call — dashboards otherwise need
+six round-trips (`get_admin`, `is_paused`, the three limit getters and
+`get_watcher_registry`) to render the registry's configuration.
+
+**Requires auth:** no
+
+**Parameters:** none
+
+**Returns:** `RegistryConfig`
+
+| Field | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Admin installed by `__constructor` |
+| `paused` | `bool` | Whether the circuit breaker is engaged |
+| `global_alert_limit` | `u32` | Registry-wide alert cap; `0` means unlimited |
+| `per_owner_alert_limit` | `u32` | Per-owner alert cap; `0` means unlimited |
+| `per_contract_alert_limit` | `u32` | Per-watched-contract alert cap; `0` means unlimited |
+| `watcher_registry` | `Option<Address>` | Watcher registry used for query gating, if configured |
+
+**Errors:** Returns `ContractError::NotInitialized` if no admin has been set.
+
+---
+
 ### `__constructor`
 
 Atomic constructor executed during deployment via `stellar contract deploy -- --admin <ADDRESS>`. Sets up the initial admin in the same transaction as deployment, closing the front-running window.

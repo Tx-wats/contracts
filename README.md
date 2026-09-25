@@ -200,6 +200,12 @@ stellar contract invoke \
   --rules '["rule:transfer"]' \
   --active true
 
+# Read every admin setting in one call
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --network testnet \
+  -- get_config
+
 # Pause a single alert without resending its rules
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \

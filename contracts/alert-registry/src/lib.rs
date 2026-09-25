@@ -205,6 +205,30 @@ pub struct AlertConfig {
 
 /// Input record for [`AlertRegistry::batch_register_alert`].
 ///
+/// Every admin-controlled setting of the registry in one value.
+///
+/// Dashboards otherwise need six round-trips (`get_admin`, `is_paused`, the
+/// three limit getters and `get_watcher_registry`) to render the registry's
+/// configuration; [`AlertRegistry::get_config`] returns them together.
+///
+/// A limit of `0` means "unlimited" for all three limit fields.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RegistryConfig {
+    /// Admin installed by `__constructor` at deployment.
+    pub admin: Address,
+    /// Whether the circuit breaker is currently engaged.
+    pub paused: bool,
+    /// Registry-wide alert cap; `0` means unlimited.
+    pub global_alert_limit: u32,
+    /// Per-owner alert cap; `0` means unlimited.
+    pub per_owner_alert_limit: u32,
+    /// Per-watched-contract alert cap; `0` means unlimited.
+    pub per_contract_alert_limit: u32,
+    /// Watcher registry used for query gating, if one is configured.
+    pub watcher_registry: Option<Address>,
+}
+
 /// Mirrors the arguments of [`AlertRegistry::register_alert`] so a batch call
 /// can register alerts for multiple owners/targets in one transaction.
 #[contracttype]
@@ -592,6 +616,25 @@ impl AlertRegistry {
     /// watcher-gating has not been enabled.
     pub fn get_watcher_registry(env: Env) -> Option<Address> {
         env.storage().instance().get(&symbol_short!("WATCHREG"))
+    }
+
+    /// Return every admin setting in a single call.
+    ///
+    /// See [`RegistryConfig`] for the fields and the meaning of a `0` limit.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if no admin has been set.
+    /// # Panics
+    /// Panics if the contract's stored settings are malformed.
+    pub fn get_config(env: Env) -> Result<RegistryConfig, ContractError> {
+        Ok(RegistryConfig {
+            admin: Self::get_admin(env.clone())?,
+            paused: Self::is_paused(env.clone()),
+            global_alert_limit: Self::get_global_alert_limit(env.clone()),
+            per_owner_alert_limit: Self::get_per_owner_alert_limit(env.clone()),
+            per_contract_alert_limit: Self::get_per_contract_alert_limit(env.clone()),
+            watcher_registry: Self::get_watcher_registry(env),
+        })
     }
 
     /// Return `true` if watcher-gating is currently enabled (a `WatcherRegistry`
