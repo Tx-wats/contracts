@@ -341,12 +341,12 @@ Ownership moves in two steps so nobody can be made the owner of alerts they did 
 | Function | Auth | Effect | Errors |
 |---|---|---|---|
 | `propose_alert_transfer(caller, config_id, new_owner)` | `caller` (current owner) | Stores a `PendingAlertTransfer { new_owner, expires_at_ledger }`; replaces any earlier proposal. Ownership is unchanged. | `AlertNotFound`, `Unauthorized`, `InvalidTransferRecipient` (new owner is already the owner), `Paused` |
-| `accept_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Moves the alert to `new_owner`: updates `owner`, migrates the owner index and live counter, clears the proposal. | `AlertNotFound`, `NoPendingTransfer`, `Unauthorized` (not the named recipient), `TransferExpired`, `Paused` |
+| `accept_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Moves the alert to `new_owner`: updates `owner`, migrates the owner index and live counter, clears the proposal. | `AlertNotFound`, `NoPendingTransfer`, `Unauthorized` (not the named recipient), `TransferExpired`, `OwnerAlertLimitExceeded` (recipient already at the per-owner limit, #200), `Paused` |
 | `reject_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Clears the proposal; the alert stays with its owner. | `NoPendingTransfer`, `Unauthorized` |
 | `cancel_alert_transfer(caller, config_id)` | `caller` (current owner) | Clears the proposal. | `AlertNotFound`, `Unauthorized`, `NoPendingTransfer` |
 | `get_pending_alert_transfer(config_id)` | none | Returns `Option<PendingAlertTransfer>`. An expired proposal is still returned (compare `expires_at_ledger` with the current ledger); it can only be cancelled or replaced. | — |
 
-A transfer can be accepted up to and including ledger `expires_at_ledger`.
+A transfer can be accepted up to and including ledger `expires_at_ledger`. Accepting counts against the recipient's per-owner limit exactly like registering, so the limit is checked at acceptance (the recipient's count may change after the proposal).
 
 **Events:** `(Symbol("alert"), Symbol("xfer_prop"))` with `(id, owner, new_owner, expires_at_ledger)` on propose; `(Symbol("alert"), Symbol("transfer"))` with `(id, old_owner, new_owner)` on accept; `(Symbol("alert"), Symbol("xfer_rej"))` with `(id, new_owner)` on reject; `(Symbol("alert"), Symbol("xfer_can"))` with `(id, owner)` on cancel.
 

@@ -1012,3 +1012,47 @@ fn test_regression_retarget_respects_per_contract_limit() {
     // Retargeting to the alert's current target is not blocked by its own slot.
     client.update_target_contract(&owner, &other, &throwaway);
 }
+
+// ── #200: transfers respect the recipient's per-owner limit ──────────────────
+
+/// Regression test for #200: accepting a transfer used to push the alert into
+/// the recipient's index without checking their per-owner limit, so colluding
+/// accounts could pile any number of alerts onto one owner.
+#[test]
+fn test_regression_transfer_respects_recipient_per_owner_limit() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &1);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let target = Address::generate(&env);
+
+    client.register_alert(
+        &recipient,
+        &target,
+        &str(&env, "Own"),
+        &hash64(&env),
+        &rules,
+    );
+    let gift = client.register_alert(&sender, &target, &str(&env, "Gift"), &hash64(&env), &rules);
+
+    client.propose_alert_transfer(&sender, &gift, &recipient);
+    assert_eq!(
+        client
+            .try_accept_alert_transfer(&recipient, &gift)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::OwnerAlertLimitExceeded
+    );
+    assert_eq!(client.get_alert(&sender, &gift).unwrap().owner, sender);
+    assert_eq!(client.get_non_removed_alert_count(&recipient), 1);
+
+    // Once the recipient frees a slot, the same proposal can be accepted.
+    let own = client.get_alert_ids_by_owner(&recipient).get(0).unwrap();
+    client.remove_alert(&recipient, &own);
+    client.accept_alert_transfer(&recipient, &gift);
+    assert_eq!(client.get_alert(&sender, &gift).unwrap().owner, recipient);
+}

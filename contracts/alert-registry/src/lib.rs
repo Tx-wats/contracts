@@ -1192,6 +1192,8 @@ impl AlertRegistry {
     /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending.
     /// Returns [`ContractError::Unauthorized`] if `new_owner` is not the named recipient.
     /// Returns [`ContractError::TransferExpired`] if the transfer is past its expiry ledger.
+    /// Returns [`ContractError::OwnerAlertLimitExceeded`] if `new_owner` is already at the
+    /// per-owner alert limit.
     /// Returns [`ContractError::Paused`] while the contract is paused.
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("transfer"))` with data
@@ -1212,6 +1214,10 @@ impl AlertRegistry {
         if env.ledger().sequence() > pending.expires_at_ledger {
             return Err(ContractError::TransferExpired);
         }
+        // Receiving an alert counts against the recipient's quota exactly like
+        // registering one; otherwise colluding accounts could pile any number
+        // of alerts onto one owner (#200).
+        Self::assert_per_owner_limit(&env, &new_owner)?;
 
         let old_owner = config.owner.clone();
         config.owner = new_owner.clone();
