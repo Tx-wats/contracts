@@ -2071,8 +2071,8 @@ impl AlertRegistry {
     /// # Returns
     /// A `Vec<AlertConfig>` containing every live alert in the ID range
     /// `[offset, offset + limit)` (clamped to the current alert count) with
-    /// `updated_at >= since`. Alerts that have been removed (and whose storage
-    /// entry has therefore expired) are silently omitted.
+    /// `updated_at >= since`. Alerts that have been removed are silently
+    /// omitted.
     ///
     /// # Note
     /// Because multiple ledgers can share the same close-time second, timestamp-based
@@ -2085,8 +2085,8 @@ impl AlertRegistry {
     /// `limit` (see [`AlertRegistry::get_global_alert_limit`] for an admin-settable ceiling
     /// on total registry size) rather than requesting the whole ID space in
     /// one call. Callers that need every alert should page repeatedly,
-    /// advancing `offset` by `limit` each call until fewer than `limit`
-    /// results are returned.
+    /// advancing `offset` by `limit` until it reaches `get_alert_count()`;
+    /// a short or empty result page does not indicate that the scan is complete.
     #[must_use]
     pub fn get_alerts_modified_since(env: Env, since: u64, offset: u32, limit: u32) -> Vec<AlertConfig> {
         let total: u64 = env
@@ -2129,8 +2129,9 @@ impl AlertRegistry {
     /// 1. Initialize `cursor_ledger = 0` (or the last-synced ledger sequence).
     /// 2. For each polling cycle:
     ///    a. Call `get_alerts_modified_since_ledger(env, cursor_ledger, offset, limit)`
-    ///       paginating by advancing `offset += limit` until an empty page or fewer than
-    ///       `limit` items are returned.
+    ///       paginating by advancing `offset += limit` until `offset` reaches
+    ///       `get_alert_count()`. Empty or short pages can contain no matching
+    ///       alerts while later IDs still match.
     ///    b. For each returned alert, update local state and track the highest ledger
     ///       seen: `max_ledger = max(max_ledger, alert.updated_ledger)`.
     ///    c. After finishing the registry scan, advance the cursor:

@@ -683,7 +683,10 @@ Enables incremental sync for watcher nodes by passing the ledger timestamp of th
 | `offset` | `u32` | Number of alert IDs to skip from the start of ID space |
 | `limit` | `u32` | Maximum number of IDs to scan |
 
-**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_at >= since`.
+**Returns:** `Vec<AlertConfig>` — live alerts matching `updated_at >= since` among
+the IDs in `[offset, offset + limit)`. Continue paging by increasing `offset` by
+`limit` until it reaches `get_alert_count()`; a short or empty page does not
+indicate that later IDs cannot match.
 
 ---
 
@@ -698,7 +701,7 @@ Provides unambiguous **incremental sync** for watcher nodes keyed on monotonic l
 1. Initialize `cursor_ledger = 0` (or the last-synced ledger sequence).
 2. On each polling cycle:
    - Call `get_alerts_modified_since_ledger(since_ledger = cursor_ledger, offset, limit)`.
-   - Paginate by advancing `offset += limit` until an empty page or fewer than `limit` items are returned.
+   - Paginate by advancing `offset += limit` until `offset` reaches `get_alert_count()`; empty or short pages can occur before the end of the ID space.
    - For each returned alert, update local state and record the highest ledger sequence seen: `max_ledger = max(max_ledger, alert.updated_ledger)`.
    - After finishing the scan, update the cursor for the next cycle: `cursor_ledger = max_ledger + 1` (or `current_ledger + 1` if no alerts were returned).
 
