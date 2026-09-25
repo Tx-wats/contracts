@@ -3271,6 +3271,49 @@ fn test_update_label_not_found() {
     );
 }
 
+#[test]
+fn test_register_alert_rejects_empty_label() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, ""),
+                &hash64(&env),
+                &vec![&env],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::EmptyLabel
+    );
+}
+
+#[test]
+fn test_update_label_rejects_empty_label() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_update_label(&owner, &id, &str(&env, ""))
+            .unwrap_err()
+            .unwrap(),
+        ContractError::EmptyLabel
+    );
+}
+
 // 21. update_label — label exceeding 128 bytes is rejected
 #[test]
 #[should_panic(expected = "Error(Contract, #7)")]

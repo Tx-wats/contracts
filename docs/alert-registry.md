@@ -808,6 +808,7 @@ This includes admin moderation (`deactivate_alert_by_admin`, `unlock_alert_by_ad
 | `NotAWatcher` | 5 | Watcher-gating is enabled and `querier` is not a registered watcher |
 | `InvalidWebhookHash` | 6 | No longer returned: webhook hashes are `BytesN<32>`, so a wrong length cannot be constructed. Kept so the code is never reused. |
 | `LabelTooLong` | 7 | `label` exceeds 128 bytes |
+| `EmptyLabel` | 22 | `label` is empty |
 | `TooManyRules` | 8 | `rules` exceeds the 50-rule maximum |
 | `InvalidRuleDescriptor` | 9 | A rule is not a recognised descriptor (`rule:transfer`, `rule:mint`) |
 | `OwnerAlertLimitExceeded` | 10 | Owner is at the configured per-owner active alert limit |

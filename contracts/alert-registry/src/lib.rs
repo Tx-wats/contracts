@@ -160,6 +160,8 @@ pub enum ContractError {
     InvalidWebhookHash = 6,
     /// The label exceeds 128 bytes.
     LabelTooLong = 7,
+    /// The alert label is empty.
+    EmptyLabel = 22,
     /// The rule list exceeds the 50-rule maximum.
     TooManyRules = 8,
     /// A rule is not a recognised rule descriptor.
@@ -846,6 +848,7 @@ impl AlertRegistry {
     /// # Returns
     /// The new alert's numeric ID.
     /// # Errors
+    /// Returns [`ContractError::EmptyLabel`] if `label` is empty.
     /// Returns [`ContractError::LabelTooLong`] if `label` exceeds 128 bytes.
     /// Returns [`ContractError::OwnerAlertLimitExceeded`] if the owner is at the configured per-owner alert limit.
     /// Returns [`ContractError::ContractAlertLimitExceeded`] if the target contract is at the configured per-contract alert limit.
@@ -864,6 +867,9 @@ impl AlertRegistry {
         owner.require_auth();
         Self::assert_not_paused(&env)?;
 
+        if label.is_empty() {
+            return Err(ContractError::EmptyLabel);
+        }
         if label.len() > 128 {
             return Err(ContractError::LabelTooLong);
         }
@@ -1192,6 +1198,7 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
+    /// Returns [`ContractError::EmptyLabel`] if `label` is empty.
     /// Returns [`ContractError::LabelTooLong`] if `label` exceeds 128 bytes.
     ///
     /// # Events
@@ -1205,6 +1212,9 @@ impl AlertRegistry {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
 
+        if label.is_empty() {
+            return Err(ContractError::EmptyLabel);
+        }
         if label.len() > 128 {
             return Err(ContractError::LabelTooLong);
         }
