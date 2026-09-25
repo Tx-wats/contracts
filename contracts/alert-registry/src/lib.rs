@@ -266,6 +266,27 @@ pub struct AlertInput {
     pub rules: Vec<String>,
 }
 
+/// Current administrative configuration for the registry.
+///
+/// Returned by [`AlertRegistry::get_configuration`] so dashboards can render
+/// all registry settings with one read.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegistryConfiguration {
+    /// Current admin address.
+    pub admin: Address,
+    /// Whether state-mutating calls are paused.
+    pub paused: bool,
+    /// Maximum active alerts per owner, or `0` for unlimited.
+    pub per_owner_alert_limit: u32,
+    /// Maximum live alerts per target contract, or `0` for unlimited.
+    pub per_contract_alert_limit: u32,
+    /// Maximum alerts ever registered, or `0` for unlimited.
+    pub global_alert_limit: u32,
+    /// Configured watcher registry, if watcher-gating is enabled.
+    pub watcher_registry: Option<Address>,
+}
+
 // ── Contract ─────────────────────────────────────────────────────────────────
 
 /// On-chain registry for alert configurations.
@@ -572,6 +593,24 @@ impl AlertRegistry {
             .instance()
             .get(&instance_key::ADMIN)
             .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Return the complete administrative configuration in one read.
+    ///
+    /// This is intended for dashboards and monitoring clients that would
+    /// otherwise need to make separate calls for each setting.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    pub fn get_configuration(env: Env) -> Result<RegistryConfiguration, ContractError> {
+        Ok(RegistryConfiguration {
+            admin: Self::get_admin(env.clone())?,
+            paused: Self::is_paused(env.clone()),
+            per_owner_alert_limit: Self::get_per_owner_alert_limit(env.clone()),
+            per_contract_alert_limit: Self::get_per_contract_alert_limit(env.clone()),
+            global_alert_limit: Self::get_global_alert_limit(env.clone()),
+            watcher_registry: Self::get_watcher_registry(env),
+        })
     }
 
     /// Pause the contract, rejecting all state-mutating calls until [`AlertRegistry::unpause`] is called.

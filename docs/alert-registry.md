@@ -205,6 +205,13 @@ Transfers admin authority to a new address. Requires current admin auth.
 
 Returns the current admin address.
 
+### `get_configuration`
+
+Returns the complete administrative configuration in one call: `admin`,
+`paused`, the per-owner, per-contract, and global alert limits, and the
+optional `watcher_registry` address. This is the preferred read for dashboards
+that display registry configuration.
+
 **Returns:** `Result<Address, ContractError>`
 
 **Errors:** `NotInitialized` if `initialize` has not been called.

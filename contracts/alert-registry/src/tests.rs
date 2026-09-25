@@ -2892,6 +2892,25 @@ fn test_get_watcher_registry_none_before_set() {
     assert!(!client.is_watcher_gating_enabled());
 }
 
+#[test]
+fn test_get_configuration_returns_all_settings() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &11u32);
+    client.set_per_contract_alert_limit(&admin, &22u32);
+    client.set_global_alert_limit(&admin, &33u32);
+    client.pause(&admin);
+
+    let config = client.get_configuration();
+    assert_eq!(config.admin, admin);
+    assert!(config.paused);
+    assert_eq!(config.per_owner_alert_limit, 11);
+    assert_eq!(config.per_contract_alert_limit, 22);
+    assert_eq!(config.global_alert_limit, 33);
+    assert!(config.watcher_registry.is_none());
+}
+
 // 16. set_watcher_registry persists and get_watcher_registry returns it
 #[test]
 #[cfg(feature = "testutils")]
