@@ -641,7 +641,7 @@ impl AlertRegistry {
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
-            (admin, limit),
+            (admin, symbol_short!("owner"), limit),
         );
         Ok(())
     }
@@ -665,7 +665,8 @@ impl AlertRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Events
-    /// Emits `(Symbol("admin"), Symbol("limit"))` with data `(Symbol("contract"), limit: u32)`.
+    /// Emits `(Symbol("admin"), Symbol("limit"))` with data
+    /// `(admin: Address, Symbol("contract"), limit: u32)`.
     pub fn set_per_contract_alert_limit(
         env: Env,
         admin: Address,
@@ -682,7 +683,7 @@ impl AlertRegistry {
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("limit")),
-            (symbol_short!("contract"), limit),
+            (admin, symbol_short!("contract"), limit),
         );
         Ok(())
     }

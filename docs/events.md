@@ -276,15 +276,19 @@ Emitted when the admin role is transferred to a new address.
 
 ### `admin.limit`
 
-Emitted when the per-owner alert limit is changed.
+Emitted when an alert limit is changed.
 
 | Field | Value |
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("limit")` |
-| Data | `(admin: Address, limit: u32)` |
+| Data | `(admin: Address, kind: Symbol("owner") \| Symbol("contract"), limit: u32)` |
 
-**Status:** ✅ implemented (`set_per_owner_alert_limit`)
+The `kind` value identifies whether the per-owner or per-contract limit was
+changed.
+
+**Status:** ✅ implemented (`set_per_owner_alert_limit`,
+`set_per_contract_alert_limit`)
 
 ---
 

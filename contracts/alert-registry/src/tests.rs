@@ -217,16 +217,34 @@ fn test_initialize_emits_event() {
     assert!(!env.events().all().is_empty());
 }
 
-// set_per_owner_alert_limit emits an admin.limit event
+// Limit events share one payload shape so indexers do not need to inspect
+// runtime types to distinguish owner and contract limits.
 #[test]
 fn test_set_per_owner_alert_limit_emits_event() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
 
     client.set_per_owner_alert_limit(&admin, &5u32);
 
-    assert!(!env.events().all().is_empty());
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("limit")
+        })
+        .expect("admin.limit event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(kind, symbol_short!("owner"));
+    assert_eq!(emitted_limit, 5u32);
 }
 
 #[test]
@@ -2555,7 +2573,9 @@ fn test_set_per_contract_alert_limit_emits_admin_limit_event() {
         .expect("admin.limit event must be emitted");
 
     let (_, _, data) = limit_event;
-    let (kind, emitted_limit): (Symbol, u32) = soroban_sdk::FromVal::from_val(&env, &data);
+    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
     assert_eq!(kind, symbol_short!("contract"));
     assert_eq!(emitted_limit, 7u32);
 }
