@@ -90,6 +90,12 @@ pub enum DataKey {
     /// Stores the [`PendingAlertTransfer`] proposed for an alert, until it is
     /// accepted, rejected, cancelled, or the alert is removed or retargeted.
     PendingTransfer(u64),
+    /// Present (`true`) while an admin has suspended the alert with
+    /// [`AlertRegistry::deactivate_alert_by_admin`]. The owner cannot
+    /// reactivate a suspended alert until an admin calls
+    /// [`AlertRegistry::unlock_alert_by_admin`]. A separate key rather than an
+    /// [`AlertConfig`] field, so stored configs keep their encoding.
+    AdminSuspended(u64),
     /// Stores the `Address` proposed as the next admin by
     /// [`AlertRegistry::propose_admin_transfer`], pending its own acceptance
     /// via [`AlertRegistry::accept_admin_transfer`].
@@ -183,6 +189,9 @@ pub enum ContractError {
     TransferExpired = 19,
     /// Returned by `propose_alert_transfer` when `new_owner` is already the owner.
     InvalidTransferRecipient = 20,
+    /// Returned by `update_alert` when the owner tries to reactivate an alert
+    /// that an admin suspended with `deactivate_alert_by_admin`.
+    AlertSuspended = 21,
     /// Returned by `accept_admin_transfer` or `cancel_admin_transfer` when no
     /// admin transfer is currently pending, or when the accepting address does
     /// not match the proposed address.
@@ -569,6 +578,12 @@ impl AlertRegistry {
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
     /// compromised — mutations can be frozen while the incident is investigated.
+    ///
+    /// Every state-mutating entry point returns [`ContractError::Paused`] while
+    /// paused, with these deliberate exemptions:
+    /// - `pause` / `unpause`, so the circuit-breaker can be operated;
+    /// - `initialize`, the one-time admin bootstrap;
+    /// - `upgrade`, so a hot-fix can be deployed during an incident.
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
     /// # Errors
@@ -658,6 +673,10 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("CLIMIT"), &limit);
         env.storage().instance().set(&instance_key::CLIMIT, &limit);
         Self::extend_instance_ttl(&env);
 
@@ -694,6 +713,10 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("GLIMIT"), &limit);
         env.storage().instance().set(&instance_key::GLIMIT, &limit);
         Self::extend_instance_ttl(&env);
         Ok(())
@@ -738,13 +761,13 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let probe = ExtWatcherClient::new(&env, &watcher_registry);
         if probe.try_is_watcher_authorized(&admin).is_err() {
             return Err(ContractError::InvalidWatcherRegistry);
         }
 
-        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&instance_key::WATCHREG, &watcher_registry);
@@ -773,6 +796,8 @@ impl AlertRegistry {
     pub fn clear_watcher_registry(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
+        env.storage().instance().remove(&symbol_short!("WATCHREG"));
         env.storage().instance().remove(&instance_key::WATCHREG);
         Self::extend_instance_ttl(&env);
         Ok(())
@@ -879,6 +904,8 @@ impl AlertRegistry {
     /// Returns [`ContractError::TooManyRules`] if `rules` exceeds the 50-rule maximum.
     /// Returns [`ContractError::InvalidRuleDescriptor`] if a rule is not a recognised descriptor.
     /// Returns [`ContractError::DuplicateRule`] if the same rule descriptor appears more than once.
+    /// Returns [`ContractError::AlertSuspended`] if `active` is `true` while an admin has
+    /// suspended the alert (see [`AlertRegistry::deactivate_alert_by_admin`]).
     pub fn update_alert(
         env: Env,
         caller: Address,
@@ -897,6 +924,14 @@ impl AlertRegistry {
 
         Self::assert_owner(&config, &caller)?;
         Self::validate_rules(&env, &rules)?;
+        if active
+            && env
+                .storage()
+                .persistent()
+                .has(&DataKey::AdminSuspended(config_id))
+        {
+            return Err(ContractError::AlertSuspended);
+        }
 
         config.rules = rules;
         config.active = active;
@@ -1240,11 +1275,15 @@ impl AlertRegistry {
     /// # Returns
     /// The number of dangling IDs removed.
     ///
+    /// # Errors
+    /// Returns [`ContractError::Paused`] while the contract is paused.
+    ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("pruned"))` with data
     /// `(owner: Address, count: u32)` when at least one ID was removed.
-    pub fn prune_expired_alerts(env: Env, owner: Address) -> u32 {
-        Self::prune_owner_index(&env, &owner)
+    pub fn prune_expired_alerts(env: Env, owner: Address) -> Result<u32, ContractError> {
+        Self::assert_not_paused(&env)?;
+        Ok(Self::prune_owner_index(&env, &owner))
     }
 
     /// Remove any alert config from storage (admin only).
@@ -1280,6 +1319,10 @@ impl AlertRegistry {
     /// indexes are left intact — only the `active` flag is cleared — so
     /// history is preserved for e.g. spam/abuse moderation.
     ///
+    /// The alert is also **suspended**: its owner cannot reactivate it (with
+    /// [`AlertRegistry::update_alert`]) until an admin calls
+    /// [`AlertRegistry::unlock_alert_by_admin`].
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
     /// # Errors
@@ -1295,6 +1338,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
         let mut config: AlertConfig = env
             .storage()
@@ -1306,6 +1350,9 @@ impl AlertRegistry {
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminSuspended(config_id), &true);
         Self::persist_alert(&env, config_id, &config);
 
         env.events().publish(
@@ -1313,6 +1360,50 @@ impl AlertRegistry {
             (config_id, admin),
         );
         Ok(())
+    }
+
+    /// Lift an admin suspension so the owner can reactivate the alert
+    /// (admin only). The alert itself stays inactive until the owner
+    /// reactivates it. Unlocking an alert that is not suspended does nothing.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not the admin.
+    /// Returns [`ContractError::Paused`] while the contract is paused.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("admin_on"))` with data `(id: u64, admin: Address)`
+    /// when a suspension was lifted.
+    pub fn unlock_alert_by_admin(
+        env: Env,
+        admin: Address,
+        config_id: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
+        Self::load_alert(&env, config_id)?;
+
+        let key = DataKey::AdminSuspended(config_id);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+            env.events().publish(
+                (symbol_short!("alert"), symbol_short!("admin_on")),
+                (config_id, admin),
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether an admin has suspended the alert (see
+    /// [`AlertRegistry::deactivate_alert_by_admin`]).
+    #[must_use]
+    pub fn is_alert_suspended(env: Env, config_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::AdminSuspended(config_id))
     }
 
     /// Propose transferring an alert to `new_owner`.
@@ -1388,6 +1479,8 @@ impl AlertRegistry {
     /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending.
     /// Returns [`ContractError::Unauthorized`] if `new_owner` is not the named recipient.
     /// Returns [`ContractError::TransferExpired`] if the transfer is past its expiry ledger.
+    /// Returns [`ContractError::OwnerAlertLimitExceeded`] if `new_owner` is already at the
+    /// per-owner alert limit.
     /// Returns [`ContractError::Paused`] while the contract is paused.
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("transfer"))` with data
@@ -1408,6 +1501,10 @@ impl AlertRegistry {
         if env.ledger().sequence() > pending.expires_at_ledger {
             return Err(ContractError::TransferExpired);
         }
+        // Receiving an alert counts against the recipient's quota exactly like
+        // registering one; otherwise colluding accounts could pile any number
+        // of alerts onto one owner (#200).
+        Self::assert_per_owner_limit(&env, &new_owner)?;
 
         let old_owner = config.owner.clone();
         config.owner = new_owner.clone();
@@ -1443,6 +1540,7 @@ impl AlertRegistry {
         config_id: u64,
     ) -> Result<(), ContractError> {
         new_owner.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let pending = Self::pending_transfer(&env, config_id)?;
         if pending.new_owner != new_owner {
@@ -1474,6 +1572,7 @@ impl AlertRegistry {
         config_id: u64,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         let config = Self::load_alert(&env, config_id)?;
         Self::assert_owner(&config, &caller)?;
@@ -1551,6 +1650,7 @@ impl AlertRegistry {
         config_ids: Vec<u64>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
         for i in 0..config_ids.len() {
             let config_id = config_ids.get(i).unwrap();
@@ -1901,6 +2001,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
+    /// Returns [`ContractError::ContractAlertLimitExceeded`] if `new_target` is
+    /// already at the per-contract alert limit.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("retarget"))` with data
@@ -1921,6 +2023,14 @@ impl AlertRegistry {
             .ok_or(ContractError::AlertNotFound)?;
 
         Self::assert_owner(&config, &caller)?;
+
+        // Moving into a target counts against its limit exactly like
+        // registering there would; otherwise alerts registered against
+        // throwaway targets could all be retargeted at one contract (#199).
+        // Retargeting to the current target takes no extra slot.
+        if new_target != config.target_contract {
+            Self::assert_per_contract_limit(&env, &new_target)?;
+        }
 
         let old_target = config.target_contract.clone();
         config.target_contract = new_target.clone();
@@ -2256,6 +2366,7 @@ impl AlertRegistry {
         for id in ids.iter() {
             storage.remove(&DataKey::AlertActive(id));
             storage.remove(&DataKey::PendingTransfer(id));
+            storage.remove(&DataKey::AdminSuspended(id));
         }
         storage.set(&DataKey::OwnerIndex(owner.clone()), &kept);
         storage.extend_ttl(&DataKey::OwnerIndex(owner.clone()), DEFAULT_TTL, DEFAULT_TTL);
@@ -2311,6 +2422,9 @@ impl AlertRegistry {
         Self::clear_pending_transfer(env, config_id);
         env.storage()
             .persistent()
+            .remove(&DataKey::AdminSuspended(config_id));
+        env.storage()
+            .persistent()
             .remove(&DataKey::Alert(config_id));
         env.storage()
             .persistent()
@@ -2363,6 +2477,10 @@ impl AlertRegistry {
         let live_count_key = DataKey::OwnerLiveCount(config.owner.clone());
         if storage.has(&live_count_key) {
             storage.extend_ttl(&live_count_key, ttl, ttl);
+        }
+        let suspended_key = DataKey::AdminSuspended(config_id);
+        if storage.has(&suspended_key) {
+            storage.extend_ttl(&suspended_key, ttl, ttl);
         }
     }
 

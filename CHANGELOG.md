@@ -40,6 +40,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Pause enforcement was inconsistent.** `set_per_contract_alert_limit`,
+  `set_global_alert_limit`, `clear_watcher_registry`,
+  `deactivate_alert_by_admin`, `batch_remove_alert`, `reject_alert_transfer`,
+  `cancel_alert_transfer` and `prune_expired_alerts` (now
+  `Result<u32, ContractError>`) returned success while paused; they now return
+  `Paused`, and `set_watcher_registry` checks pause before probing the registry.
+  `pause`, `unpause`, `initialize` and `upgrade` are documented exemptions. A
+  table-driven test calls every mutator while paused. (issue #203)
+- **Owners could instantly undo `deactivate_alert_by_admin`.** An admin
+  deactivation is now also a suspension (`DataKey::AdminSuspended`): the owner
+  cannot reactivate the alert (`AlertSuspended`, 21) until an admin calls the
+  new `unlock_alert_by_admin`. The suspension survives ownership transfer and
+  is cleared when the alert is removed; `is_alert_suspended` reports it.
+  (issue #202)
+- **Ownership transfers bypassed the recipient's per-owner limit.** Accepting
+  a transfer pushed the alert into the recipient's index without checking the
+  limit, so colluding accounts could pile any number of alerts onto one owner.
+  `accept_alert_transfer` now enforces the recipient's limit
+  (`OwnerAlertLimitExceeded`). (issue #200)
+- **`update_target_contract` bypassed the per-contract alert limit.** Alerts
+  registered against throwaway targets could all be retargeted at one
+  contract. Retargeting now checks the new target's limit like
+  `register_alert` does (`ContractAlertLimitExceeded`). (issue #199)
 - **Expired alerts permanently consumed the owner's quota.** An alert whose
   record expired (instead of being removed) stayed in the owner index and live
   counter, still counted by the per-owner limit, and could not be removed

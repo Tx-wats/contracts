@@ -969,6 +969,149 @@ fn test_regression_prune_expired_alerts() {
     );
 }
 
+// ── #199: retargeting respects the per-contract limit ────────────────────────
+
+/// Regression test for #199: `update_target_contract` used to move an alert
+/// into any contract's index without checking the per-contract limit, so
+/// alerts registered against throwaway targets could all be retargeted at one
+/// victim contract.
+#[test]
+fn test_regression_retarget_respects_per_contract_limit() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_contract_alert_limit(&admin, &1);
+
+    let owner = Address::generate(&env);
+    let victim = Address::generate(&env);
+    let throwaway = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    client.register_alert(&owner, &victim, &str(&env, "Fills"), &hash64(&env), &rules);
+    let other = client.register_alert(
+        &owner,
+        &throwaway,
+        &str(&env, "Moves"),
+        &hash64(&env),
+        &rules,
+    );
+
+    assert_eq!(
+        client
+            .try_update_target_contract(&owner, &other, &victim)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::ContractAlertLimitExceeded
+    );
+    assert_eq!(
+        client.get_alert(&owner, &other).unwrap().target_contract,
+        throwaway
+    );
+    assert_eq!(client.get_active_contract_alert_count(&victim), 1);
+
+    // Retargeting to the alert's current target is not blocked by its own slot.
+    client.update_target_contract(&owner, &other, &throwaway);
+}
+
+// ── #200: transfers respect the recipient's per-owner limit ──────────────────
+
+/// Regression test for #200: accepting a transfer used to push the alert into
+/// the recipient's index without checking their per-owner limit, so colluding
+/// accounts could pile any number of alerts onto one owner.
+#[test]
+fn test_regression_transfer_respects_recipient_per_owner_limit() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &1);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let target = Address::generate(&env);
+
+    client.register_alert(
+        &recipient,
+        &target,
+        &str(&env, "Own"),
+        &hash64(&env),
+        &rules,
+    );
+    let gift = client.register_alert(&sender, &target, &str(&env, "Gift"), &hash64(&env), &rules);
+
+    client.propose_alert_transfer(&sender, &gift, &recipient);
+    assert_eq!(
+        client
+            .try_accept_alert_transfer(&recipient, &gift)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::OwnerAlertLimitExceeded
+    );
+    assert_eq!(client.get_alert(&sender, &gift).unwrap().owner, sender);
+    assert_eq!(client.get_non_removed_alert_count(&recipient), 1);
+
+    // Once the recipient frees a slot, the same proposal can be accepted.
+    let own = client.get_alert_ids_by_owner(&recipient).get(0).unwrap();
+    client.remove_alert(&recipient, &own);
+    client.accept_alert_transfer(&recipient, &gift);
+    assert_eq!(client.get_alert(&sender, &gift).unwrap().owner, recipient);
+}
+
+// ── #202: owners cannot undo an admin deactivation ───────────────────────────
+
+/// Regression test for #202: `deactivate_alert_by_admin` is for moderation,
+/// but the owner could immediately undo it with `update_alert(.., true)`.
+/// The alert is now suspended until an admin unlocks it.
+#[test]
+fn test_regression_owner_cannot_undo_admin_deactivation() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let id = client.register_alert(
+        &owner,
+        &Address::generate(&env),
+        &str(&env, "Spam"),
+        &hash64(&env),
+        &rules,
+    );
+
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert!(client.is_alert_suspended(&id));
+    assert_eq!(
+        client
+            .try_update_alert(&owner, &id, &rules, &true)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertSuspended
+    );
+    assert_eq!(client.get_alert_active(&owner, &id), Some(false));
+
+    // The owner may still edit the alert as long as it stays inactive.
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &false);
+
+    // Only the admin can lift the suspension; lifting it does not reactivate.
+    assert_eq!(
+        client
+            .try_unlock_alert_by_admin(&owner, &id)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::Unauthorized
+    );
+    client.unlock_alert_by_admin(&admin, &id);
+    assert!(!client.is_alert_suspended(&id));
+    assert_eq!(client.get_alert_active(&owner, &id), Some(false));
+
+    client.update_alert(&owner, &id, &rules, &true);
+    assert_eq!(client.get_alert_active(&owner, &id), Some(true));
+
+    // Unlocking an alert that is not suspended is a no-op.
+    client.unlock_alert_by_admin(&admin, &id);
+}
+
+#[test]
+fn test_regression_admin_suspension_follows_the_alert() {
 /// Regression test for #204:
 /// `deactivate_all_alerts` returned a plain `0` while paused, which callers
 /// could not tell apart from "owner had no active alerts". It now returns
@@ -1103,6 +1246,264 @@ fn test_regression_mutators_refresh_indexes_they_leave() {
     client.initialize(&admin);
     let owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let id = client.register_alert(
+        &owner,
+        &Address::generate(&env),
+        &str(&env, "Spam"),
+        &hash64(&env),
+        &rules,
+    );
+    client.deactivate_alert_by_admin(&admin, &id);
+
+    // Handing the alert to another account does not escape the suspension.
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+    client.accept_alert_transfer(&new_owner, &id);
+    assert_eq!(
+        client
+            .try_update_alert(&new_owner, &id, &rules, &true)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::AlertSuspended
+    );
+
+    // Removing the alert clears the flag with it.
+    client.remove_alert(&new_owner, &id);
+    assert!(!client.is_alert_suspended(&id));
+}
+
+// ── #203: pause freezes every state-mutating entry point ─────────────────────
+
+/// Regression test for #203 (table-driven): `pause` is documented as freezing
+/// every state-mutating call, but several mutators skipped the check. Call
+/// each one while paused and expect `Paused`; the documented exemptions
+/// (`pause`, `unpause`, `initialize`, `upgrade`) are not in the table.
+#[test]
+fn test_regression_every_mutator_rejects_while_paused() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let owner = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
+    let transferring =
+        client.register_alert(&owner, &target, &str(&env, "B"), &hash64(&env), &rules);
+    client.propose_webhook(&owner, &id, &hash64c(&env, 'b'));
+    client.propose_alert_transfer(&owner, &transferring, &recipient);
+
+    client.pause(&admin);
+
+    let paused = ContractError::Paused;
+    let checks: [(&str, ContractError); 25] = [
+        (
+            "transfer_admin",
+            client
+                .try_transfer_admin(&admin, &recipient)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "set_per_owner_alert_limit",
+            client
+                .try_set_per_owner_alert_limit(&admin, &5)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "set_per_contract_alert_limit",
+            client
+                .try_set_per_contract_alert_limit(&admin, &5)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "set_global_alert_limit",
+            client
+                .try_set_global_alert_limit(&admin, &5)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "set_watcher_registry",
+            client
+                .try_set_watcher_registry(&admin, &target)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "clear_watcher_registry",
+            client
+                .try_clear_watcher_registry(&admin)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "register_alert",
+            client
+                .try_register_alert(&owner, &target, &str(&env, "C"), &hash64(&env), &rules)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "batch_register_alert",
+            client
+                .try_batch_register_alert(&vec![
+                    &env,
+                    crate::AlertInput {
+                        owner: owner.clone(),
+                        target_contract: target.clone(),
+                        label: str(&env, "D"),
+                        webhook_hash: hash64(&env),
+                        rules: rules.clone(),
+                    },
+                ])
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "update_alert",
+            client
+                .try_update_alert(&owner, &id, &rules, &false)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "update_webhook",
+            client
+                .try_update_webhook(&owner, &id, &hash64c(&env, 'c'))
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "propose_webhook",
+            client
+                .try_propose_webhook(&owner, &id, &hash64c(&env, 'd'))
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "confirm_webhook",
+            client
+                .try_confirm_webhook(&owner, &id)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "cancel_webhook_proposal",
+            client
+                .try_cancel_webhook_proposal(&owner, &id)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "renew_alert_ttl",
+            client
+                .try_renew_alert_ttl(&owner, &id)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "update_label",
+            client
+                .try_update_label(&owner, &id, &str(&env, "E"))
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "update_target_contract",
+            client
+                .try_update_target_contract(&owner, &id, &Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "bump_alert",
+            client.try_bump_alert(&id, &100).unwrap_err().unwrap(),
+        ),
+        (
+            "remove_alert",
+            client.try_remove_alert(&owner, &id).unwrap_err().unwrap(),
+        ),
+        (
+            "batch_remove_alert",
+            client
+                .try_batch_remove_alert(&owner, &vec![&env, id])
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "prune_expired_alerts",
+            client
+                .try_prune_expired_alerts(&owner)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "remove_alert_by_admin",
+            client
+                .try_remove_alert_by_admin(&admin, &id)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "deactivate_alert_by_admin",
+            client
+                .try_deactivate_alert_by_admin(&admin, &id)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "unlock_alert_by_admin",
+            client
+                .try_unlock_alert_by_admin(&admin, &id)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "propose_alert_transfer",
+            client
+                .try_propose_alert_transfer(&owner, &id, &recipient)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "cancel_alert_transfer",
+            client
+                .try_cancel_alert_transfer(&owner, &transferring)
+                .unwrap_err()
+                .unwrap(),
+        ),
+    ];
+    for (name, error) in checks {
+        assert_eq!(error, paused, "{name} must be blocked while paused");
+    }
+    for (name, error) in [
+        (
+            "accept_alert_transfer",
+            client
+                .try_accept_alert_transfer(&recipient, &transferring)
+                .unwrap_err()
+                .unwrap(),
+        ),
+        (
+            "reject_alert_transfer",
+            client
+                .try_reject_alert_transfer(&recipient, &transferring)
+                .unwrap_err()
+                .unwrap(),
+        ),
+    ] {
+        assert_eq!(error, paused, "{name} must be blocked while paused");
+    }
+
+    // Nothing changed, and the exempt unpause still works.
+    assert!(client.get_alert(&owner, &id).unwrap().active);
+    assert!(client.get_pending_alert_transfer(&transferring).is_some());
+    client.unpause(&admin);
+    client.update_label(&owner, &id, &str(&env, "After unpause"));
     let target = Address::generate(&env);
     let new_target = Address::generate(&env);
     let register = |label: &str| {

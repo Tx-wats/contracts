@@ -257,6 +257,8 @@ Removes any alert config by ID. Requires admin auth.
 
 Deactivates any alert by ID without deleting its record. Unlike `remove_alert_by_admin`, the alert config and its owner/contract indexes are left intact — only the `active` flag is cleared — so an admin can moderate a single problematic alert (spam, abuse report) while preserving its history. Admin only.
 
+The alert is also **suspended** (`DataKey::AdminSuspended(id)`): the owner cannot reactivate it with `update_alert(..., active = true)` (`AlertSuspended`) until an admin calls `unlock_alert_by_admin`. The suspension stays with the alert if ownership is transferred and is cleared when the alert is removed (#202).
+
 **Requires auth:** `admin`
 
 **Parameters**
@@ -273,6 +275,16 @@ Deactivates any alert by ID without deleting its record. Unlike `remove_alert_by
 **Events:** Emits `(Symbol("alert"), Symbol("admin_off"))` with data `(id: u64, admin: Address)`.
 
 ---
+
+### `unlock_alert_by_admin` / `is_alert_suspended`
+
+`unlock_alert_by_admin(admin, config_id)` lifts an admin suspension so the owner can reactivate the alert. It does not reactivate the alert itself. Unlocking an alert that is not suspended does nothing. Admin only; blocked while paused.
+
+**Errors:** `AlertNotFound`, `NotInitialized`, `Unauthorized` (not the admin), `Paused`.
+
+**Events:** `(Symbol("alert"), Symbol("admin_on"))` with data `(id: u64, admin: Address)` when a suspension was lifted.
+
+`is_alert_suspended(config_id) -> bool` reports whether an alert is currently suspended.
 ### `deactivate_all_alerts`
 
 Deactivates every active alert owned by `caller` in one call, leaving the records and indexes in place (same effect as `update_alert(..., active = false)` on each). Expired or already-removed entries are skipped.
@@ -331,6 +343,28 @@ Removes IDs from `owner`'s index whose alert record no longer exists (expired in
 
 ---
 
+### `update_target_contract`
+
+Moves an alert to watch a different contract: updates `target_contract`, migrates the alert ID from the old contract's index to the new one, and clears any pending ownership transfer. Only the owner may call this.
+
+**Requires auth:** `caller` (must match `owner` of the config)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert to retarget |
+| `new_target` | `Address` | Contract address to watch instead |
+
+**Returns:** nothing
+
+**Errors:** `AlertNotFound` if the ID does not exist; `Unauthorized` if the caller is not the owner; `ContractAlertLimitExceeded` if `new_target` is already at the per-contract alert limit (retargeting counts against the limit exactly like registering, #199; moving to the alert's current target is never blocked); `Paused` while the contract is paused.
+
+**Events:** Emits `(Symbol("alert"), Symbol("retarget"))` with data `(id: u64, old_target: Address, new_target: Address)`.
+
+---
+
 ### Alert ownership transfers
 
 Ownership moves in two steps so nobody can be made the owner of alerts they did not agree to take (which would fill their per-owner quota and add webhooks they do not control to their alert list). The owner proposes, the recipient accepts. A proposal expires after `ALERT_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers, ≈ 7 days), and is cleared when the alert is removed or retargeted. `transfer_alert_ownership` was replaced by this flow in #201.
@@ -338,12 +372,12 @@ Ownership moves in two steps so nobody can be made the owner of alerts they did 
 | Function | Auth | Effect | Errors |
 |---|---|---|---|
 | `propose_alert_transfer(caller, config_id, new_owner)` | `caller` (current owner) | Stores a `PendingAlertTransfer { new_owner, expires_at_ledger }`; replaces any earlier proposal. Ownership is unchanged. | `AlertNotFound`, `Unauthorized`, `InvalidTransferRecipient` (new owner is already the owner), `Paused` |
-| `accept_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Moves the alert to `new_owner`: updates `owner`, migrates the owner index and live counter, clears the proposal. | `AlertNotFound`, `NoPendingTransfer`, `Unauthorized` (not the named recipient), `TransferExpired`, `Paused` |
+| `accept_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Moves the alert to `new_owner`: updates `owner`, migrates the owner index and live counter, clears the proposal. | `AlertNotFound`, `NoPendingTransfer`, `Unauthorized` (not the named recipient), `TransferExpired`, `OwnerAlertLimitExceeded` (recipient already at the per-owner limit, #200), `Paused` |
 | `reject_alert_transfer(new_owner, config_id)` | `new_owner` (named recipient) | Clears the proposal; the alert stays with its owner. | `NoPendingTransfer`, `Unauthorized` |
 | `cancel_alert_transfer(caller, config_id)` | `caller` (current owner) | Clears the proposal. | `AlertNotFound`, `Unauthorized`, `NoPendingTransfer` |
 | `get_pending_alert_transfer(config_id)` | none | Returns `Option<PendingAlertTransfer>`. An expired proposal is still returned (compare `expires_at_ledger` with the current ledger); it can only be cancelled or replaced. | — |
 
-A transfer can be accepted up to and including ledger `expires_at_ledger`.
+A transfer can be accepted up to and including ledger `expires_at_ledger`. Accepting counts against the recipient's per-owner limit exactly like registering, so the limit is checked at acceptance (the recipient's count may change after the proposal).
 
 **Events:** `(Symbol("alert"), Symbol("xfer_prop"))` with `(id, owner, new_owner, expires_at_ledger)` on propose; `(Symbol("alert"), Symbol("transfer"))` with `(id, old_owner, new_owner)` on accept; `(Symbol("alert"), Symbol("xfer_rej"))` with `(id, new_owner)` on reject; `(Symbol("alert"), Symbol("xfer_can"))` with `(id, owner)` on cancel.
 
@@ -749,6 +783,20 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 
 ---
 
+## Pause
+
+`pause(admin)` freezes the registry during an incident: **every state-mutating entry point returns `ContractError::Paused`** until `unpause(admin)`. Reads keep working. The only exemptions are deliberate (#203):
+
+| Exempt entry point | Why |
+|---|---|
+| `pause`, `unpause` | The circuit-breaker itself must stay operable. |
+| `initialize` | One-time admin bootstrap. |
+| `upgrade` | Lets a hot-fix be deployed while paused. |
+
+This includes admin moderation (`deactivate_alert_by_admin`, `unlock_alert_by_admin`, `remove_alert_by_admin`), limit and watcher-registry configuration, alert transfers (propose, accept, reject, cancel), `batch_remove_alert` and `prune_expired_alerts`. `deactivate_all_alerts` currently returns `0` instead of an error while paused (tracked separately in #204).
+
+---
+
 ## Errors
 
 | Variant | Code | Description |
@@ -770,6 +818,7 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 | `NoPendingTransfer` | 18 | `accept_alert_transfer`, `reject_alert_transfer` or `cancel_alert_transfer` called with no transfer pending |
 | `TransferExpired` | 19 | `accept_alert_transfer` called after the proposal's `expires_at_ledger` |
 | `InvalidTransferRecipient` | 20 | `propose_alert_transfer` named the current owner as the recipient |
+| `AlertSuspended` | 21 | `update_alert` tried to reactivate an alert suspended by `deactivate_alert_by_admin` |
 
 ---
 

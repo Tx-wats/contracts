@@ -1843,6 +1843,9 @@ fn test_updated_ledger_tracked_on_all_mutations() {
 
     // deactivate_all_alerts
     env.ledger().with_mut(|li| li.sequence_number = 120);
+    // An admin deactivation suspends the alert (#202); lift it before the
+    // owner reactivates it for the next step.
+    client.unlock_alert_by_admin(&admin, &id);
     client.update_alert(&new_owner, &id, &vec![&env], &true);
     assert_eq!(client.get_alert(&new_owner, &id).unwrap().updated_ledger, 120);
     env.ledger().with_mut(|li| li.sequence_number = 130);

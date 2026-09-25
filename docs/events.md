@@ -149,6 +149,20 @@ Emitted when an alert's watched contract is changed via `update_target_contract`
 
 ---
 
+### `alert.admin_on`
+
+Emitted when an admin lifts a suspension with `unlock_alert_by_admin`, allowing the owner to reactivate the alert.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("admin_on")` |
+| Data | `(id: u64, admin: Address)` |
+
+**Status:** ✅ implemented (`unlock_alert_by_admin`)
+
+---
+
 ### `alert.pruned`
 
 Emitted when dangling IDs of expired alerts are removed from an owner's index, by `prune_expired_alerts` or by `register_alert` when the owner is at the per-owner limit.
