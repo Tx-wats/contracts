@@ -199,6 +199,9 @@ pub enum ContractError {
     /// admin transfer is currently pending, or when the accepting address does
     /// not match the proposed address.
     NoPendingTransfer = 16,
+    /// Returned by `propose_webhook` when the proposed hash is already live
+    /// or already pending.
+    NoopWebhookRotation = 22,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -1010,6 +1013,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the owner.
+    /// Returns [`ContractError::NoopWebhookRotation`] if `webhook_hash` is
+    /// already live or is already pending.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("wh_prop"))` with data `(id: u64, caller: Address)`.
@@ -1029,6 +1034,12 @@ impl AlertRegistry {
             .ok_or(ContractError::AlertNotFound)?;
 
         Self::assert_owner(&config, &caller)?;
+
+        if config.webhook_hash == webhook_hash
+            || config.pending_webhook_hash.as_ref() == Some(&webhook_hash)
+        {
+            return Err(ContractError::NoopWebhookRotation);
+        }
 
         // The live hash is deliberately left untouched until confirmation.
         config.pending_webhook_hash = Some(webhook_hash);

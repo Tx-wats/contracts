@@ -1024,6 +1024,55 @@ fn test_propose_webhook_overwrites_previous_pending() {
     assert_eq!(cfg.webhook_hash, hash64c(&env, 's'));
 }
 
+#[test]
+fn test_propose_webhook_rejects_live_hash_without_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let hash = hash64c(&env, 'a');
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash,
+        &vec![&env],
+    );
+    let event_count = env.events().all().len();
+
+    assert_eq!(
+        client.try_propose_webhook(&owner, &id, &hash).unwrap_err().unwrap(),
+        ContractError::NoopWebhookRotation
+    );
+    assert_eq!(env.events().all().len(), event_count);
+    assert!(client.get_alert(&owner, &id).unwrap().pending_webhook_hash.is_none());
+}
+
+#[test]
+fn test_propose_webhook_rejects_pending_hash_without_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64c(&env, 'a'),
+        &vec![&env],
+    );
+    let pending = hash64c(&env, 'b');
+    client.propose_webhook(&owner, &id, &pending);
+    let event_count = env.events().all().len();
+
+    assert_eq!(
+        client
+            .try_propose_webhook(&owner, &id, &pending)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::NoopWebhookRotation
+    );
+    assert_eq!(env.events().all().len(), event_count);
+}
+
 // Full rotation flow: propose → confirm → propose again → confirm again
 #[test]
 fn test_webhook_rotation_full_cycle() {
