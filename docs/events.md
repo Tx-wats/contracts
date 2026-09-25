@@ -149,6 +149,56 @@ Emitted when an alert's watched contract is changed via `update_target_contract`
 
 ---
 
+### `alert.pruned`
+
+Emitted when dangling IDs of expired alerts are removed from an owner's index, by `prune_expired_alerts` or by `register_alert` when the owner is at the per-owner limit.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("pruned")` |
+| Data | `(owner: Address, count: u32)` |
+
+**Status:** ✅ implemented (`prune_expired_alerts`)
+
+---
+
+### `alert.xfer_prop`
+
+Emitted when an owner proposes transferring an alert. Ownership is unchanged until the recipient accepts.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("xfer_prop")` |
+| Data | `(id: u64, owner: Address, new_owner: Address, expires_at_ledger: u32)` |
+
+**Status:** ✅ implemented (`propose_alert_transfer`)
+
+---
+
+### `alert.transfer`
+
+Emitted when the recipient accepts a transfer and becomes the alert's owner.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("transfer")` |
+| Data | `(id: u64, old_owner: Address, new_owner: Address)` |
+
+**Status:** ✅ implemented (`accept_alert_transfer`; previously the single-step `transfer_alert_ownership`)
+
+---
+
+### `alert.xfer_rej` / `alert.xfer_can`
+
+Emitted when a pending transfer is rejected by the recipient (`xfer_rej`, data `(id: u64, new_owner: Address)`) or cancelled by the owner (`xfer_can`, data `(id: u64, owner: Address)`).
+
+**Status:** ✅ implemented (`reject_alert_transfer`, `cancel_alert_transfer`)
+
+---
+
 ### `alert.bulk_off`
 
 Emitted once per call to `deactivate_all_alerts` when at least one of the

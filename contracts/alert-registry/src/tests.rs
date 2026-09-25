@@ -1830,9 +1830,10 @@ fn test_updated_ledger_tracked_on_all_mutations() {
     client.update_target_contract(&owner, &id, &new_target);
     assert_eq!(client.get_alert(&owner, &id).unwrap().updated_ledger, 90);
 
-    // transfer_alert_ownership
+    // propose_alert_transfer + accept_alert_transfer
     env.ledger().with_mut(|li| li.sequence_number = 100);
-    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+    client.accept_alert_transfer(&new_owner, &id);
     assert_eq!(client.get_alert(&new_owner, &id).unwrap().updated_ledger, 100);
 
     // deactivate_alert_by_admin
@@ -1883,10 +1884,10 @@ fn test_configs_paginated_boundaries() {
     assert_eq!(p5.len(), 0);
 }
 
-// ── Issue #34 — transfer_alert_ownership ────────────────────────────────
+// ── Issue #34 / #201 — alert ownership transfer ────────────────────────────────
 
 #[test]
-fn test_transfer_alert_ownership_success() {
+fn test_alert_transfer_success() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
@@ -1900,7 +1901,9 @@ fn test_transfer_alert_ownership_success() {
         &vec![&env],
     );
 
-    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+
+    client.accept_alert_transfer(&new_owner, &id);
 
     let cfg = client.get_alert(&id).unwrap();
     assert_eq!(cfg.owner, new_owner);
@@ -1913,7 +1916,7 @@ fn test_transfer_alert_ownership_success() {
 }
 
 #[test]
-fn test_transfer_alert_ownership_unauthorized() {
+fn test_alert_transfer_unauthorized() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let attacker = Address::generate(&env);
@@ -1930,7 +1933,7 @@ fn test_transfer_alert_ownership_unauthorized() {
 
     assert_eq!(
         client
-            .try_transfer_alert_ownership(&attacker, &id, &new_owner)
+            .try_propose_alert_transfer(&attacker, &id, &new_owner)
             .unwrap_err()
             .unwrap(),
         ContractError::Unauthorized
@@ -1942,14 +1945,14 @@ fn test_transfer_alert_ownership_unauthorized() {
 }
 
 #[test]
-fn test_transfer_alert_ownership_not_found() {
+fn test_alert_transfer_not_found() {
     let (env, client) = setup();
     let caller = Address::generate(&env);
     let new_owner = Address::generate(&env);
 
     assert_eq!(
         client
-            .try_transfer_alert_ownership(&caller, &999u64, &new_owner)
+            .try_propose_alert_transfer(&caller, &999u64, &new_owner)
             .unwrap_err()
             .unwrap(),
         ContractError::AlertNotFound
@@ -1957,7 +1960,7 @@ fn test_transfer_alert_ownership_not_found() {
 }
 
 #[test]
-fn test_transfer_alert_ownership_emits_event() {
+fn test_alert_transfer_emits_event() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
@@ -1971,7 +1974,9 @@ fn test_transfer_alert_ownership_emits_event() {
         &vec![&env],
     );
 
-    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+
+    client.accept_alert_transfer(&new_owner, &id);
     assert!(!env.events().all().is_empty());
 }
 
@@ -4200,7 +4205,7 @@ fn test_get_alert_owner_after_register() {
     );
 }
 
-// 21b. get_alert_owner reflects transfer_alert_ownership
+// 21b. get_alert_owner reflects an accepted ownership transfer
 #[test]
 fn test_get_alert_owner_after_transfer() {
     let (env, client) = setup();
@@ -4216,7 +4221,9 @@ fn test_get_alert_owner_after_transfer() {
         &vec![&env],
     );
 
-    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+
+    client.accept_alert_transfer(&new_owner, &id);
     assert_eq!(
         client.get_alert_owner(&owner, &id).unwrap(),
         Some(new_owner)
@@ -5895,7 +5902,7 @@ fn test_get_alert_owner_after_register() {
     );
 }
 
-// 21b. get_alert_owner reflects transfer_alert_ownership
+// 21b. get_alert_owner reflects an accepted ownership transfer
 #[test]
 fn test_get_alert_owner_after_transfer() {
     let (env, client) = setup();
@@ -5911,7 +5918,9 @@ fn test_get_alert_owner_after_transfer() {
         &vec![&env],
     );
 
-    client.transfer_alert_ownership(&owner, &id, &new_owner);
+    client.propose_alert_transfer(&owner, &id, &new_owner);
+
+    client.accept_alert_transfer(&new_owner, &id);
     assert_eq!(
         client.get_alert_owner(&owner, &id).unwrap(),
         Some(new_owner)

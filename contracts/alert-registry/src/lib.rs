@@ -49,6 +49,10 @@ pub const DEFAULT_TTL: u32 = 17_280;
 /// Approximately 31 days at the nominal 5-second ledger close time.
 pub const MAX_TTL: u32 = 535_680;
 
+/// Number of ledgers a proposed alert ownership transfer stays open for the
+/// recipient to accept (approximately 7 days at the nominal 5-second ledger
+/// close time). After that it can only be cancelled or replaced.
+pub const ALERT_TRANSFER_EXPIRY_LEDGERS: u32 = 120_960;
 /// Threshold, in ledgers, below which the contract's instance entry is
 /// extended by [`AlertRegistry::bump_instance_ttl`] and by every write to
 /// instance storage. Approximately 24 hours at the nominal 5-second ledger
@@ -83,6 +87,9 @@ pub enum DataKey {
     ContractIndex(Address),
     /// Monotonic counter used to generate unique alert IDs.
     NextId,
+    /// Stores the [`PendingAlertTransfer`] proposed for an alert, until it is
+    /// accepted, rejected, cancelled, or the alert is removed or retargeted.
+    PendingTransfer(u64),
     /// Stores the `Address` proposed as the next admin by
     /// [`AlertRegistry::propose_admin_transfer`], pending its own acceptance
     /// via [`AlertRegistry::accept_admin_transfer`].
@@ -168,6 +175,14 @@ pub enum ContractError {
     /// Returned by `validate_rules` when the same rule descriptor appears more
     /// than once in an alert's rule list.
     DuplicateRule = 15,
+    /// Returned by `accept_alert_transfer`, `reject_alert_transfer` and
+    /// `cancel_alert_transfer` when the alert has no pending transfer.
+    NoPendingTransfer = 18,
+    /// Returned by `accept_alert_transfer` when the pending transfer is past
+    /// its expiry ledger.
+    TransferExpired = 19,
+    /// Returned by `propose_alert_transfer` when `new_owner` is already the owner.
+    InvalidTransferRecipient = 20,
     /// Returned by `accept_admin_transfer` or `cancel_admin_transfer` when no
     /// admin transfer is currently pending, or when the accepting address does
     /// not match the proposed address.
@@ -210,6 +225,17 @@ pub struct AlertConfig {
     pub updated_ledger: u32,
     /// Whether the alert is currently active.
     pub active: bool,
+}
+
+/// An ownership transfer proposed by an alert's owner and awaiting the
+/// recipient's acceptance. Stored under [`DataKey::PendingTransfer`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAlertTransfer {
+    /// Address that must accept the transfer.
+    pub new_owner: Address,
+    /// Last ledger sequence at which the transfer can still be accepted.
+    pub expires_at_ledger: u32,
 }
 
 /// Input record for [`AlertRegistry::batch_register_alert`].
@@ -1166,25 +1192,59 @@ impl AlertRegistry {
     ///
     /// Also removes the alert ID from the owner and contract indexes.
     ///
+    /// If the alert's record no longer exists but its ID is still in the
+    /// caller's owner index (the record expired instead of being removed),
+    /// the dangling index entry is cleaned up instead, releasing the quota
+    /// slot it was holding.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must also be
     /// the original owner of the alert.
     /// # Errors
-    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` is neither an
+    /// existing alert nor a dangling entry in the caller's owner index.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     pub fn remove_alert(env: Env, caller: Address, config_id: u64) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
 
-        let config: AlertConfig = env
+        let Some(config) = env
             .storage()
             .persistent()
-            .get(&DataKey::Alert(config_id))
-            .ok_or(ContractError::AlertNotFound)?;
+            .get::<DataKey, AlertConfig>(&DataKey::Alert(config_id))
+        else {
+            if Self::owner_index(&env, &caller).contains(config_id) {
+                Self::drop_dangling_ids(&env, &caller, &vec![&env, config_id]);
+                env.events().publish(
+                    (symbol_short!("alert"), symbol_short!("remove")),
+                    (config_id, caller),
+                );
+                return Ok(());
+            }
+            return Err(ContractError::AlertNotFound);
+        };
 
         Self::assert_owner(&config, &caller)?;
         Self::remove_alert_record(&env, &config, config_id, &caller);
         Ok(())
+    }
+
+    /// Drop IDs from `owner`'s index whose alert record no longer exists
+    /// (it expired instead of being removed), decrementing the owner's live
+    /// counter so the quota slots they held are released.
+    ///
+    /// Callable by anyone and requires no auth: it only removes entries that
+    /// point at nothing. [`AlertRegistry::register_alert`] also runs it
+    /// automatically when an owner is at the per-owner limit.
+    ///
+    /// # Returns
+    /// The number of dangling IDs removed.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("pruned"))` with data
+    /// `(owner: Address, count: u32)` when at least one ID was removed.
+    pub fn prune_expired_alerts(env: Env, owner: Address) -> u32 {
+        Self::prune_owner_index(&env, &owner)
     }
 
     /// Remove any alert config from storage (admin only).
@@ -1255,10 +1315,14 @@ impl AlertRegistry {
         Ok(())
     }
 
-    /// Transfer ownership of an alert to a new address.
+    /// Propose transferring an alert to `new_owner`.
     ///
-    /// Updates the [`AlertConfig::owner`] field and migrates the alert ID from
-    /// the old owner's [`DataKey::OwnerIndex`] to the new owner's.
+    /// Nothing changes until `new_owner` calls
+    /// [`AlertRegistry::accept_alert_transfer`], so nobody can be made the owner
+    /// of alerts they did not agree to take (which would otherwise fill their
+    /// per-owner quota and pollute their alert list). Proposing again replaces
+    /// any earlier pending transfer. The proposal expires after
+    /// [`ALERT_TRANSFER_EXPIRY_LEDGERS`] ledgers.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be the
@@ -1266,30 +1330,91 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
     /// Returns [`ContractError::Unauthorized`] if `caller` is not the current owner.
+    /// Returns [`ContractError::InvalidTransferRecipient`] if `new_owner` already owns the alert.
+    /// Returns [`ContractError::Paused`] while the contract is paused.
     /// # Events
-    /// Emits `(Symbol("alert"), Symbol("transfer"))` with data
-    /// `(id: u64, old_owner: Address, new_owner: Address)`.
-    pub fn transfer_alert_ownership(
+    /// Emits `(Symbol("alert"), Symbol("xfer_prop"))` with data
+    /// `(id: u64, owner: Address, new_owner: Address, expires_at_ledger: u32)`.
+    pub fn propose_alert_transfer(
         env: Env,
         caller: Address,
         config_id: u64,
         new_owner: Address,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_not_paused(&env)?;
 
-        let mut config: AlertConfig = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Alert(config_id))
-            .ok_or(ContractError::AlertNotFound)?;
-
+        let config = Self::load_alert(&env, config_id)?;
         Self::assert_owner(&config, &caller)?;
+        if new_owner == config.owner {
+            return Err(ContractError::InvalidTransferRecipient);
+        }
+
+        let expires_at_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(ALERT_TRANSFER_EXPIRY_LEDGERS);
+        let key = DataKey::PendingTransfer(config_id);
+        env.storage().persistent().set(
+            &key,
+            &PendingAlertTransfer {
+                new_owner: new_owner.clone(),
+                expires_at_ledger,
+            },
+        );
+        env.storage().persistent().extend_ttl(
+            &key,
+            ALERT_TRANSFER_EXPIRY_LEDGERS,
+            ALERT_TRANSFER_EXPIRY_LEDGERS,
+        );
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("xfer_prop")),
+            (config_id, caller, new_owner, expires_at_ledger),
+        );
+        Ok(())
+    }
+
+    /// Accept a pending transfer, becoming the alert's owner.
+    ///
+    /// Updates the [`AlertConfig::owner`] field and migrates the alert ID from
+    /// the old owner's [`DataKey::OwnerIndex`] to the new owner's.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `new_owner`, who must be
+    /// the recipient named in the pending transfer.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending.
+    /// Returns [`ContractError::Unauthorized`] if `new_owner` is not the named recipient.
+    /// Returns [`ContractError::TransferExpired`] if the transfer is past its expiry ledger.
+    /// Returns [`ContractError::Paused`] while the contract is paused.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("transfer"))` with data
+    /// `(id: u64, old_owner: Address, new_owner: Address)`.
+    pub fn accept_alert_transfer(
+        env: Env,
+        new_owner: Address,
+        config_id: u64,
+    ) -> Result<(), ContractError> {
+        new_owner.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let mut config = Self::load_alert(&env, config_id)?;
+        let pending = Self::pending_transfer(&env, config_id)?;
+        if pending.new_owner != new_owner {
+            return Err(ContractError::Unauthorized);
+        }
+        if env.ledger().sequence() > pending.expires_at_ledger {
+            return Err(ContractError::TransferExpired);
+        }
 
         let old_owner = config.owner.clone();
         config.owner = new_owner.clone();
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
 
+        Self::clear_pending_transfer(&env, config_id);
         Self::remove_from_owner_index(&env, &old_owner, config_id);
         Self::push_owner_index(&env, &new_owner, config_id)?;
         Self::persist_alert(&env, config_id, &config);
@@ -1299,6 +1424,76 @@ impl AlertRegistry {
             (config_id, old_owner, new_owner),
         );
         Ok(())
+    }
+
+    /// Decline a pending transfer as its recipient. The alert stays with its
+    /// current owner.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `new_owner`, who must be
+    /// the recipient named in the pending transfer.
+    /// # Errors
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending.
+    /// Returns [`ContractError::Unauthorized`] if `new_owner` is not the named recipient.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("xfer_rej"))` with data `(id: u64, new_owner: Address)`.
+    pub fn reject_alert_transfer(
+        env: Env,
+        new_owner: Address,
+        config_id: u64,
+    ) -> Result<(), ContractError> {
+        new_owner.require_auth();
+
+        let pending = Self::pending_transfer(&env, config_id)?;
+        if pending.new_owner != new_owner {
+            return Err(ContractError::Unauthorized);
+        }
+        Self::clear_pending_transfer(&env, config_id);
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("xfer_rej")),
+            (config_id, new_owner),
+        );
+        Ok(())
+    }
+
+    /// Withdraw a pending transfer as the alert's owner.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be the
+    /// current owner of the alert.
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not identify an existing alert.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the current owner.
+    /// Returns [`ContractError::NoPendingTransfer`] if no transfer is pending.
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("xfer_can"))` with data `(id: u64, owner: Address)`.
+    pub fn cancel_alert_transfer(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+
+        let config = Self::load_alert(&env, config_id)?;
+        Self::assert_owner(&config, &caller)?;
+        Self::pending_transfer(&env, config_id)?;
+        Self::clear_pending_transfer(&env, config_id);
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("xfer_can")),
+            (config_id, caller),
+        );
+        Ok(())
+    }
+
+    /// The transfer pending for an alert, if any. An expired transfer is still
+    /// returned (check `expires_at_ledger`); it can no longer be accepted.
+    #[must_use]
+    pub fn get_pending_alert_transfer(env: Env, config_id: u64) -> Option<PendingAlertTransfer> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingTransfer(config_id))
     }
 
     /// Register multiple alert configs in a single call.
@@ -1571,7 +1766,7 @@ impl AlertRegistry {
     ///
     /// Thin wrapper over the stored [`AlertConfig`]: a separate owner-only
     /// storage key is not warranted because the owner never changes
-    /// independently of the record (and `transfer_alert_ownership` rewrites
+    /// independently of the record (and `accept_alert_transfer` rewrites
     /// the record anyway), so the cheap-read win would be nil. Callers
     /// checking only ownership no longer need to deserialize the config
     /// themselves.
@@ -1737,6 +1932,9 @@ impl AlertRegistry {
         Self::remove_from_contract_index(&env, &old_target, config_id);
         Self::push_contract_index(&env, &new_target, config_id)?;
         Self::persist_alert(&env, config_id, &config);
+        // A recipient agreed to take the alert as it was; a different target
+        // is a different alert, so any pending transfer must be re-proposed.
+        Self::clear_pending_transfer(&env, config_id);
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("retarget")),
@@ -2006,10 +2204,63 @@ impl AlertRegistry {
 
     fn assert_per_owner_limit(env: &Env, owner: &Address) -> Result<(), ContractError> {
         let limit = Self::get_per_owner_alert_limit(env.clone());
-        if limit > 0 && Self::get_non_removed_alert_count(env.clone(), owner.clone()) >= limit {
+        if limit == 0 || Self::owner_live_count(env, owner) < limit {
+            return Ok(());
+        }
+        // Only pay for a scan of the owner's index when they are at the limit:
+        // expired alerts may be holding slots that should be released.
+        Self::prune_owner_index(env, owner);
+        if Self::owner_live_count(env, owner) >= limit {
             return Err(ContractError::OwnerAlertLimitExceeded);
         }
         Ok(())
+    }
+
+    /// Find IDs in `owner`'s index whose alert record no longer exists and
+    /// drop them. Returns how many were dropped.
+    fn prune_owner_index(env: &Env, owner: &Address) -> u32 {
+        let mut dangling: Vec<u64> = vec![env];
+        for id in Self::owner_index(env, owner).iter() {
+            if !env.storage().persistent().has(&DataKey::Alert(id)) {
+                dangling.push_back(id);
+            }
+        }
+        if dangling.is_empty() {
+            return 0;
+        }
+        Self::drop_dangling_ids(env, owner, &dangling);
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("pruned")),
+            (owner.clone(), dangling.len()),
+        );
+        dangling.len()
+    }
+
+    /// Remove `ids` (whose records are gone) from `owner`'s index, decrement
+    /// the live counter accordingly, and clear any leftover per-alert entries.
+    ///
+    /// The contract index cannot be cleaned here: the target contract was only
+    /// recorded in the expired record. Its dangling IDs are harmless, since
+    /// contract-level counts check that each record exists.
+    fn drop_dangling_ids(env: &Env, owner: &Address, ids: &Vec<u64>) {
+        let storage = env.storage().persistent();
+        let mut kept: Vec<u64> = vec![env];
+        let mut dropped: u32 = 0;
+        for id in Self::owner_index(env, owner).iter() {
+            if ids.contains(id) {
+                dropped += 1;
+            } else {
+                kept.push_back(id);
+            }
+        }
+        for id in ids.iter() {
+            storage.remove(&DataKey::AlertActive(id));
+            storage.remove(&DataKey::PendingTransfer(id));
+        }
+        storage.set(&DataKey::OwnerIndex(owner.clone()), &kept);
+        storage.extend_ttl(&DataKey::OwnerIndex(owner.clone()), DEFAULT_TTL, DEFAULT_TTL);
+        let count = Self::owner_live_count(env, owner);
+        Self::set_owner_live_count(env, owner, count.saturating_sub(dropped));
     }
 
     /// Reject registration once the number of currently active alerts
@@ -2036,7 +2287,28 @@ impl AlertRegistry {
         Ok(())
     }
 
+    fn load_alert(env: &Env, config_id: u64) -> Result<AlertConfig, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)
+    }
+
+    fn pending_transfer(env: &Env, config_id: u64) -> Result<PendingAlertTransfer, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingTransfer(config_id))
+            .ok_or(ContractError::NoPendingTransfer)
+    }
+
+    fn clear_pending_transfer(env: &Env, config_id: u64) {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingTransfer(config_id));
+    }
+
     fn remove_alert_record(env: &Env, config: &AlertConfig, config_id: u64, caller: &Address) {
+        Self::clear_pending_transfer(env, config_id);
         env.storage()
             .persistent()
             .remove(&DataKey::Alert(config_id));
@@ -5044,7 +5316,7 @@ mod tests {
         );
     }
 
-    // 21b. get_alert_owner reflects transfer_alert_ownership
+    // 21b. get_alert_owner reflects an accepted ownership transfer
     #[test]
     fn test_get_alert_owner_after_transfer() {
         let (env, client) = setup();
@@ -5060,7 +5332,9 @@ mod tests {
             &vec![&env],
         );
 
-        client.transfer_alert_ownership(&owner, &id, &new_owner);
+        client.propose_alert_transfer(&owner, &id, &new_owner);
+
+        client.accept_alert_transfer(&new_owner, &id);
         assert_eq!(
             client.get_alert_owner(&owner, &id).unwrap(),
             Some(new_owner)

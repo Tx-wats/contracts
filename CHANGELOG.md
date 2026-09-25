@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING (alert-registry)
+
+- **Alert ownership transfers now require the recipient's acceptance.**
+  `transfer_alert_ownership` let an owner push alerts onto any address, which a
+  griefer could use to fill a victim's per-owner quota and pollute their alert
+  list. It is replaced by `propose_alert_transfer` (owner) and
+  `accept_alert_transfer` (recipient signs), plus `reject_alert_transfer`,
+  `cancel_alert_transfer` and `get_pending_alert_transfer`. Proposals expire
+  after `ALERT_TRANSFER_EXPIRY_LEDGERS` (≈ 7 days) and are cleared when the alert
+  is removed or retargeted. New errors: `NoPendingTransfer` (18),
+  `TransferExpired` (19), `InvalidTransferRecipient` (20). (issue #201)
+
 ### Deprecated
 
 - **`WatcherRegistry::is_authorized` alias deprecated**: Deprecated in rustdoc, bindings, and documentation with scheduled removal in `v0.3.0`. Callers and examples have migrated to `is_watcher_authorized` (#252).
@@ -28,6 +40,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — alert-registry
 
+- **Expired alerts permanently consumed the owner's quota.** An alert whose
+  record expired (instead of being removed) stayed in the owner index and live
+  counter, still counted by the per-owner limit, and could not be removed
+  (`AlertNotFound`), eventually locking the owner out of `register_alert`.
+  `register_alert` now prunes expired IDs when the owner is at the limit, a
+  permissionless `prune_expired_alerts(owner)` does the same on demand, and
+  `remove_alert` cleans up an expired record in the caller's own index.
+  (issue #209)
+- **`AlertActive` TTL refresh.** The code fix landed with #213
+  (`persist_alert` rewrites and extends the flag on every mutation). A
+  ledger-advancement regression test now edits an alert repeatedly while the
+  ledger moves past `DEFAULT_TTL` and checks the flag stays live and
+  `get_alert_active` / `get_active_alert_count` stay correct. (issue #208)
+- **Owner live-counter TTL refresh.** The code fix landed with the
+  `persist_alert` / `touch_alert` refactor (#213), which extends the per-owner
+  counter on every mutation, `bump_alert` and `renew_alert_ttl`. A
+  ledger-advancement regression test now keeps an alert alive across several
+  TTL periods with keep-alive calls only and checks the counter never lapses
+  and the per-owner limit still holds. (issue #207)
 - **Ad-hoc `symbol_short!` instance keys consolidated.** The seven instance keys
   (`ADMIN`, `NEXT_ID`, `PAUSED`, `LIMIT`, `CLIMIT`, `GLIMIT`, `WATCHREG`) are now
   constants in `alert_registry::instance_key`, so a mistyped key no longer
