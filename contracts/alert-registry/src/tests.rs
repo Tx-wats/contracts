@@ -2276,6 +2276,24 @@ fn test_batch_remove_alert_not_found() {
     );
 }
 
+#[test]
+fn test_batch_remove_alert_ignores_duplicate_ids() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.batch_remove_alert(&owner, &vec![&env, id, id]);
+
+    assert!(client.get_alert(&owner, &id).unwrap().is_none());
+}
+
 // ── Consolidated tests from lib.rs ──────────────────────────────────────
 
 fn setup_with_watcher_registry() -> (

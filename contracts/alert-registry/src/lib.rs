@@ -1654,6 +1654,9 @@ impl AlertRegistry {
 
         for i in 0..config_ids.len() {
             let config_id = config_ids.get(i).unwrap();
+            if config_ids.iter().take(i).any(|id| id == config_id) {
+                continue;
+            }
             let config: AlertConfig = env
                 .storage()
                 .persistent()
