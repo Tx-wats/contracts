@@ -260,9 +260,15 @@ impl AlertRegistry {
     /// Kept for backwards compatibility. If the contract was initialized
     /// via [`Self::__constructor`] during deployment, calling this again returns
     /// [`ContractError::AlreadyInitialized`].
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`. This prevents a
+    /// front-running attack where an arbitrary account claims the admin role
+    /// during the window between deployment and legitimate initialization.
     /// # Errors
     /// Returns [`ContractError::AlreadyInitialized`] if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
         if env.storage().instance().has(&symbol_short!("ADMIN")) {
             return Err(ContractError::AlreadyInitialized);
         }
@@ -3860,6 +3866,22 @@ mod tests {
     }
 
     // ── Auth-failure tests (no mock_all_auths) ────────────────────────────────
+
+    // #195 — initialize must require a valid signature from the admin address so
+    // that no one can front-run the initialization window after deployment and
+    // claim the admin role without owning the corresponding key.
+    #[test]
+    #[should_panic(expected = "Error(Auth, InvalidAction)")]
+    fn test_initialize_requires_auth() {
+        let env = Env::default();
+        // No mock_all_auths — any require_auth() call will fail.
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        // Calling initialize without a valid signature must panic with
+        // Error(Auth, InvalidAction), not succeed and hand over admin control.
+        client.initialize(&admin);
+    }
 
     #[test]
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
