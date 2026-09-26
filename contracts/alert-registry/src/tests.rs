@@ -2276,6 +2276,107 @@ fn test_batch_remove_alert_not_found() {
     );
 }
 
+// ── Issue #260 — batch_register_alert with real (non-mocked) auth trees ────
+
+#[test]
+fn test_batch_register_alert_with_real_auth_trees_multi_owner() {
+    use soroban_sdk::testutils::MockAuth;
+
+    let env = Env::default();
+    let contract_id = env.register(AlertRegistry, ());
+    let client = AlertRegistryClient::new(&env, &contract_id);
+
+    let owner_a = Address::generate(&env);
+    let owner_b = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Use explicit MockAuth entries instead of mock_all_auths
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner_a,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract_id: &contract_id,
+                function_name: "batch_register_alert",
+                args: (&vec![&env, alert_input(&env, &owner_a, &target, "A")],),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &owner_b,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract_id: &contract_id,
+                function_name: "batch_register_alert",
+                args: (&vec![&env, alert_input(&env, &owner_b, &target, "B")],),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+
+    let inputs = vec![
+        &env,
+        alert_input(&env, &owner_a, &target, "Alert A"),
+        alert_input(&env, &owner_b, &target, "Alert B"),
+    ];
+
+    let ids = client.batch_register_alert(&inputs);
+    assert_eq!(ids.len(), 2);
+
+    // Verify each owner's alerts were created correctly
+    assert_eq!(client.get_active_alert_count(&owner_a), 1);
+    assert_eq!(client.get_active_alert_count(&owner_b), 1);
+
+    // Verify env.auths() reflects the distinct owners
+    let auths = env.auths();
+    assert_eq!(auths.len(), 2, "Two distinct owners should have two auth entries");
+}
+
+#[test]
+fn test_batch_register_alert_with_real_auth_trees_repeated_owner() {
+    use soroban_sdk::testutils::MockAuth;
+
+    let env = Env::default();
+    let contract_id = env.register(AlertRegistry, ());
+    let client = AlertRegistryClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Same owner appears twice in the batch
+    // Note: require_auth is called once per item, so the same owner
+    // will have their auth checked twice within one contract invocation.
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract_id: &contract_id,
+            function_name: "batch_register_alert",
+            args: (
+                &vec![
+                    &env,
+                    alert_input(&env, &owner, &target, "A"),
+                    alert_input(&env, &owner, &target, "B"),
+                ],
+            ),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let inputs = vec![
+        &env,
+        alert_input(&env, &owner, &target, "First"),
+        alert_input(&env, &owner, &target, "Second"),
+    ];
+
+    let ids = client.batch_register_alert(&inputs);
+    assert_eq!(ids.len(), 2);
+
+    // Both alerts should belong to the same owner
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+
+    // Verify env.auths() shows one owner (even though require_auth was called twice)
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1, "One owner should appear once in auth list");
+}
+
 // ── Consolidated tests from lib.rs ──────────────────────────────────────
 
 fn setup_with_watcher_registry() -> (
