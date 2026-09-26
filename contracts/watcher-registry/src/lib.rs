@@ -2428,7 +2428,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
-    fn test_transfer_admin_requires_auth() {
+    fn test_propose_admin_transfer_requires_auth() {
         let env = Env::default();
         let contract_id = env.register(WatcherRegistry, ());
         let client = WatcherRegistryClient::new(&env, &contract_id);
