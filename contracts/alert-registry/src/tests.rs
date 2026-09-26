@@ -217,16 +217,34 @@ fn test_initialize_emits_event() {
     assert!(!env.events().all().is_empty());
 }
 
-// set_per_owner_alert_limit emits an admin.limit event
+// Limit events share one payload shape so indexers do not need to inspect
+// runtime types to distinguish owner and contract limits.
 #[test]
 fn test_set_per_owner_alert_limit_emits_event() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
 
     client.set_per_owner_alert_limit(&admin, &5u32);
 
-    assert!(!env.events().all().is_empty());
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("limit")
+        })
+        .expect("admin.limit event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(kind, symbol_short!("owner"));
+    assert_eq!(emitted_limit, 5u32);
 }
 
 #[test]
@@ -1024,6 +1042,55 @@ fn test_propose_webhook_overwrites_previous_pending() {
     assert_eq!(cfg.webhook_hash, hash64c(&env, 's'));
 }
 
+#[test]
+fn test_propose_webhook_rejects_live_hash_without_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let hash = hash64c(&env, 'a');
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash,
+        &vec![&env],
+    );
+    let event_count = env.events().all().len();
+
+    assert_eq!(
+        client.try_propose_webhook(&owner, &id, &hash).unwrap_err().unwrap(),
+        ContractError::NoopWebhookRotation
+    );
+    assert_eq!(env.events().all().len(), event_count);
+    assert!(client.get_alert(&owner, &id).unwrap().pending_webhook_hash.is_none());
+}
+
+#[test]
+fn test_propose_webhook_rejects_pending_hash_without_event() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64c(&env, 'a'),
+        &vec![&env],
+    );
+    let pending = hash64c(&env, 'b');
+    client.propose_webhook(&owner, &id, &pending);
+    let event_count = env.events().all().len();
+
+    assert_eq!(
+        client
+            .try_propose_webhook(&owner, &id, &pending)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::NoopWebhookRotation
+    );
+    assert_eq!(env.events().all().len(), event_count);
+}
+
 // Full rotation flow: propose → confirm → propose again → confirm again
 #[test]
 fn test_webhook_rotation_full_cycle() {
@@ -1305,8 +1372,46 @@ fn test_set_watcher_registry_emits_event() {
 
     client.set_watcher_registry(&admin, &registry_id);
 
-    assert!(!env.events().all().is_empty());
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| topics.len() == 2)
+        .expect("admin.watchreg event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, emitted_registry): (Address, Option<Address>) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(emitted_registry, Some(registry_id.clone()));
     assert_eq!(client.get_watcher_registry(), Some(registry_id));
+}
+
+#[test]
+fn test_clear_watcher_registry_emits_disable_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let registry_id = env.register(watcher_registry::WatcherRegistry, ());
+    let registry_client =
+        watcher_registry::WatcherRegistryClient::new(&env, &registry_id);
+    registry_client.initialize(&admin);
+    client.set_watcher_registry(&admin, &registry_id);
+    client.clear_watcher_registry(&admin);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| topics.len() == 2)
+        .expect("admin.watchreg event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, emitted_registry): (Address, Option<Address>) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert!(emitted_registry.is_none());
 }
 
 #[test]
@@ -1764,12 +1869,14 @@ fn test_get_alerts_modified_since_ledger_precision() {
     assert_eq!(page2.len(), 1);
     assert_eq!(page2.get(0).unwrap().label, str(&env, "A1"));
 
-    // Removed alerts are excluded
+    // Removed alerts are returned as inactive tombstones
     client.remove_alert(&owner, &id1);
     let res_after_remove = client.get_alerts_modified_since_ledger(&0, &0u32, &u32::MAX);
-    assert_eq!(res_after_remove.len(), 2);
+    assert_eq!(res_after_remove.len(), 3);
     assert_eq!(res_after_remove.get(0).unwrap().label, str(&env, "A0"));
-    assert_eq!(res_after_remove.get(1).unwrap().label, str(&env, "A2"));
+    assert_eq!(res_after_remove.get(1).unwrap().label, str(&env, "A1"));
+    assert!(!res_after_remove.get(1).unwrap().active);
+    assert_eq!(res_after_remove.get(2).unwrap().label, str(&env, "A2"));
 }
 
 #[test]
@@ -1885,6 +1992,40 @@ fn test_configs_paginated_boundaries() {
 
     let p5 = client.get_alerts_by_owner_paginated(&querier, &owner, &10, &2);
     assert_eq!(p5.len(), 0);
+}
+
+#[test]
+fn test_paginated_queries_cap_unbounded_limits() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    for i in 0..=MAX_PAGE_SIZE {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64c(&env, char::from(b'a' + (i % 26) as u8)),
+            &vec![&env],
+        );
+    }
+
+    assert_eq!(
+        client
+            .get_alerts_by_owner_paginated(&owner, &owner, &0, &u32::MAX)
+            .len(),
+        MAX_PAGE_SIZE
+    );
+    assert_eq!(
+        client
+            .get_contract_alerts_paginated(&owner, &target, &0, &u32::MAX)
+            .len(),
+        MAX_PAGE_SIZE
+    );
+    assert_eq!(
+        client.get_alerts_modified_since(&0, &0, &u32::MAX).len(),
+        MAX_PAGE_SIZE
+    );
 }
 
 // ── Issue #34 / #201 — alert ownership transfer ────────────────────────────────
@@ -2375,6 +2516,22 @@ fn test_batch_register_alert_with_real_auth_trees_repeated_owner() {
     // Verify env.auths() shows one owner (even though require_auth was called twice)
     let auths = env.auths();
     assert_eq!(auths.len(), 1, "One owner should appear once in auth list");
+#[test]
+fn test_batch_remove_alert_ignores_duplicate_ids() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    client.batch_remove_alert(&owner, &vec![&env, id, id]);
+
+    assert!(client.get_alert(&owner, &id).unwrap().is_none());
 }
 
 // ── Consolidated tests from lib.rs ──────────────────────────────────────
@@ -2401,6 +2558,34 @@ fn setup_with_watcher_registry() -> (
 fn test_global_alert_limit_defaults_to_zero_unlimited() {
     let (_env, client) = setup();
     assert_eq!(client.get_global_alert_limit(), 0u32);
+}
+
+#[test]
+fn test_set_global_alert_limit_emits_admin_limit_event() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_global_alert_limit(&admin, &11u32);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("limit")
+        })
+        .expect("admin.limit event must be emitted");
+    let (_, _, data) = event;
+    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(kind, symbol_short!("global"));
+    assert_eq!(emitted_limit, 11u32);
 }
 
 #[test]
@@ -2439,7 +2624,7 @@ fn test_global_alert_limit_enforced_across_owners() {
 }
 
 #[test]
-fn test_global_alert_limit_not_decremented_by_removal() {
+fn test_global_alert_limit_is_released_by_removal() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
@@ -2456,21 +2641,14 @@ fn test_global_alert_limit_not_decremented_by_removal() {
     );
     client.remove_alert(&owner, &id);
 
-    // The ceiling tracks the monotonic ever-registered count, not the
-    // live count, so a freed-up slot from removal does not reopen room.
-    assert_eq!(
-        client
-            .try_register_alert(
-                &owner,
-                &target,
-                &str(&env, "Alert2"),
-                &hash64c(&env, '2'),
-                &vec![&env, str(&env, "rule:mint")],
-            )
-            .unwrap_err()
-            .unwrap(),
-        ContractError::GlobalAlertLimitExceeded
+    let replacement = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert2"),
+        &hash64c(&env, '2'),
+        &vec![&env, str(&env, "rule:mint")],
     );
+    assert_eq!(replacement, 1);
 }
 
 #[test]
@@ -2607,6 +2785,24 @@ fn test_per_contract_alert_limit_freed_by_removal() {
 }
 
 #[test]
+fn test_per_contract_alert_count_excludes_deactivated_alerts() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    assert_eq!(client.get_active_contract_alert_count(&target), 1u32);
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:transfer")], &false);
+    assert_eq!(client.get_active_contract_alert_count(&target), 0u32);
+}
+
+#[test]
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_set_per_contract_alert_limit_requires_auth() {
     let env = Env::default();
@@ -2656,7 +2852,9 @@ fn test_set_per_contract_alert_limit_emits_admin_limit_event() {
         .expect("admin.limit event must be emitted");
 
     let (_, _, data) = limit_event;
-    let (kind, emitted_limit): (Symbol, u32) = soroban_sdk::FromVal::from_val(&env, &data);
+    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(emitted_admin, admin);
     assert_eq!(kind, symbol_short!("contract"));
     assert_eq!(emitted_limit, 7u32);
 }
@@ -2765,6 +2963,56 @@ fn test_get_alert_ids_by_owner() {
 
     // Unrelated owner still sees an empty list.
     assert_eq!(client.get_alert_ids_by_owner(&other).len(), 0);
+}
+
+#[test]
+fn test_get_alerts_by_ids_preserves_order_and_skips_missing() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let first = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "first"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    let second = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "second"),
+        &hash64(&env),
+        &vec![&env],
+    );
+    client.remove_alert(&owner, &first);
+
+    let configs =
+        client.get_alerts_by_ids(&Address::generate(&env), &vec![&env, 999, second, first]);
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs.get(0).unwrap().label, str(&env, "second"));
+}
+
+#[test]
+fn test_set_alert_active_preserves_rules() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "alert"),
+        &hash64(&env),
+        &rules,
+    );
+
+    client.set_alert_active(&owner, &id, &false);
+    assert!(!client.get_alert_active(&owner, &id).unwrap());
+    assert_eq!(client.get_alert(&owner, &id).unwrap().rules, rules);
+
+    client.set_alert_active(&owner, &id, &true);
+    assert!(client.get_alert_active(&owner, &id).unwrap());
+    assert_eq!(client.get_alert(&owner, &id).unwrap().rules, rules);
 }
 
 // 10. Paginated queries work without watcher gating
@@ -2991,6 +3239,25 @@ fn test_get_watcher_registry_none_before_set() {
     let (_env, client) = setup();
     assert!(client.get_watcher_registry().is_none());
     assert!(!client.is_watcher_gating_enabled());
+}
+
+#[test]
+fn test_get_configuration_returns_all_settings() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_per_owner_alert_limit(&admin, &11u32);
+    client.set_per_contract_alert_limit(&admin, &22u32);
+    client.set_global_alert_limit(&admin, &33u32);
+    client.pause(&admin);
+
+    let config = client.get_configuration();
+    assert_eq!(config.admin, admin);
+    assert!(config.paused);
+    assert_eq!(config.per_owner_alert_limit, 11);
+    assert_eq!(config.per_contract_alert_limit, 22);
+    assert_eq!(config.global_alert_limit, 33);
+    assert!(config.watcher_registry.is_none());
 }
 
 // 16. set_watcher_registry persists and get_watcher_registry returns it
@@ -3369,6 +3636,49 @@ fn test_update_label_not_found() {
             .unwrap_err()
             .unwrap(),
         ContractError::AlertNotFound
+    );
+}
+
+#[test]
+fn test_register_alert_rejects_empty_label() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    assert_eq!(
+        client
+            .try_register_alert(
+                &owner,
+                &target,
+                &str(&env, ""),
+                &hash64(&env),
+                &vec![&env],
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::EmptyLabel
+    );
+}
+
+#[test]
+fn test_update_label_rejects_empty_label() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        client
+            .try_update_label(&owner, &id, &str(&env, ""))
+            .unwrap_err()
+            .unwrap(),
+        ContractError::EmptyLabel
     );
 }
 
@@ -4391,6 +4701,31 @@ fn test_deactivate_all_alerts_multiple() {
     assert_eq!(client.get_alert_active(&owner, &id1), Some(false));
     assert_eq!(client.get_alert_active(&owner, &id2), Some(false));
     assert_eq!(client.get_alert_active(&owner, &id3), Some(false));
+}
+
+#[test]
+fn test_deactivate_all_alerts_is_bounded_and_resumable() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    for _ in 0..=MAX_DEACTIVATIONS_PER_CALL {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+    }
+
+    assert_eq!(
+        client.deactivate_all_alerts(&owner),
+        MAX_DEACTIVATIONS_PER_CALL
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+    assert_eq!(client.deactivate_all_alerts(&owner), 1);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
 }
 
 // 24. deactivate_all_alerts only affects the calling owner's alerts
