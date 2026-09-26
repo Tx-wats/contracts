@@ -530,9 +530,11 @@ fn test_remove_watcher_event_and_immediate_access_revocation() {
 // ── Feature B: bump_alert cross-contract ─────────────────────────────────────
 
 /// bump_alert can be called by any address (no auth required) and keeps the
-/// alert alive without modifying its content.
+/// alert alive without modifying its content while extending the TTL.
 #[test]
 fn test_bump_alert_by_third_party() {
+    use alert_registry::DataKey;
+
     let (env, alert_client, _watcher_client) = setup();
 
     let owner = Address::generate(&env);
@@ -549,9 +551,19 @@ fn test_bump_alert_by_third_party() {
 
     let before = alert_client.get_alert(&owner, &id).unwrap();
 
+    // Record TTL before bump
+    let ttl_before = env.as_contract(&alert_client.address, || {
+        env.storage().persistent().get_ttl(&DataKey::Alert(id))
+    });
+
     // A third-party keeper bumps the TTL — no auth needed
     let _ = keeper; // keeper address not used for auth, just illustrative
     alert_client.bump_alert(&id, &535_680u32);
+
+    // Record TTL after bump
+    let ttl_after = env.as_contract(&alert_client.address, || {
+        env.storage().persistent().get_ttl(&DataKey::Alert(id))
+    });
 
     let after = alert_client.get_alert(&owner, &id).unwrap();
 
@@ -559,4 +571,12 @@ fn test_bump_alert_by_third_party() {
     assert_eq!(after.label, before.label);
     assert_eq!(after.webhook_hash, before.webhook_hash);
     assert_eq!(after.updated_at, before.updated_at);
+
+    // TTL must have increased
+    assert!(
+        ttl_after > ttl_before,
+        "TTL must increase after bump: before={}, after={}",
+        ttl_before,
+        ttl_after
+    );
 }

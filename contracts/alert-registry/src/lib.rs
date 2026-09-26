@@ -3770,7 +3770,6 @@ mod tests {
 
     // 12. Watcher registry configured — registered watcher can read
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_watcher_registry_registered_watcher_can_read() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
 
@@ -3802,7 +3801,6 @@ mod tests {
 
     // 13. Watcher registry configured — unregistered address is rejected
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_watcher_registry_unregistered_address_rejected() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
 
@@ -3837,7 +3835,6 @@ mod tests {
 
     // 14. Watcher registry configured — removed watcher loses access
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_watcher_registry_removed_watcher_loses_access() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
 
@@ -3886,7 +3883,6 @@ mod tests {
     // get_active_alerts_for_contract reject a non-watcher the same way the
     // other gated query functions do (#42).
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_watcher_registry_get_alert_family_rejects_non_watcher() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
 
@@ -3955,7 +3951,6 @@ mod tests {
 
     // 16. set_watcher_registry persists and get_watcher_registry returns it
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_set_and_get_watcher_registry() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
 
@@ -3974,7 +3969,6 @@ mod tests {
 
     // 16b. is_watcher_gating_enabled convenience getter
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_is_watcher_gating_enabled() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
         assert!(!alert_client.is_watcher_gating_enabled());
@@ -4052,7 +4046,6 @@ mod tests {
     // 17d. set_watcher_registry accepts a real WatcherRegistry after a prior
     // misconfigured attempt was rejected (#44)
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_set_watcher_registry_recovers_after_invalid_attempt() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
         let admin = Address::generate(&env);
@@ -4076,7 +4069,6 @@ mod tests {
     // 17b. clear_watcher_registry disables gating; set_watcher_registry can
     // re-enable it afterward.
     #[test]
-    #[cfg(feature = "testutils")]
     fn test_clear_watcher_registry_disables_then_reconfigure() {
         let (env, alert_client, watcher_client) = setup_with_watcher_registry();
 
@@ -5216,6 +5208,38 @@ mod tests {
     }
 
     #[test]
+    fn test_renew_alert_ttl_verifies_ttl_increases() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+        let id =
+            client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
+
+        // Record TTL before renew
+        let ttl_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::Alert(id))
+        });
+
+        client.renew_alert_ttl(&owner, &id);
+
+        // Record TTL after renew
+        let ttl_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::Alert(id))
+        });
+
+        // TTL must have increased
+        assert!(
+            ttl_after > ttl_before,
+            "TTL must increase after renew: before={}, after={}",
+            ttl_before,
+            ttl_after
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_renew_alert_ttl_requires_auth() {
         let env = Env::default();
@@ -5228,6 +5252,136 @@ mod tests {
             client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &vec![&env]);
         env.set_auths(&[]);
         client.renew_alert_ttl(&owner, &id);
+    }
+
+    // Comprehensive TTL assertion: bump_alert updates all relevant TTL keys (#259)
+    #[test]
+    fn test_bump_alert_updates_all_ttl_keys() {
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        // Record all TTL values before bump
+        let ttl_alert_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::Alert(id))
+        });
+        let ttl_alert_active_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::AlertActive(id))
+        });
+        let ttl_owner_index_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::OwnerIndex(owner.clone()))
+        });
+        let ttl_contract_index_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::ContractIndex(target.clone()))
+        });
+        let ttl_owner_count_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::OwnerLiveCount(owner.clone()))
+        });
+
+        // Bump with a TTL value below MAX_TTL
+        client.bump_alert(&id, &120_960u32);
+
+        // Record all TTL values after bump
+        let ttl_alert_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::Alert(id))
+        });
+        let ttl_alert_active_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::AlertActive(id))
+        });
+        let ttl_owner_index_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::OwnerIndex(owner.clone()))
+        });
+        let ttl_contract_index_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::ContractIndex(target.clone()))
+        });
+        let ttl_owner_count_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::OwnerLiveCount(owner.clone()))
+        });
+
+        // Assert all TTL values increased
+        assert!(
+            ttl_alert_after > ttl_alert_before,
+            "Alert TTL must increase after bump"
+        );
+        assert!(
+            ttl_alert_active_after > ttl_alert_active_before,
+            "AlertActive TTL must increase after bump"
+        );
+        assert!(
+            ttl_owner_index_after > ttl_owner_index_before,
+            "OwnerIndex TTL must increase after bump"
+        );
+        assert!(
+            ttl_contract_index_after > ttl_contract_index_before,
+            "ContractIndex TTL must increase after bump"
+        );
+        assert!(
+            ttl_owner_count_after > ttl_owner_count_before,
+            "OwnerLiveCount TTL must increase after bump"
+        );
+    }
+
+    // Verify MAX_TTL clamping boundary: request above MAX_TTL gets clamped (#259)
+    #[test]
+    fn test_bump_alert_max_ttl_boundary() {
+        use soroban_sdk::testutils::Events as _;
+
+        let env = Env::default();
+        let contract_id = env.register(AlertRegistry, ());
+        let client = AlertRegistryClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        env.mock_all_auths();
+
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env],
+        );
+
+        // Request TTL above MAX_TTL
+        client.bump_alert(&id, &u32::MAX);
+
+        // Check the emitted event to verify clamping
+        let events = env.events().all();
+        let bump_event = events
+            .iter()
+            .find(|(_, topics, _)| {
+                topics.len() == 2
+                    && Symbol::from_val(&env, &topics.get(0).unwrap())
+                        == soroban_sdk::symbol_short!("alert")
+                    && Symbol::from_val(&env, &topics.get(1).unwrap())
+                        == soroban_sdk::symbol_short!("bump")
+            })
+            .expect("bump event must be emitted");
+
+        let (_, _, data) = bump_event;
+        let (_, emitted_ttl): (u64, u32) = soroban_sdk::FromVal::from_val(&env, &data);
+
+        assert_eq!(emitted_ttl, MAX_TTL, "TTL above MAX_TTL must be clamped");
+
+        // Verify the actual storage TTL respects the clamp
+        let ttl_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().get_ttl(&DataKey::Alert(id))
+        });
+
+        assert_eq!(
+            ttl_after, MAX_TTL,
+            "Actual TTL in storage must be clamped to MAX_TTL"
+        );
     }
 
     #[test]
