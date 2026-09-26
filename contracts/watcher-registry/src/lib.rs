@@ -43,16 +43,9 @@ pub enum ContractError {
     /// Returned when accepting/cancelling a transfer but none is pending.
     NoPendingTransfer = 6,
     /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
-    TooManyWatchers = 7,
+    MaxWatchersReached = 7,
     /// Returned when adding an admin would exceed [`MAX_ADMINS`].
-    TooManyAdmins = 8,
-    /// Returned when registering a watcher would exceed [`MAX_WATCHERS`].
-    MaxWatchersReached = 6,
-    /// Returned when adding an admin would exceed [`MAX_ADMINS`].
-    MaxAdminsReached = 7,
-    /// Returned when a sensitive action is called directly while a timelock
-    /// delay is configured — it must go through propose/execute instead.
-    TimelockRequired = 8,
+    MaxAdminsReached = 8,
     /// Returned when proposing an action while another one is already queued.
     ActionAlreadyPending = 9,
     /// Returned when executing or cancelling with nothing queued.
@@ -61,6 +54,13 @@ pub enum ContractError {
     TimelockNotExpired = 11,
     /// Returned when setting or proposing a timelock delay greater than [`MAX_TIMELOCK_DELAY`].
     DelayTooLarge = 12,
+    /// Returned when a sensitive action is called directly while a timelock
+    /// delay is configured — it must go through propose/execute instead.
+    TimelockRequired = 13,
+    /// Returned when a state-mutating call is made while the contract is paused.
+    Paused = 14,
+    /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
+    BelowMinWatchers = 15,
 }
 
 // ── TTL constants ────────────────────────────────────────────────────────────
@@ -93,12 +93,6 @@ pub const MAX_ADMINS: u32 = 10;
 /// Prevents governance deadlock where proposals would saturate at `u32::MAX` and
 /// become permanently unexecutable.
 pub const MAX_TIMELOCK_DELAY: u32 = 518_400;
-    /// Returned when a state-mutating call is made while the contract is paused.
-    Paused = 6,
-    /// Returned when an operation would drop the watcher count below [`MIN_WATCHERS`].
-    BelowMinWatchers = 7,
-}
-
 /// Minimum number of registered watchers that must remain after
 /// `remove_watcher` or `clear_all_watchers`. Prevents an admin (or a
 /// compromised admin key) from halting the monitoring system entirely.
@@ -122,6 +116,8 @@ pub enum DataKey {
     TimelockDelay,
     /// Stores the single queued [`PendingAction`], if any.
     PendingAction,
+    /// Stores the `bool` paused flag.
+    Paused,
 }
 
 // ── Timelock types ───────────────────────────────────────────────────────────
@@ -152,8 +148,6 @@ pub struct PendingAction {
     pub proposer: Address,
     /// Ledger sequence at or after which the action may be executed.
     pub ready_at: u32,
-    /// Stores the `bool` paused flag.
-    Paused,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -247,7 +241,6 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
-    /// Returns [`ContractError::TooManyAdmins`] if the admin set is already at [`MAX_ADMINS`].
     /// Returns [`ContractError::MaxAdminsReached`] if the admin set already holds [`MAX_ADMINS`] entries.
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
     /// # Panics
@@ -258,24 +251,6 @@ impl WatcherRegistry {
         Self::assert_timelock_disabled(&env)?;
         Self::assert_not_paused(&env)?;
 
-        let mut admins = Self::load_admins(&env);
-        for i in 0..admins.len() {
-            if admins.get(i).unwrap() == new_admin {
-                return Ok(()); // already an admin, idempotent
-            }
-        }
-        if admins.len() >= MAX_ADMINS {
-            return Err(ContractError::TooManyAdmins);
-        }
-        admins.push_back(new_admin.clone());
-        env.storage().instance().set(&DataKey::Admins, &admins);
-
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("add")),
-            (caller, new_admin),
-        );
-
-        Ok(())
         Self::do_add_admin(&env, &caller, new_admin)
     }
 
@@ -478,7 +453,6 @@ impl WatcherRegistry {
     /// Returns [`ContractError::MaxWatchersReached`] if the registry already holds [`MAX_WATCHERS`] watchers.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
-    /// Returns [`ContractError::TooManyWatchers`] if the watcher set is already at [`MAX_WATCHERS`].
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn register_watcher(
@@ -497,7 +471,6 @@ impl WatcherRegistry {
             }
         }
         if watchers.len() >= MAX_WATCHERS {
-            return Err(ContractError::TooManyWatchers);
             return Err(ContractError::MaxWatchersReached);
         }
         watchers.push_back(watcher.clone());
@@ -2449,7 +2422,7 @@ mod tests {
                 .try_register_watcher(&admin, &Address::generate(&env))
                 .unwrap_err()
                 .unwrap(),
-            ContractError::TooManyWatchers
+            ContractError::MaxWatchersReached
         );
         assert_eq!(client.get_watcher_count(), MAX_WATCHERS);
     }
@@ -2468,7 +2441,26 @@ mod tests {
                 .try_add_admin(&admin, &Address::generate(&env))
                 .unwrap_err()
                 .unwrap(),
-            ContractError::TooManyAdmins
+            ContractError::MaxAdminsReached
+        );
+        assert_eq!(client.get_admins().len(), MAX_ADMINS);
+    }
+
+    // add_admin via the timelock path returns the same error at the cap
+    #[test]
+    fn test_execute_add_admin_cap_enforced() {
+        let (env, admin, client) = setup();
+        for _ in 0..(MAX_ADMINS - 1) {
+            client.add_admin(&admin, &Address::generate(&env));
+        }
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::AddAdmin(Address::generate(&env)));
+        advance_ledgers(&env, TEST_DELAY);
+
+        assert_eq!(
+            client.try_execute_admin_action(&admin).unwrap_err().unwrap(),
+            ContractError::MaxAdminsReached
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
     }

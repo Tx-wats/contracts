@@ -2,7 +2,7 @@
 
 Contract that stores authorized watcher node addresses on-chain. Only registered watchers (trusted instances of `stellar-txwatch-core`) may interact with the alert registry.
 
-The watcher set is capped at `MAX_WATCHERS` (1,000) and the admin set at `MAX_ADMINS` (50). `register_watcher`/`add_admin` return a typed error (`TooManyWatchers`/`TooManyAdmins`) once the cap is reached.
+The watcher set is capped at `MAX_WATCHERS` (1,000) and the admin set at `MAX_ADMINS` (50). `register_watcher`/`add_admin` return a typed error (`MaxWatchersReached`/`MaxAdminsReached`) once the cap is reached.
 The registry uses a **set of admins** (N independent signers). Any single admin can perform every privileged operation. All admin and watcher mutations emit Soroban events so changes are auditable on-chain.
 
 All mutating entrypoints return `Result<(), ContractError>`; read entrypoints either return their value directly or a `Result` where noted. See [Errors](#errors) for the full variant list and [docs/events.md](events.md) for the authoritative event topic and data shapes.
@@ -512,8 +512,6 @@ Removes up to `max_count` registered watchers in a single call. Batched fallback
 
 The contract defines a single error enum ([`lib.rs`](../contracts/watcher-registry/src/lib.rs)). Each variant is returned as `Err(ContractError::…)` from the relevant entrypoint.
 
-> **Note:** after several overlapping merges, the enum in `lib.rs` assigns the same discriminant to more than one variant (codes marked †). Match on the variant name, not the number, until the enum is renumbered.
-
 | Variant | Discriminant | Returned by | Meaning |
 |---|---|---|---|
 | `AlreadyInitialized` | `1` | `initialize` | `initialize` was called after the registry was already set up. |
@@ -522,12 +520,12 @@ The contract defines a single error enum ([`lib.rs`](../contracts/watcher-regist
 | `LastAdmin` | `4` | `remove_admin` | Removing this admin would leave the registry with no admins, permanently locking it. |
 | `WatcherNotFound` | `5` | `replace_watcher` | `old_watcher` is not currently registered, so there is nothing to replace. |
 | `DelayTooLarge` | `12` | `set_timelock_delay`, `propose_admin_action` | Configured or proposed timelock delay exceeds `MAX_TIMELOCK_DELAY` (518,400 ledgers ≈ 30 days). |
-| `NoPendingTransfer` | `6`† | `accept_admin_transfer`, `cancel_admin_transfer` | No admin transfer is pending, or the pending proposal names a different address. |
-| `Paused` | `6`† | admin and watcher mutations (`add_admin`, `remove_admin`, `accept_admin_transfer`, `register_watcher`, `remove_watcher`, `replace_watcher`, `clear_all_watchers`, …) | The contract is paused; an admin must call `unpause` first. |
-| `TooManyWatchers` / `MaxWatchersReached` | `7`† / `6`† | `register_watcher` | Registering would exceed `MAX_WATCHERS`. |
-| `BelowMinWatchers` | `7`† | `remove_watcher`, `clear_all_watchers` | The operation would drop the watcher count below `MIN_WATCHERS`. |
-| `TooManyAdmins` / `MaxAdminsReached` | `8`† / `7`† | `add_admin`, `execute_admin_action` | Adding would exceed `MAX_ADMINS`. |
-| `TimelockRequired` | `8`† | `add_admin`, `transfer_admin`, `propose_admin_transfer`, `clear_all_watchers`, `upgrade`, `set_timelock_delay` | A timelock delay is configured, so the action must go through `propose_admin_action` / `execute_admin_action`. From `set_timelock_delay`: the new delay is lower than the current one. |
+| `NoPendingTransfer` | `6` | `accept_admin_transfer`, `cancel_admin_transfer` | No admin transfer is pending, or the pending proposal names a different address. |
+| `Paused` | `14` | admin and watcher mutations (`add_admin`, `remove_admin`, `accept_admin_transfer`, `register_watcher`, `remove_watcher`, `replace_watcher`, `clear_all_watchers`, …) | The contract is paused; an admin must call `unpause` first. |
+| `MaxWatchersReached` | `7` | `register_watcher` | Registering would exceed `MAX_WATCHERS`. |
+| `BelowMinWatchers` | `15` | `remove_watcher`, `clear_all_watchers` | The operation would drop the watcher count below `MIN_WATCHERS`. |
+| `MaxAdminsReached` | `8` | `add_admin`, `execute_admin_action` | Adding would exceed `MAX_ADMINS`. |
+| `TimelockRequired` | `13` | `add_admin`, `transfer_admin`, `propose_admin_transfer`, `clear_all_watchers`, `upgrade`, `set_timelock_delay` | A timelock delay is configured, so the action must go through `propose_admin_action` / `execute_admin_action`. From `set_timelock_delay`: the new delay is lower than the current one. |
 | `ActionAlreadyPending` | `9` | `propose_admin_action` | Another timelocked action is already queued. |
 | `NoPendingAction` | `10` | `execute_admin_action`, `cancel_admin_action` | No timelocked action is queued. |
 | `TimelockNotExpired` | `11` | `execute_admin_action` | The queued action's delay has not elapsed yet. |
