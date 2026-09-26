@@ -889,6 +889,8 @@ impl WatcherRegistry {
             }
         }
         false
+    }
+
     /// Pause the contract, rejecting all state-mutating calls until [`WatcherRegistry::unpause`] is called.
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
@@ -1820,6 +1822,17 @@ mod tests {
     }
 
     // ── Multi-admin tests ─────────────────────────────────────────────────────
+
+    // is_admin is closed, so pause/unpause/is_paused are top-level contract fns.
+    #[test]
+    fn test_pause_functions_are_in_contract_spec() {
+        let (_env, admin, client) = setup();
+        assert!(!client.is_paused());
+        client.pause(&admin);
+        assert!(client.is_paused());
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
 
     // MIN_WATCHERS — remove_watcher refuses to drop below the threshold
     #[test]
