@@ -740,7 +740,6 @@ impl WatcherRegistry {
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
 
-        Self::do_clear_all_watchers(&env);
         Self::assert_not_paused(&env)?;
 
         let watchers = Self::load_watchers(&env);
@@ -748,17 +747,7 @@ impl WatcherRegistry {
             return Err(ContractError::BelowMinWatchers);
         }
 
-        for i in 0..watchers.len() {
-            let w = watchers.get(i).unwrap();
-            env.events()
-                .publish((symbol_short!("watcher"), symbol_short!("remove")), w);
-        }
-
-        let empty: Vec<Address> = vec![&env];
-        env.storage().instance().set(&DataKey::Watchers, &empty);
-
-        // Reset the count to zero
-        env.storage().instance().set(&symbol_short!("W_CNT"), &0u32);
+        Self::do_clear_all_watchers(&env);
 
         Ok(())
     }
@@ -1832,6 +1821,22 @@ mod tests {
         assert!(client.is_paused());
         client.unpause(&admin);
         assert!(!client.is_paused());
+    }
+
+    // clear_all_watchers refuses to clear a non-empty registry below MIN_WATCHERS
+    // and leaves the set untouched when it does.
+    #[test]
+    fn test_clear_all_watchers_respects_min_watchers() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        assert_eq!(
+            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            ContractError::BelowMinWatchers
+        );
+        assert_eq!(client.get_watcher_count(), 1);
+        assert!(client.is_watcher_authorized(&watcher));
     }
 
     // MIN_WATCHERS — remove_watcher refuses to drop below the threshold
