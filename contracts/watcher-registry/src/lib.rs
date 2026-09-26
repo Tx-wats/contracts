@@ -116,6 +116,8 @@ pub enum DataKey {
     TimelockDelay,
     /// Stores the single queued [`PendingAction`], if any.
     PendingAction,
+    /// Stores the `bool` paused flag.
+    Paused,
 }
 
 // ── Timelock types ───────────────────────────────────────────────────────────
@@ -146,8 +148,6 @@ pub struct PendingAction {
     pub proposer: Address,
     /// Ledger sequence at or after which the action may be executed.
     pub ready_at: u32,
-    /// Stores the `bool` paused flag.
-    Paused,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
