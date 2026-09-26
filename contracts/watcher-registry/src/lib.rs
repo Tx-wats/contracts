@@ -251,24 +251,6 @@ impl WatcherRegistry {
         Self::assert_timelock_disabled(&env)?;
         Self::assert_not_paused(&env)?;
 
-        let mut admins = Self::load_admins(&env);
-        for i in 0..admins.len() {
-            if admins.get(i).unwrap() == new_admin {
-                return Ok(()); // already an admin, idempotent
-            }
-        }
-        if admins.len() >= MAX_ADMINS {
-            return Err(ContractError::MaxAdminsReached);
-        }
-        admins.push_back(new_admin.clone());
-        env.storage().instance().set(&DataKey::Admins, &admins);
-
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("add")),
-            (caller, new_admin),
-        );
-
-        Ok(())
         Self::do_add_admin(&env, &caller, new_admin)
     }
 
@@ -2459,6 +2441,25 @@ mod tests {
                 .try_add_admin(&admin, &Address::generate(&env))
                 .unwrap_err()
                 .unwrap(),
+            ContractError::MaxAdminsReached
+        );
+        assert_eq!(client.get_admins().len(), MAX_ADMINS);
+    }
+
+    // add_admin via the timelock path returns the same error at the cap
+    #[test]
+    fn test_execute_add_admin_cap_enforced() {
+        let (env, admin, client) = setup();
+        for _ in 0..(MAX_ADMINS - 1) {
+            client.add_admin(&admin, &Address::generate(&env));
+        }
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::AddAdmin(Address::generate(&env)));
+        advance_ledgers(&env, TEST_DELAY);
+
+        assert_eq!(
+            client.try_execute_admin_action(&admin).unwrap_err().unwrap(),
             ContractError::MaxAdminsReached
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
