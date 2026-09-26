@@ -260,14 +260,6 @@ fn test_watcher_gating_get_alert_rejects_non_watcher() {
 
     let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
-/// When watcher-gating is enabled, every gated query function rejects a
-/// non-watcher caller with `NotAWatcher`. This exercises all four gated
-/// entry points, not just `get_alerts_for_contract`.
-#[test]
-fn test_gated_mode_rejects_non_watcher() {
-    let (env, alert_client, watcher_client) = setup();
-
-    let admin = Address::generate(&env);
     let stranger = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
@@ -281,7 +273,6 @@ fn test_gated_mode_rejects_non_watcher() {
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
     let id = alert_client.register_alert(
-    alert_client.register_alert(
         &owner,
         &target,
         &String::from_str(&env, "Alert"),
@@ -296,9 +287,6 @@ fn test_gated_mode_rejects_non_watcher() {
     assert_eq!(
         alert_client
             .try_get_alert(&stranger, &id)
-    assert_eq!(
-        alert_client
-            .try_get_alerts_for_contract(&stranger, &target)
             .unwrap_err()
             .unwrap(),
         AlertError::NotAWatcher
@@ -318,6 +306,7 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
 
     watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
+    // stranger is NOT registered as a watcher
 
     alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
@@ -338,6 +327,136 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
     assert_eq!(
         alert_client
             .try_get_alert_active(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
+/// Watcher-gating also applies to get_alert_owner (#42).
+#[test]
+fn test_watcher_gating_get_alert_owner_rejects_non_watcher() {
+    let (env, alert_client, watcher_client) = setup();
+
+    let admin = Address::generate(&env);
+    let watcher = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    watcher_client.initialize(&admin);
+    watcher_client.register_watcher(&admin, &watcher);
+    // stranger is NOT registered as a watcher
+
+    alert_client.initialize(&admin);
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    let id = alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    // Registered watcher can read
+    assert_eq!(alert_client.get_alert_owner(&watcher, &id), Some(owner.clone()));
+
+    // Stranger is rejected
+    assert_eq!(
+        alert_client
+            .try_get_alert_owner(&stranger, &id)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
+/// Watcher-gating also applies to get_active_alerts_for_contract (#42) —
+/// previously this function took no querier and stayed fully open even when
+/// gating was configured, defeating gating for anyone who used it instead of
+/// the already-gated get_alerts_for_contract.
+#[test]
+fn test_watcher_gating_get_active_alerts_for_contract_rejects_non_watcher() {
+    let (env, alert_client, watcher_client) = setup();
+
+    let admin = Address::generate(&env);
+    let watcher = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    watcher_client.initialize(&admin);
+    watcher_client.register_watcher(&admin, &watcher);
+    // stranger is NOT registered as a watcher
+
+    alert_client.initialize(&admin);
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    let id = alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    // Registered watcher can read
+    assert_eq!(
+        alert_client
+            .get_active_alerts_for_contract(&watcher, &target)
+            .len(),
+        1
+    );
+
+    // Stranger is rejected
+    assert_eq!(
+        alert_client
+            .try_get_active_alerts_for_contract(&stranger, &target)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+}
+
+/// When watcher-gating is enabled, every gated query function rejects a
+/// non-watcher caller with `NotAWatcher`. This exercises the list and
+/// paginated entry points, not just `get_alerts_for_contract`.
+#[test]
+fn test_gated_mode_rejects_non_watcher() {
+    let (env, alert_client, watcher_client) = setup();
+
+    let admin = Address::generate(&env);
+    let watcher = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    watcher_client.initialize(&admin);
+    watcher_client.register_watcher(&admin, &watcher);
+    // stranger is NOT registered as a watcher
+
+    alert_client.initialize(&admin);
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    let _id = alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env],
+    );
+
+    assert_eq!(
+        alert_client
+            .try_get_alerts_for_contract(&stranger, &target)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
     assert_eq!(
         alert_client
             .try_get_alerts_by_owner(&stranger, &owner)
@@ -361,12 +480,6 @@ fn test_watcher_gating_get_alert_active_rejects_non_watcher() {
     );
 }
 
-/// Watcher-gating also applies to get_active_alerts_for_contract (#42) —
-/// previously this function took no querier and stayed fully open even when
-/// gating was configured, defeating gating for anyone who used it instead of
-/// the already-gated get_alerts_for_contract.
-#[test]
-fn test_watcher_gating_get_active_alerts_for_contract_rejects_non_watcher() {
 /// When watcher-gating is enabled, a registered watcher is accepted by every
 /// gated query function.
 #[test]
@@ -375,18 +488,19 @@ fn test_gated_mode_accepts_registered_watcher() {
 
     let admin = Address::generate(&env);
     let watcher = Address::generate(&env);
-    let stranger = Address::generate(&env);
+    let _stranger = Address::generate(&env);
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
 
     watcher_client.initialize(&admin);
     watcher_client.register_watcher(&admin, &watcher);
+    // stranger is NOT registered as a watcher
 
     alert_client.initialize(&admin);
     let watcher_contract_id = watcher_client.address.clone();
     alert_client.set_watcher_registry(&admin, &watcher_contract_id);
 
-    alert_client.register_alert(
+    let _id = alert_client.register_alert(
         &owner,
         &target,
         &String::from_str(&env, "Alert"),
@@ -394,21 +508,6 @@ fn test_gated_mode_accepts_registered_watcher() {
         &vec![&env],
     );
 
-    // Registered watcher can read
-    assert_eq!(
-        alert_client
-            .get_active_alerts_for_contract(&watcher, &target)
-            .len(),
-        1
-    );
-
-    // Stranger is rejected
-    assert_eq!(
-        alert_client
-            .try_get_active_alerts_for_contract(&stranger, &target)
-            .unwrap_err()
-            .unwrap(),
-        AlertError::NotAWatcher
     assert_eq!(
         alert_client
             .get_alerts_for_contract(&watcher, &target)
