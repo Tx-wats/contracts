@@ -7,12 +7,16 @@ examine_globs = [
 ]
 
 exclude_globs = [
-    "contracts/alert-registry/src/tests.rs",
     "contracts/alert-registry/src/proptests.rs",
-    "contracts/watcher-registry/src/tests.rs",
     "contracts/integration-tests/**",
     "contracts/test-utils/**",
     "**/tests/**",
+]
+
+exclude_re = [
+    "^#\\[cfg\\(test\\)\\]",
+    "^\\s*mod tests \\{",
+    "^\\s*mod regression_tests \\{",
 ]
 
 minimum_test_timeout = 30

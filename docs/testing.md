@@ -216,17 +216,23 @@ examine_globs = [
 ]
 
 exclude_globs = [
-    "contracts/alert-registry/src/tests.rs",
     "contracts/alert-registry/src/proptests.rs",
-    "contracts/watcher-registry/src/tests.rs",
     "contracts/integration-tests/**",
     "contracts/test-utils/**",
     "**/tests/**",
 ]
 
+exclude_re = [
+    "^#\\[cfg\\(test\\)\\]",
+    "^\\s*mod tests \\{",
+    "^\\s*mod regression_tests \\{",
+]
+
 minimum_test_timeout = 30
 timeout_multiplier = 2
 ```
+
+The `exclude_re` patterns exclude inline test modules and regression test blocks, ensuring only production code is examined for mutations.
 
 ### Mutation Analysis & Baseline Results
 

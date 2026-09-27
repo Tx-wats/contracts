@@ -30,6 +30,8 @@ mod tests;
 mod regression_tests;
 #[cfg(test)]
 mod proptests;
+#[cfg(test)]
+mod error_codes;
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
 

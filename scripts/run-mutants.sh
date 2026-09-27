@@ -9,7 +9,7 @@ echo "======================================================="
 # Verify cargo-mutants is installed
 if ! command -v cargo-mutants &> /dev/null; then
     echo "cargo-mutants is not installed. Installing locked version..."
-    cargo install cargo-mutants --version 24.7.1 --locked
+    cargo install cargo-mutants --locked
 fi
 
 # Run mutants in-place for fast incremental compilation
