@@ -18,11 +18,6 @@ use soroban_sdk::{
 contractmeta!(key = "Name", val = "WatcherRegistry");
 contractmeta!(key = "Version", val = "0.1.0");
 
-/// Maximum number of watchers that may be registered at once.
-const MAX_WATCHERS: u32 = 1_000;
-/// Maximum number of admins that may be in the admin set at once.
-const MAX_ADMINS: u32 = 50;
-
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Errors returned by `WatcherRegistry` entry points.
@@ -2351,6 +2346,7 @@ mod tests {
     // 38. register_watcher rejects registration past MAX_WATCHERS
     #[test]
     fn test_register_watcher_cap_enforced() {
+        assert_eq!(MAX_WATCHERS, 100);
         let (env, admin, client) = setup();
         for _ in 0..MAX_WATCHERS {
             client.register_watcher(&admin, &Address::generate(&env));
@@ -2369,6 +2365,7 @@ mod tests {
     // 39. add_admin rejects registration past MAX_ADMINS
     #[test]
     fn test_add_admin_cap_enforced() {
+        assert_eq!(MAX_ADMINS, 10);
         let (env, admin, client) = setup();
         // admin from setup() already counts as 1
         for _ in 0..(MAX_ADMINS - 1) {

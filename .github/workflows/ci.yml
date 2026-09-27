@@ -44,8 +44,11 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-${{ steps.rust.outputs.channel }}-
 
       # Issue #99 — WASM build verification
-      - name: Build (WASM)
-        run: cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
+      - name: Build alert-registry (release WASM, no dev-dependencies)
+        run: cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry --lib
+
+      - name: Build watcher-registry (release WASM)
+        run: cargo build --release --target wasm32-unknown-unknown --locked -p watcher-registry --lib
 
       # Issue #102 — Test suite verification
       - name: Test

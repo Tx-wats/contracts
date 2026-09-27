@@ -28,6 +28,7 @@ mod tests;
 #[cfg(test)]
 #[path = "regression_tests.rs"]
 mod regression_tests;
+#[cfg(test)]
 mod proptests;
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
@@ -2054,35 +2055,6 @@ impl AlertRegistry {
             .map(|cfg| cfg.owner))
     }
 
-    /// Read the owner of an alert without returning the full config.
-    ///
-    /// Thin wrapper over the stored [`AlertConfig`]: a separate owner-only
-    /// storage key is not warranted because the owner never changes
-    /// independently of the record (`transfer_alert_ownership` rewrites the
-    /// record anyway), so a second key would only add write cost. Callers
-    /// checking only ownership no longer need to deserialize the config
-    /// themselves.
-    ///
-    /// Returns `None` if the alert does not exist or has expired.
-    ///
-    /// If a `WatcherRegistry` is configured, `querier` must be a registered
-    /// watcher or the call returns [`ContractError::NotAWatcher`].
-    /// # Errors
-    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
-    /// and `querier` is not a registered watcher.
-    pub fn get_alert_owner(
-        env: Env,
-        querier: Address,
-        config_id: u64,
-    ) -> Result<Option<Address>, ContractError> {
-        Self::assert_watcher_if_configured(&env, &querier)?;
-        Ok(env
-            .storage()
-            .persistent()
-            .get::<DataKey, AlertConfig>(&DataKey::Alert(config_id))
-            .map(|cfg| cfg.owner))
-    }
-
     /// Deactivate all alerts owned by `caller` in a single call.
     ///
     /// Iterates the owner's index and sets `active = false` on live alerts.
@@ -2162,6 +2134,11 @@ impl AlertRegistry {
         } else {
             env.storage().persistent().remove(&cursor_key);
         }
+        env.storage().persistent().extend_ttl(
+            &DataKey::OwnerIndex(caller.clone()),
+            DEFAULT_TTL,
+            DEFAULT_TTL,
+        );
         if count > 0 {
             env.events().publish(
                 (symbol_short!("alert"), symbol_short!("bulk_off")),
