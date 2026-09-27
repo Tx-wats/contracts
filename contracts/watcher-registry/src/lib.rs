@@ -1308,6 +1308,9 @@ impl WatcherRegistry {
 mod regression_tests;
 
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env};

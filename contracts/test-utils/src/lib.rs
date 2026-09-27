@@ -82,3 +82,14 @@ pub fn setup_both() -> (
     let watcher_client = WatcherRegistryClient::new(&env, &watcher_id);
     (env, alert_client, watcher_client)
 }
+
+// ── Ledger advancement helpers ────────────────────────────────────────────────
+
+/// Advance the ledger by `n` sequence numbers to simulate ledger progression
+/// and observe TTL expiry behavior. This is essential for testing entry
+/// archival scenarios where alerts, indices, counters, or instance entries
+/// approach or exceed their DEFAULT_TTL.
+pub fn advance_ledger(env: &Env, n: u32) {
+    let current = env.ledger().sequence();
+    env.ledger().set_sequence_number(current + n);
+}
