@@ -52,10 +52,12 @@ describe("WatcherRegistry bindings", () => {
     const client = new Client(testnetConfig);
     // Read-only methods (no auth required)
     expect(typeof client.is_watcher_authorized).toBe("function");
-    expect(typeof client.is_authorized).toBe("function");
     expect(typeof client.get_watchers).toBe("function");
     expect(typeof client.get_admins).toBe("function");
     expect(typeof client.get_admin).toBe("function");
+    expect(typeof client.is_paused).toBe("function");
+    expect(typeof client.get_watcher_count).toBe("function");
+    expect(typeof client.get_timelock_delay).toBe("function");
   });
 
   it("exposes expected write methods on the Client prototype", () => {
@@ -66,6 +68,11 @@ describe("WatcherRegistry bindings", () => {
     expect(typeof client.remove_watcher).toBe("function");
     expect(typeof client.add_admin).toBe("function");
     expect(typeof client.remove_admin).toBe("function");
-    expect(typeof client.transfer_admin).toBe("function");
+    expect(typeof client.pause).toBe("function");
+    expect(typeof client.unpause).toBe("function");
+    expect(typeof client.bump_instance_ttl).toBe("function");
+    expect(typeof client.set_timelock_delay).toBe("function");
+    expect(typeof client.propose_admin_transfer).toBe("function");
+    expect(typeof client.accept_admin_transfer).toBe("function");
   });
 });

@@ -23,7 +23,7 @@ describe("AlertRegistry bindings", () => {
   it("exports network configurations for testnet", () => {
     expect(networks).toBeDefined();
     expect(networks.testnet).toBeDefined();
-    expect(networks.testnet.contractId).toMatch(/^C[A-Z0-9]{55}$/);
+    expect(networks.testnet.contractId).toMatch(/^C[A-Z2-7]{55}$/);
     expect(networks.testnet.networkPassphrase).toBe(
       "Test SDF Network ; September 2015"
     );
