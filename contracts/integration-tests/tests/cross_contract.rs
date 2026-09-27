@@ -659,3 +659,54 @@ fn test_bump_alert_by_third_party() {
         ttl_after
     );
 }
+
+/// When WatcherRegistry is paused, gated reads on AlertRegistry should still work
+/// if they perform cached or read-only lookups. Pausing only affects mutations.
+#[test]
+fn test_watcher_registry_pause_does_not_block_gated_reads() {
+    let fixture = setup_gated();
+    let owner = Address::generate(&fixture.env);
+    let target = Address::generate(&fixture.env);
+
+    fixture.alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&fixture.env, "Alert"),
+        &hash64(&fixture.env),
+        &vec![&fixture.env],
+    );
+
+    // Pause the watcher registry
+    fixture.watcher_client.pause(&fixture.admin);
+
+    // Gated reads should still work: the alert is readable through the gating check
+    let results = fixture.alert_client.get_alerts_for_contract(&fixture.watcher, &target);
+    assert_eq!(results.len(), 1);
+}
+
+/// When AlertRegistry is paused, removing a watcher from WatcherRegistry should
+/// still succeed (mutations in WatcherRegistry are independent). The pause state
+/// of AlertRegistry does not prevent WatcherRegistry mutations.
+#[test]
+fn test_alert_registry_pause_does_not_block_watcher_removal() {
+    let fixture = setup_gated();
+    let owner = Address::generate(&fixture.env);
+    let target = Address::generate(&fixture.env);
+
+    fixture.alert_client.register_alert(
+        &owner,
+        &target,
+        &String::from_str(&fixture.env, "Alert"),
+        &hash64(&fixture.env),
+        &vec![&fixture.env],
+    );
+
+    // Pause the alert registry
+    fixture.alert_client.pause(&fixture.admin);
+
+    // Removing the watcher from WatcherRegistry should still succeed
+    fixture.watcher_client.remove_watcher(&fixture.admin, &fixture.watcher);
+
+    // After removal, watcher is no longer authorized
+    assert!(!fixture.watcher_client.is_watcher_authorized(&fixture.watcher));
+}

@@ -157,19 +157,19 @@ jobs:
 
           // Our curated metadata
           const meta = {
-            name:        "@tx-wat/watcher-registry",
+            name:        "@tx-wats/watcher-registry",
             version:     process.env.RELEASE_TAG.replace(/^v/, ""),
             description: "TypeScript bindings for the stellar-txwatch WatcherRegistry Soroban contract",
             keywords:    ["stellar", "soroban", "smart-contract", "watcher-registry", "txwatch", "blockchain"],
-            author:      "Tx-wat <https://github.com/Tx-wat>",
-            license:     "MIT",
+            author:      "Tx-wats <https://github.com/Tx-wats>",
+            license:     "Apache-2.0",
             repository: {
               type:      "git",
-              url:       "https://github.com/Tx-wat/stellar-txwatch-contracts.git",
+              url:       "https://github.com/Tx-wats/contracts.git",
               directory: "bindings/watcher-registry",
             },
-            homepage: "https://github.com/Tx-wat/stellar-txwatch-contracts#readme",
-            bugs:     { url: "https://github.com/Tx-wat/stellar-txwatch-contracts/issues" },
+            homepage: "https://github.com/Tx-wats/contracts#readme",
+            bugs:     { url: "https://github.com/Tx-wats/contracts/issues" },
           };
 
           const merged = { ...generated, ...meta };

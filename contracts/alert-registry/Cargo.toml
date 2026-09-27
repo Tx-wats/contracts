@@ -5,8 +5,8 @@ edition = "2021"
 rust-version.workspace = true
 description = "Soroban smart contract for managing webhook alert configurations on Stellar"
 license = "Apache-2.0"
-repository = "https://github.com/Tx-wat/contracts"
-homepage = "https://github.com/Tx-wat/contracts"
+repository = "https://github.com/Tx-wats/contracts"
+homepage = "https://github.com/Tx-wats/contracts"
 documentation = "https://docs.rs/alert-registry"
 
 [lib]
