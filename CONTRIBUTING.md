@@ -31,11 +31,24 @@ cargo build --release --target wasm32-unknown-unknown
 
 ## Test
 
+Run tests with the provided script to ensure consistent dependency resolution across your local environment and CI:
+
 ```bash
-cargo test
+./scripts/test.sh
 ```
 
-Tests run natively (no WASM target needed). Each contract has a `#[cfg(test)]` module covering happy paths, unauthorized rejections, and edge cases.
+Alternatively, use `cargo test` directly (with `--workspace --locked` for CI consistency):
+
+```bash
+cargo test --workspace --locked
+```
+
+Tests run natively (no WASM target needed). Each contract has a `#[cfg(test)]` module covering happy paths, unauthorized rejections, and edge cases. The `scripts/test.sh` script passes any additional cargo arguments through, so you can run:
+
+```bash
+./scripts/test.sh --package alert-registry    # Run tests for one contract
+./scripts/test.sh -- --nocapture              # Show output from passing tests
+```
 
 ## Deploy to Testnet
 

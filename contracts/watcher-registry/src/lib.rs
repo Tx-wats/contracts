@@ -1306,6 +1306,9 @@ mod regression_tests;
 mod proptests;
 
 #[cfg(test)]
+mod error_codes;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env};

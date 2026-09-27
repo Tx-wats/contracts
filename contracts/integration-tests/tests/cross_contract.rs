@@ -3,6 +3,7 @@ use soroban_sdk::{testutils::Address as _, vec, Address, FromVal, String, Symbol
 
 // Re-export setup_both as setup so all tests below compile unchanged.
 use test_utils::setup_both as setup;
+use test_utils::setup_gated;
 use test_utils::str;
 use test_utils::{hash64, hash64c};
 
@@ -100,66 +101,45 @@ fn test_removed_watcher_loses_authorization_alert_data_intact() {
 /// When watcher-gating is enabled, a registered watcher can read alert data.
 #[test]
 fn test_watcher_gating_registered_watcher_can_read() {
-    let (env, alert_client, watcher_client) = setup();
+    let fixture = setup_gated();
+    let owner = Address::generate(&fixture.env);
+    let target = Address::generate(&fixture.env);
 
-    let admin = Address::generate(&env);
-    let watcher = Address::generate(&env);
-    let owner = Address::generate(&env);
-    let target = Address::generate(&env);
-
-    // Set up watcher registry
-    watcher_client.initialize(&admin);
-    watcher_client.register_watcher(&admin, &watcher);
-
-    // Initialize alert registry and point it at the watcher registry
-    alert_client.initialize(&admin);
-    let watcher_contract_id = watcher_client.address.clone();
-    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
-
-    alert_client.register_alert(
+    fixture.alert_client.register_alert(
         &owner,
         &target,
-        &String::from_str(&env, "Gated Alert"),
-        &hash64(&env),
-        &vec![&env, String::from_str(&env, "rule:transfer")],
+        &String::from_str(&fixture.env, "Gated Alert"),
+        &hash64(&fixture.env),
+        &vec![&fixture.env, String::from_str(&fixture.env, "rule:transfer")],
     );
 
     // Registered watcher can read
-    let results = alert_client.get_alerts_for_contract(&watcher, &target);
+    let results = fixture.alert_client.get_alerts_for_contract(&fixture.watcher, &target);
     assert_eq!(results.len(), 1);
     assert_eq!(
         results.get(0).unwrap().label,
-        String::from_str(&env, "Gated Alert")
+        String::from_str(&fixture.env, "Gated Alert")
     );
 }
 
 /// When watcher-gating is enabled, an unregistered address is rejected.
 #[test]
 fn test_watcher_gating_unregistered_address_rejected() {
-    let (env, alert_client, watcher_client) = setup();
+    let fixture = setup_gated();
+    let stranger = Address::generate(&fixture.env);
+    let owner = Address::generate(&fixture.env);
+    let target = Address::generate(&fixture.env);
 
-    let admin = Address::generate(&env);
-    let stranger = Address::generate(&env);
-    let owner = Address::generate(&env);
-    let target = Address::generate(&env);
-
-    watcher_client.initialize(&admin);
-    // stranger is NOT registered as a watcher
-
-    alert_client.initialize(&admin);
-    let watcher_contract_id = watcher_client.address.clone();
-    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
-
-    alert_client.register_alert(
+    fixture.alert_client.register_alert(
         &owner,
         &target,
-        &String::from_str(&env, "Alert"),
-        &hash64(&env),
-        &vec![&env],
+        &String::from_str(&fixture.env, "Alert"),
+        &hash64(&fixture.env),
+        &vec![&fixture.env],
     );
 
     assert_eq!(
-        alert_client
+        fixture.alert_client
             .try_get_alerts_for_contract(&stranger, &target)
             .unwrap_err()
             .unwrap(),

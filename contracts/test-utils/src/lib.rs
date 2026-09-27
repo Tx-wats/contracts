@@ -83,6 +83,56 @@ pub fn setup_both() -> (
     (env, alert_client, watcher_client)
 }
 
+/// A fixture for gated integration tests where AlertRegistry is configured with
+/// a WatcherRegistry as its gating mechanism.
+pub struct GatedFixture<'a> {
+    pub env: Env,
+    pub admin: Address,
+    pub watcher: Address,
+    pub alert_client: AlertRegistryClient<'a>,
+    pub watcher_client: WatcherRegistryClient<'a>,
+}
+
+/// Set up both registries with complete gating configuration — suitable for
+/// integration tests that require a watcher-gated AlertRegistry.
+///
+/// Performs the following setup:
+/// 1. Creates both contract instances
+/// 2. Initializes WatcherRegistry with an admin
+/// 3. Registers a watcher in WatcherRegistry
+/// 4. Registers the WatcherRegistry as the gating mechanism in AlertRegistry
+///
+/// Returns a [`GatedFixture`] containing the env, addresses, and both clients.
+pub fn setup_gated() -> GatedFixture<'static> {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let alert_id = env.register(AlertRegistry, ());
+    let watcher_id = env.register(WatcherRegistry, ());
+    let alert_client = AlertRegistryClient::new(&env, &alert_id);
+    let watcher_client = WatcherRegistryClient::new(&env, &watcher_id);
+
+    let admin = Address::generate(&env);
+    let watcher = Address::generate(&env);
+
+    // Initialize WatcherRegistry with the admin
+    watcher_client.initialize(&admin);
+
+    // Register the watcher in WatcherRegistry
+    watcher_client.register_watcher(&admin, &watcher);
+
+    // Set up gating: point AlertRegistry to WatcherRegistry for access control
+    alert_client.set_watcher_registry(&admin, &watcher_id);
+
+    GatedFixture {
+        env,
+        admin,
+        watcher,
+        alert_client,
+        watcher_client,
+    }
+}
+
 // ── Ledger advancement helpers ────────────────────────────────────────────────
 
 /// Advance the ledger by `n` sequence numbers to simulate ledger progression
