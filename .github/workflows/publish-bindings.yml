@@ -225,7 +225,7 @@ jobs:
 
           echo "Waiting for @tx-wat/watcher-registry@${version} to appear on npm..."
           for attempt in $(seq 1 10); do
-            if npm install "@tx-wat/watcher-registry@${version}" "@stellar/stellar-sdk@^12"; then
+            if npm install "@tx-wat/watcher-registry@${version}" "@stellar/stellar-sdk@^17"; then
               installed=1
               break
             fi

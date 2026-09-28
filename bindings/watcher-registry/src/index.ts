@@ -58,6 +58,6 @@ export const networks = {
     // address here once DEPLOYMENTS.md lists it.
     contractId: "",
     networkPassphrase: "Public Global Stellar Network ; September 2015",
-    rpcUrl: "https://mainnet.stellar.validationcloud.io/v1/",
+    rpcUrl: "",
   },
 } as const satisfies Record<NetworkName, NetworkConfig>;
