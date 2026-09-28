@@ -28,16 +28,16 @@
     "txwatch",
     "blockchain"
   ],
-  "author": "Tx-wat <https://github.com/Tx-wat>",
-  "license": "MIT",
+  "author": "Tx-wats <https://github.com/Tx-wats>",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Tx-wat/stellar-txwatch-contracts.git",
+    "url": "https://github.com/Tx-wats/contracts.git",
     "directory": "bindings/watcher-registry"
   },
-  "homepage": "https://github.com/Tx-wat/stellar-txwatch-contracts#readme",
+  "homepage": "https://github.com/Tx-wats/contracts#readme",
   "bugs": {
-    "url": "https://github.com/Tx-wat/stellar-txwatch-contracts/issues"
+    "url": "https://github.com/Tx-wats/contracts/issues"
   },
   "peerDependencies": {
     "@stellar/stellar-sdk": ">=12.0.0"

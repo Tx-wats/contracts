@@ -545,6 +545,16 @@ Callers that need external-account-only or disjoint-role guarantees must enforce
 
 ---
 
+## Pause behavior
+
+The contract can be paused by an admin, which prevents all state-mutating operations (`add_admin`, `remove_admin`, `register_watcher`, `remove_watcher`, `replace_watcher`, `clear_all_watchers`, `accept_admin_transfer`, etc.). Pausing only affects mutations — read-only queries like `is_watcher_authorized`, `get_watchers`, and `get_admins` continue to work.
+
+When `AlertRegistry` has gating enabled (configured to use `WatcherRegistry` as its authorization source), pausing `WatcherRegistry` does **not** prevent gated reads from `AlertRegistry`. The gating check calls the read-only `is_watcher_authorized` method, which is unaffected by the pause flag. This ensures that legitimate watchers can continue querying alert data even when the watcher registry is paused, since the pause only blocks mutations, not authorization checks.
+
+Conversely, pausing `AlertRegistry` does not prevent mutations in `WatcherRegistry`. The two contracts are independent — pausing one does not affect the other.
+
+---
+
 ## Consumers
 
 ### `AlertRegistry`
