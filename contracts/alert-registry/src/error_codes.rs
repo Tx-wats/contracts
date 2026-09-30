@@ -32,9 +32,12 @@ mod tests {
         assert_eq!(ContractError::ContractAlertLimitExceeded as u32, 14);
         assert_eq!(ContractError::DuplicateRule as u32, 15);
         assert_eq!(ContractError::NoPendingTransfer as u32, 16);
+        assert_eq!(ContractError::InvalidWatcherRegistry as u32, 17);
+        assert_eq!(ContractError::Paused as u32, 18);
         assert_eq!(ContractError::TransferExpired as u32, 19);
         assert_eq!(ContractError::InvalidTransferRecipient as u32, 20);
         assert_eq!(ContractError::AlertSuspended as u32, 21);
         assert_eq!(ContractError::EmptyLabel as u32, 22);
+        assert_eq!(ContractError::NoopWebhookRotation as u32, 23);
     }
 }

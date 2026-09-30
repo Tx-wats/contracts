@@ -839,18 +839,22 @@ This includes admin moderation (`deactivate_alert_by_admin`, `unlock_alert_by_ad
 | `NotAWatcher` | 5 | Watcher-gating is enabled and `querier` is not a registered watcher |
 | `InvalidWebhookHash` | 6 | No longer returned: webhook hashes are `BytesN<32>`, so a wrong length cannot be constructed. Kept so the code is never reused. |
 | `LabelTooLong` | 7 | `label` exceeds 128 bytes |
-| `EmptyLabel` | 22 | `label` is empty |
 | `TooManyRules` | 8 | `rules` exceeds the 50-rule maximum |
 | `InvalidRuleDescriptor` | 9 | A rule is not a recognised descriptor (`rule:transfer`, `rule:mint`) |
 | `OwnerAlertLimitExceeded` | 10 | Owner is at the configured per-owner active alert limit |
 | `DuplicateAlertId` | 11 | Internal invariant violation — an ID was already present in an index |
 | `NoPendingWebhook` | 12 | `confirm_webhook` called but no rotation is in progress |
-| `InvalidWatcherRegistry` | 13 | `set_watcher_registry` given an address that doesn't implement the `WatcherRegistry` interface |
+| `GlobalAlertLimitExceeded` | 13 | `register_alert` called after the global alert-count ceiling has been reached |
+| `ContractAlertLimitExceeded` | 14 | `register_alert` called when the target contract is already at its per-contract alert limit |
 | `DuplicateRule` | 15 | The same rule descriptor appears more than once in `rules` |
-| `NoPendingTransfer` | 18 | `accept_alert_transfer`, `reject_alert_transfer` or `cancel_alert_transfer` called with no transfer pending |
+| `NoPendingTransfer` | 16 | `accept_alert_transfer`, `reject_alert_transfer`, `cancel_alert_transfer`, `accept_admin_transfer`, or `cancel_admin_transfer` called with no transfer pending |
+| `InvalidWatcherRegistry` | 17 | `set_watcher_registry` given an address that doesn't implement the `WatcherRegistry` interface |
+| `Paused` | 18 | A state-mutating call was made while the contract is paused |
 | `TransferExpired` | 19 | `accept_alert_transfer` called after the proposal's `expires_at_ledger` |
 | `InvalidTransferRecipient` | 20 | `propose_alert_transfer` named the current owner as the recipient |
 | `AlertSuspended` | 21 | `update_alert` tried to reactivate an alert suspended by `deactivate_alert_by_admin` |
+| `EmptyLabel` | 22 | `label` is empty |
+| `NoopWebhookRotation` | 23 | `propose_webhook` called with a hash that is already live or already pending |
 
 ---
 
