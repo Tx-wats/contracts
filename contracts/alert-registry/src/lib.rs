@@ -11,8 +11,6 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec,
-    Address, Env, String, Vec,
     contract, contracterror, contractimpl, contractmeta, contracttype, panic_with_error,
     symbol_short, vec, Address, BytesN, Env, String, Vec,
 };
@@ -170,8 +168,6 @@ pub enum ContractError {
     InvalidWebhookHash = 6,
     /// The label exceeds 128 bytes.
     LabelTooLong = 7,
-    /// The alert label is empty.
-    EmptyLabel = 22,
     /// The rule list exceeds the 50-rule maximum.
     TooManyRules = 8,
     /// A rule is not a recognised rule descriptor.
@@ -191,19 +187,21 @@ pub enum ContractError {
     /// configured per-contract alert limit (set via
     /// `set_per_contract_alert_limit`).
     ContractAlertLimitExceeded = 14,
+    /// Returned by `validate_rules` when the same rule descriptor appears more
+    /// than once in an alert's rule list.
+    DuplicateRule = 15,
+    /// Returned by `accept_alert_transfer`, `reject_alert_transfer`,
+    /// `cancel_alert_transfer`, `accept_admin_transfer`, or
+    /// `cancel_admin_transfer` when no transfer is currently pending, or when
+    /// the accepting address does not match the proposed address.
+    NoPendingTransfer = 16,
     /// Returned by `set_watcher_registry` when the given address does not
     /// respond to the `WatcherRegistry` interface (probed at configuration
     /// time), so gating would otherwise fail later inside
     /// `assert_watcher_if_configured` at query time.
-    InvalidWatcherRegistry = 13,
+    InvalidWatcherRegistry = 17,
     /// Returned when a state-mutating call is made while the contract is paused.
-    Paused = 13,
-    /// Returned by `validate_rules` when the same rule descriptor appears more
-    /// than once in an alert's rule list.
-    DuplicateRule = 15,
-    /// Returned by `accept_alert_transfer`, `reject_alert_transfer` and
-    /// `cancel_alert_transfer` when the alert has no pending transfer.
-    NoPendingTransfer = 18,
+    Paused = 18,
     /// Returned by `accept_alert_transfer` when the pending transfer is past
     /// its expiry ledger.
     TransferExpired = 19,
@@ -212,13 +210,11 @@ pub enum ContractError {
     /// Returned by `update_alert` when the owner tries to reactivate an alert
     /// that an admin suspended with `deactivate_alert_by_admin`.
     AlertSuspended = 21,
-    /// Returned by `accept_admin_transfer` or `cancel_admin_transfer` when no
-    /// admin transfer is currently pending, or when the accepting address does
-    /// not match the proposed address.
-    NoPendingTransfer = 16,
+    /// The alert label is empty.
+    EmptyLabel = 22,
     /// Returned by `propose_webhook` when the proposed hash is already live
     /// or already pending.
-    NoopWebhookRotation = 22,
+    NoopWebhookRotation = 23,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
