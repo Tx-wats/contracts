@@ -328,6 +328,11 @@ pub enum ContractError {
     /// Returned by `confirm_webhook` when the pending webhook rotation was
     /// proposed more than [`WEBHOOK_PROPOSAL_EXPIRY_LEDGERS`] ledgers ago.
     WebhookProposalExpired = 29,
+    /// Returned by an optimistic-concurrency mutator (e.g.
+    /// `update_alert_checked`, `set_alert_active_checked`) when the caller's
+    /// `expected_revision` does not match the alert's current `revision`
+    /// (#401), meaning another caller mutated it first.
+    RevisionMismatch = 30,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -369,6 +374,17 @@ pub struct AlertConfig {
     /// `true` only on a removal tombstone returned by the sync queries.
     /// A deactivated (paused) alert has `active == false` and `removed == false`.
     pub removed: bool,
+    /// Monotonically increasing revision counter, starting at `0` when the
+    /// alert is registered and incremented by one on every content mutation
+    /// (#401).
+    ///
+    /// Unlike `updated_ledger`, which is not unique within a ledger, this is
+    /// strictly increasing per-alert, so it is suitable as an optimistic
+    /// concurrency token: a caller that read the config at revision `N` can
+    /// pass `expected_revision: Some(N)` to a `*_checked` mutator and get
+    /// [`ContractError::RevisionMismatch`] instead of silently clobbering a
+    /// concurrent edit (e.g. a dashboard and a CLI editing the same alert).
+    pub revision: u32,
 }
 
 /// An ownership transfer proposed by an alert's owner and awaiting the
@@ -1384,6 +1400,7 @@ impl AlertRegistry {
             updated_ledger: env.ledger().sequence(),
             active: true,
             removed: false,
+            revision: 0,
         };
 
         Self::push_owner_index(&env, &owner, id)?;
@@ -1466,6 +1483,7 @@ impl AlertRegistry {
         config.active = active;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         // Keep the O(1) active counter in step with the flag (#385).
         if was_active != active {
@@ -1490,6 +1508,40 @@ impl AlertRegistry {
             (config_id, config.owner.clone(), active),
         );
         Ok(())
+    }
+
+    /// Optimistic-concurrency variant of [`AlertRegistry::update_alert`] (#401).
+    ///
+    /// Two clients editing the same alert (e.g. a dashboard and a CLI) can
+    /// silently overwrite each other's change through `update_alert`, since
+    /// `updated_ledger` is not unique within a ledger and neither client finds
+    /// out. This checks the alert's current `revision` against
+    /// `expected_revision` before applying the update, so a stale write is
+    /// rejected instead of silently applied.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must also be
+    /// the original owner of the alert.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::RevisionMismatch`] if `expected_revision` is
+    /// `Some` and does not equal the alert's current `revision`. Otherwise
+    /// returns the same errors as [`AlertRegistry::update_alert`].
+    pub fn update_alert_checked(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        rules: Vec<String>,
+        active: bool,
+        expected_revision: Option<u32>,
+    ) -> Result<(), ContractError> {
+        if let Some(expected) = expected_revision {
+            let config = Self::load_alert(&env, config_id)?;
+            if config.revision != expected {
+                return Err(ContractError::RevisionMismatch);
+            }
+        }
+        Self::update_alert(env, caller, config_id, rules, active)
     }
 
     /// Update only the active status of an existing alert.
@@ -1550,6 +1602,7 @@ impl AlertRegistry {
         config.active = active;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         // Keep the O(1) active counter in step with the flag (#385). Without
         // this, `get_active_alert_count` would have to rescan the owner index.
@@ -1579,6 +1632,38 @@ impl AlertRegistry {
             (config_id, config.owner, active),
         );
         Ok(())
+    }
+
+    /// Optimistic-concurrency variant of [`AlertRegistry::set_alert_active`]
+    /// (#401).
+    ///
+    /// Checks the alert's current `revision` against `expected_revision`
+    /// before applying the toggle, so two callers racing to pause/resume the
+    /// same alert can tell whether their read was stale instead of one
+    /// silently winning.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must also
+    /// own the alert.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::RevisionMismatch`] if `expected_revision` is
+    /// `Some` and does not equal the alert's current `revision`. Otherwise
+    /// returns the same errors as [`AlertRegistry::set_alert_active`].
+    pub fn set_alert_active_checked(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        active: bool,
+        expected_revision: Option<u32>,
+    ) -> Result<(), ContractError> {
+        if let Some(expected) = expected_revision {
+            let config = Self::load_alert(&env, config_id)?;
+            if config.revision != expected {
+                return Err(ContractError::RevisionMismatch);
+            }
+        }
+        Self::set_alert_active(env, caller, config_id, active)
     }
 
     /// Update the webhook hash for an existing alert.
@@ -1619,6 +1704,7 @@ impl AlertRegistry {
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         Self::persist_alert(&env, config_id, &config);
 
@@ -1741,6 +1827,7 @@ impl AlertRegistry {
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         Self::persist_alert(&env, config_id, &config);
 
@@ -1792,6 +1879,7 @@ impl AlertRegistry {
         config.pending_webhook_hash = None;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         Self::persist_alert(&env, config_id, &config);
 
@@ -1930,6 +2018,7 @@ impl AlertRegistry {
         config.label = label;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         Self::persist_alert(&env, config_id, &config);
 
@@ -2101,6 +2190,7 @@ impl AlertRegistry {
             config.active = false;
             config.updated_at = env.ledger().timestamp();
             config.updated_ledger = env.ledger().sequence();
+            config.revision = config.revision.saturating_add(1);
 
             env.storage().persistent().set(&key, &true);
             Self::persist_alert(&env, config_id, &config);
@@ -2108,6 +2198,7 @@ impl AlertRegistry {
         config.active = false;
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         if was_active {
             Self::adjust_owner_active_count(&env, &config.owner, -1);
@@ -2291,6 +2382,7 @@ impl AlertRegistry {
         config.owner = new_owner.clone();
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         Self::clear_pending_transfer(&env, config_id);
         Self::remove_from_owner_index(&env, &old_owner, config_id);
@@ -2904,6 +2996,7 @@ impl AlertRegistry {
                         cfg.updated_at = env.ledger().timestamp();
                         Self::persist_alert(&env, id, &cfg);
                         cfg.updated_ledger = env.ledger().sequence();
+                        cfg.revision = cfg.revision.saturating_add(1);
                         env.storage().persistent().set(&DataKey::Alert(id), &cfg);
                         env.storage().persistent().extend_ttl(
                             &DataKey::Alert(id),
@@ -3010,6 +3103,7 @@ impl AlertRegistry {
         config.target_contract = new_target.clone();
         config.updated_at = env.ledger().timestamp();
         config.updated_ledger = env.ledger().sequence();
+        config.revision = config.revision.saturating_add(1);
 
         // Migrate the contract index before persisting, so the refresh in
         // persist_alert extends the new target's index.

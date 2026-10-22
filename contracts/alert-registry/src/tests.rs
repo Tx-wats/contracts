@@ -94,6 +94,108 @@ fn test_update_alert() {
     assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:mint"));
 }
 
+// 2b. revision counter (#401) — starts at 0, increments on each content
+// mutation, and gates the *_checked mutators.
+#[test]
+fn test_alert_revision_counter() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let cfg0 = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg0.revision, 0);
+
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &true);
+    let cfg1 = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg1.revision, 1);
+
+    client.set_alert_active(&owner, &id, &false);
+    let cfg2 = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg2.revision, 2);
+}
+
+// 2c. update_alert_checked / set_alert_active_checked (#401) — a stale
+// expected_revision is rejected with RevisionMismatch, and a correct one
+// both succeeds and advances the revision like the unchecked mutators.
+#[test]
+fn test_checked_mutators_enforce_revision() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    // Correct expected_revision succeeds and advances the counter.
+    assert_eq!(
+        client
+            .try_update_alert_checked(
+                &owner,
+                &id,
+                &vec![&env, str(&env, "rule:mint")],
+                &true,
+                &Some(0u32),
+            )
+            .unwrap(),
+        Ok(())
+    );
+    let cfg = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg.revision, 1);
+
+    // Stale expected_revision (still 0, but the alert is now at revision 1)
+    // is rejected without mutating anything.
+    assert_eq!(
+        client
+            .try_update_alert_checked(
+                &owner,
+                &id,
+                &vec![&env, str(&env, "rule:transfer")],
+                &false,
+                &Some(0u32),
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::RevisionMismatch
+    );
+    let cfg_after_conflict = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg_after_conflict.revision, 1);
+    assert!(cfg_after_conflict.active);
+
+    // set_alert_active_checked with the correct revision succeeds.
+    assert_eq!(
+        client
+            .try_set_alert_active_checked(&owner, &id, &false, &Some(1u32))
+            .unwrap(),
+        Ok(())
+    );
+    let cfg_final = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg_final.revision, 2);
+    assert!(!cfg_final.active);
+
+    // expected_revision: None skips the check entirely (back-compat path).
+    assert_eq!(
+        client
+            .try_update_alert_checked(&owner, &id, &vec![&env, str(&env, "rule:mint")], &true, &None)
+            .unwrap(),
+        Ok(())
+    );
+    let cfg_unchecked = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg_unchecked.revision, 3);
+}
+
 // update_alert emits an alert.update event
 #[test]
 fn test_update_alert_emits_event() {
