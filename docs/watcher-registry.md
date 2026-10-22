@@ -187,6 +187,18 @@ Hands the admin role to a new address in two steps, replacing the **entire** adm
 - `Unauthorized` if `admin` is not in the admin set.
 - `NoPendingTransfer` if no transfer is pending.
 
+#### `get_pending_admin_transfer`
+
+Returns the address named in the current pending admin transfer, if any, so
+co-admins can check for an in-flight takeover before deciding whether to
+call `cancel_admin_transfer`.
+
+**Parameters:** none
+
+**Returns:** `Option<Address>` — `None` if no transfer is pending.
+
+**Errors:** none (read-only call; never panics on uninitialized storage).
+
 #### Direct `transfer_admin`
 
 `transfer_admin(admin, new_admin)` is the single-step form: it replaces the admin set with `[new_admin]` immediately, skipping the acceptance step, so prefer the two-step flow above. It is timelock-gated: while a timelock delay is configured it returns `TimelockRequired`, and the transfer must be queued as `AdminAction::TransferAdmin` through `propose_admin_action` / `execute_admin_action`. A raw client call panics with `Error(Contract, #N)`; `try_transfer_admin` returns `Ok(Err(ContractError::…))`.

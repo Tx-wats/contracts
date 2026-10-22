@@ -450,6 +450,25 @@ impl WatcherRegistry {
         Ok(())
     }
 
+    /// Get the address named in a pending admin transfer proposed via
+    /// [`WatcherRegistry::propose_admin_transfer`], if any.
+    ///
+    /// Lets co-admins check for an in-flight takeover before deciding
+    /// whether to call [`WatcherRegistry::cancel_admin_transfer`], without
+    /// having to read raw contract storage.
+    ///
+    /// Returns `None` once the proposal has been accepted or cancelled.
+    /// This does not check expiry — a proposal past
+    /// [`ADMIN_TRANSFER_EXPIRY_LEDGERS`] is still returned until it is
+    /// accepted (which will fail) or explicitly cancelled.
+    #[must_use]
+    pub fn get_pending_admin_transfer(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get::<DataKey, (Address, u32)>(&DataKey::PendingAdminTransfer)
+            .map(|(pending, _expires_at_ledger)| pending)
+    }
+
     /// Register an authorized watcher node (any admin may call this).
     ///
     /// Idempotent — registering an already-authorized watcher is a no-op.
@@ -1897,6 +1916,27 @@ mod tests {
                 .unwrap(),
             ContractError::NoPendingTransfer
         );
+    }
+
+    // get_pending_admin_transfer reflects proposal lifecycle: None before
+    // any proposal, Some(new_admin) while pending, None again after it is
+    // accepted or cancelled.
+    #[test]
+    fn test_get_pending_admin_transfer() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_pending_admin_transfer(), None);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin_transfer(), Some(new_admin.clone()));
+
+        client.cancel_admin_transfer(&admin);
+        assert_eq!(client.get_pending_admin_transfer(), None);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.accept_admin_transfer(&new_admin);
+        assert_eq!(client.get_pending_admin_transfer(), None);
     }
 
     // 15g. non-admin cannot propose or cancel an admin transfer
