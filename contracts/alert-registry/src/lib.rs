@@ -2717,6 +2717,50 @@ impl AlertRegistry {
         Ok(Self::configs_paginated(&env, &ids, offset, limit))
     }
 
+    /// Get a page of alert configs owned by `owner` that watch `target_contract`
+    /// (#399).
+    ///
+    /// Without this, a dashboard showing one owner's alerts on one target has
+    /// to fetch the owner's *entire* alert list (or the target's entire
+    /// watcher list) via [`AlertRegistry::get_alerts_by_owner_paginated`] /
+    /// [`AlertRegistry::get_contract_alerts_paginated`] and filter client-side,
+    /// which does not scale as either index grows.
+    ///
+    /// This walks the `[offset, offset + limit)` window of the **owner**
+    /// index (`owner` typically has far fewer alerts than a contract has
+    /// watchers) and keeps only the entries whose `target_contract` matches,
+    /// so it is the intersection of [`DataKey::OwnerIndex`] and
+    /// [`DataKey::ContractIndex`] without ever materializing the contract
+    /// index. `limit` is clamped to [`MAX_PAGE_SIZE`]; `offset`/`limit` count
+    /// owner-index slots rather than matches, mirroring
+    /// [`AlertRegistry::get_active_contract_alerts_paged`].
+    ///
+    /// If a `WatcherRegistry` is configured, `querier` must be a registered
+    /// watcher or the call returns [`ContractError::NotAWatcher`].
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
+    /// and `querier` is not a registered watcher.
+    pub fn get_alerts_by_owner_for_contract(
+        env: Env,
+        querier: Address,
+        owner: Address,
+        target_contract: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<AlertConfig>, ContractError> {
+        Self::assert_watcher_if_configured(&env, &querier)?;
+        let ids = Self::owner_index(&env, &owner);
+        let page = Self::configs_paginated(&env, &ids, offset, limit);
+        let mut out: Vec<AlertConfig> = vec![&env];
+        for cfg in page.iter() {
+            if cfg.target_contract == target_contract {
+                out.push_back(cfg);
+            }
+        }
+        Ok(out)
+    }
+
     /// Retrieve a single alert config by its ID.
     ///
     /// Returns `None` if the alert does not exist or has expired.

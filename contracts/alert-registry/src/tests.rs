@@ -5271,6 +5271,61 @@ fn test_get_alerts_by_owner_paginated() {
     assert_eq!(empty.len(), 0);
 }
 
+// 18c. get_alerts_by_owner_for_contract (#399) — intersection of the owner
+// and contract indexes, paginated over the owner index.
+#[test]
+fn test_get_alerts_by_owner_for_contract() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target_a = Address::generate(&env);
+    let target_b = Address::generate(&env);
+
+    // Three alerts on target_a, two on target_b, all owned by `owner`.
+    for label in ["A1", "A2", "A3"] {
+        client.register_alert(
+            &owner,
+            &target_a,
+            &str(&env, label),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+    for label in ["B1", "B2"] {
+        client.register_alert(
+            &owner,
+            &target_b,
+            &str(&env, label),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    // A page wide enough to cover the whole owner index returns only the
+    // alerts watching target_a.
+    let page = client.get_alerts_by_owner_for_contract(&owner, &owner, &target_a, &0u32, &10u32);
+    assert_eq!(page.len(), 3);
+    for cfg in page.iter() {
+        assert_eq!(cfg.target_contract, target_a);
+    }
+
+    // Same for target_b.
+    let page_b = client.get_alerts_by_owner_for_contract(&owner, &owner, &target_b, &0u32, &10u32);
+    assert_eq!(page_b.len(), 2);
+
+    // A narrower page still only returns matches within that owner-index
+    // window; it is legal for it to come back shorter than `limit`.
+    let narrow = client.get_alerts_by_owner_for_contract(&owner, &owner, &target_a, &0u32, &2u32);
+    assert!(narrow.len() <= 2);
+    for cfg in narrow.iter() {
+        assert_eq!(cfg.target_contract, target_a);
+    }
+
+    // A different owner has no alerts at all, so every page is empty.
+    let other_owner = Address::generate(&env);
+    let none = client.get_alerts_by_owner_for_contract(&owner, &other_owner, &target_a, &0u32, &10u32);
+    assert_eq!(none.len(), 0);
+}
+
 // 19. get_contract_alerts_paginated — basic pagination
 #[test]
 fn test_get_contract_alerts_paginated() {
