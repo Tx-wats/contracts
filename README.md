@@ -114,13 +114,10 @@ Below is a consolidated cheatsheet with copy-pasteable `stellar contract invoke`
 **Admin & Configuration:**
 
 ```bash
-# Initialize contract admin (one-time)
-stellar contract invoke \
-  --id <ALERT_REGISTRY_CONTRACT_ID> \
-  --source <ADMIN_IDENTITY> \
-  --network testnet \
-  -- initialize \
-  --admin <ADMIN_ADDRESS>
+# `initialize` is deprecated (removal in v0.3.0) and NOT a getting-started
+# step: contracts deployed with `__constructor` are already initialized at
+# deploy time and this call would only return `AlreadyInitialized`. It is
+# kept solely for pre-`__constructor` deployments.
 
 # Transfer admin role (AlertRegistry has a single admin; takes effect immediately)
 stellar contract invoke \
@@ -422,13 +419,10 @@ stellar contract invoke \
 **Admin & Governance:**
 
 ```bash
-# Initialize registry with initial admin (one-time)
-stellar contract invoke \
-  --id <WATCHER_REGISTRY_CONTRACT_ID> \
-  --source <ADMIN_IDENTITY> \
-  --network testnet \
-  -- initialize \
-  --admin <ADMIN_ADDRESS>
+# `initialize` is deprecated (removal in v0.3.0) and NOT a getting-started
+# step: contracts deployed with `__constructor` are already initialized at
+# deploy time and this call would only return `AlreadyInitialized`. It is
+# kept solely for pre-`__constructor` deployments.
 
 # Add a co-admin
 stellar contract invoke \
@@ -612,24 +606,10 @@ import {
 const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
 const contract = new Contract("<WATCHER_REGISTRY_CONTRACT_ID>");
 
-// Initialize the registry (one-time, admin only)
-const account = await server.getAccount(adminKeypair.publicKey());
-const initTx = new TransactionBuilder(account, {
-  fee: BASE_FEE,
-  networkPassphrase: Networks.TESTNET,
-})
-  .addOperation(
-    contract.call(
-      "initialize",
-      new Address(adminKeypair.publicKey()).toScVal(), // admin
-    )
-  )
-  .setTimeout(30)
-  .build();
-
-const preparedInit = await server.prepareTransaction(initTx);
-preparedInit.sign(adminKeypair);
-await server.sendTransaction(preparedInit);
+// The registry is already initialized at deploy time via `__constructor`
+// (see the deploy script above). `initialize` is a deprecated,
+// backwards-compatible entry point for pre-`__constructor` deployments
+// only — new integrations should not call it.
 
 // Register a watcher node (admin only)
 const account2 = await server.getAccount(adminKeypair.publicKey());

@@ -227,7 +227,7 @@ Atomic constructor executed during deployment via `stellar contract deploy -- --
 ---
 ### `initialize`
 
-Initializes an optional admin for the contract. Retained for backwards compatibility. If the contract was initialized at deployment via `__constructor`, calling `initialize` returns `ContractError::AlreadyInitialized`.
+*(Deprecated as of v0.2.0; scheduled for removal in v0.3.0.)* Initializes an optional admin for the contract. Retained only for contracts deployed before `__constructor` existed. Every contract deployed with `__constructor` is already initialized at deploy time, so on such deployments this call can only ever return `ContractError::AlreadyInitialized`. New deployments should not call this and should not list it as a "getting started" step.
 
 **Parameters**
 

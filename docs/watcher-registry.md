@@ -48,7 +48,7 @@ Atomic constructor executed during deployment via `stellar contract deploy -- --
 
 ### `initialize`
 
-Initializes the registry with a single bootstrap admin. Retained for backwards compatibility. If the contract was initialized at deployment via `__constructor`, calling `initialize` returns `ContractError::AlreadyInitialized`.
+*(Deprecated as of v0.2.0; scheduled for removal in v0.3.0.)* Initializes the registry with a single bootstrap admin. Retained only for contracts deployed before `__constructor` existed. Every contract deployed with `__constructor` is already initialized at deploy time, so on such deployments this call can only ever return `ContractError::AlreadyInitialized`. New deployments should not call this and should not list it as a "getting started" step — use `__constructor` at deploy time instead (see above).
 
 **Requires auth:** `admin`
 

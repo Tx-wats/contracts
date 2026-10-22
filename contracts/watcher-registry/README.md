@@ -52,10 +52,10 @@ bash ../../scripts/deploy.sh --network testnet
 ## Invoke via Stellar CLI
 
 ```bash
-# Initialize
-stellar contract invoke \
-  --id <CONTRACT_ID> --source <ADMIN_IDENTITY> --network testnet \
-  -- initialize --admin <ADMIN_ADDRESS>
+# The contract is already initialized at deploy time via `__constructor`
+# (see `deploy.sh` above). `initialize` is a deprecated, backwards-compatible
+# entry point for pre-`__constructor` deployments only — new deployments
+# should not call it; it would just return `AlreadyInitialized`.
 
 # Register a watcher
 stellar contract invoke \
