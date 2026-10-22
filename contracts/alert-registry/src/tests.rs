@@ -158,6 +158,44 @@ fn test_update_unauthorized() {
     );
 }
 
+// alert.register carries EVENT_SCHEMA_VERSION as its first data element
+// (#400) so a long-lived indexer can tell which payload shape it is looking
+// at instead of guessing from length, across future field additions such as
+// #402.
+#[test]
+fn test_register_alert_event_carries_schema_version() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert1"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("register")
+        })
+        .expect("alert.register event must be emitted");
+    let (_, _, data) = event;
+    let (version, _id, emitted_owner, emitted_target): (u32, u64, Address, Address) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_owner, owner);
+    assert_eq!(emitted_target, target);
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #9)")]
 fn test_register_alert_rejects_invalid_rules() {

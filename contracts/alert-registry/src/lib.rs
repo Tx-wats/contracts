@@ -90,6 +90,15 @@ pub const INSTANCE_BUMP_AMOUNT: u32 = 535_680;
 /// Maximum number of IDs scanned by a single paginated query.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
+/// Version marker carried by versioned event payloads (#400).
+///
+/// Bumped whenever a versioned event's data shape changes, so a long-lived
+/// indexer can decode old and new events with the same code by switching on
+/// this value instead of guessing the shape from the payload length. See
+/// `docs/events.md` for the versioning policy and which events currently
+/// carry this marker.
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
+
 /// Recognized rule descriptors accepted by [`AlertRegistry::validate_rule`].
 pub const VALID_RULE_DESCRIPTORS: [&str; 5] = [
     "rule:transfer",
@@ -1386,7 +1395,7 @@ impl AlertRegistry {
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("register")),
-            (id, owner, target_contract),
+            (EVENT_SCHEMA_VERSION, id, owner, target_contract),
         );
 
         Ok(id)
