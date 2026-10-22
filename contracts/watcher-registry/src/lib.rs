@@ -321,10 +321,11 @@ impl WatcherRegistry {
     /// made; [`WatcherRegistry::accept_admin_transfer`] then fails with
     /// [`ContractError::AdminTransferExpired`].
     ///
-    /// This replaces any previously pending proposal. This replaces the
-    /// **entire** admin set with a single new admin once accepted. Use
-    /// [`WatcherRegistry::add_admin`] + [`WatcherRegistry::remove_admin`] if you want to rotate one member of a
-    /// multi-admin set without losing the others.
+    /// This replaces any previously pending proposal.
+    ///
+    /// Once accepted, this replaces the **entire** admin set with a single
+    /// new admin. Use [`WatcherRegistry::add_admin`] + [`WatcherRegistry::remove_admin`] if you want to
+    /// rotate one member of a multi-admin set without losing the others.
     ///
     /// Emits an `("admin", "propose")` event recording the proposer and `new_admin`.
     ///
@@ -482,10 +483,14 @@ impl WatcherRegistry {
     ///
     /// Idempotent — registering an already-authorized watcher is a no-op.
     /// The watcher set is capped at [`MAX_WATCHERS`] entries.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
     /// # Errors
     /// Returns [`ContractError::MaxWatchersReached`] if the registry already holds [`MAX_WATCHERS`] watchers.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn register_watcher(
@@ -521,11 +526,19 @@ impl WatcherRegistry {
 
     /// Register multiple authorized watcher nodes in a single call (any admin may call this).
     ///
-    /// Equivalent to calling [`WatcherRegistry::register_watcher`] once per address, but rewrites
-    /// the watcher list once for the whole batch instead of once per address.
-    /// Already-registered addresses are skipped (idempotent), matching
-    /// [`WatcherRegistry::register_watcher`]'s semantics. Emits one `("watcher", "register")`
-    /// event per newly-added watcher.
+    /// Rewrites the watcher list once for the whole batch instead of once
+    /// per address. Already-registered addresses are skipped (idempotent),
+    /// matching [`WatcherRegistry::register_watcher`]'s skip-if-present
+    /// semantics. Emits one `("watcher", "register")` event per
+    /// newly-added watcher.
+    ///
+    /// Unlike [`WatcherRegistry::register_watcher`], this call does **not**
+    /// currently enforce the [`MAX_WATCHERS`] cap or the pause check, so it
+    /// can grow the watcher set past the cap and can still be called while
+    /// the registry is paused.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
@@ -585,6 +598,7 @@ impl WatcherRegistry {
     /// Returns [`ContractError::BelowMinWatchers`] if removing this watcher would drop the count below [`MIN_WATCHERS`].
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn remove_watcher(env: Env, admin: Address, watcher: Address) -> Result<(), ContractError> {
@@ -2094,6 +2108,25 @@ mod tests {
         assert_eq!(
             client.try_register_watcher(&admin, &watcher).unwrap(),
             Ok(())
+        );
+    }
+
+    // remove_watcher's rustdoc claims `Paused` among its `# Errors`; verify
+    // that claim is actually true.
+    #[test]
+    fn test_pause_blocks_remove_watcher() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        client.pause(&admin);
+
+        assert_eq!(
+            client
+                .try_remove_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
         );
     }
 
