@@ -180,6 +180,18 @@ pub enum DataKey {
     /// Ledger sequence at which the alert's pending webhook rotation was
     /// proposed; used to expire stale proposals in `confirm_webhook`.
     WebhookProposalLedger(u64),
+    /// Owner-defined short tags attached to an alert (e.g. `prod`, `treasury`),
+    /// stored separately from [`AlertConfig`] so the config's encoding stays
+    /// stable. Set via [`AlertRegistry::set_alert_tags`]. Absent means no tags
+    /// have ever been set for the alert.
+    AlertTags(u64),
+    /// Ledger sequence until which an alert is snoozed, keyed by alert ID. Set
+    /// via [`AlertRegistry::snooze_alert`]. While `env.ledger().sequence()` is
+    /// below this value, the active-filtered getters treat the alert as
+    /// inactive even if its stored `active` flag is `true`. A separate key
+    /// rather than an [`AlertConfig`] field, so stored configs keep their
+    /// encoding.
+    SnoozeUntil(u64),
 }
 
 /// Keys of the entries in the contract's **instance** storage that are stored
@@ -227,7 +239,26 @@ pub mod instance_key {
     /// `pause` but never `unpause` or any other admin function. See
     /// [`crate::AlertRegistry::set_guardian`].
     pub const GUARDIAN: Symbol = symbol_short!("GUARDIAN");
+    /// `u32` storage schema version, set by [`crate::AlertRegistry::__constructor`]
+    /// / [`crate::AlertRegistry::initialize`] and advanced only by
+    /// [`crate::AlertRegistry::migrate`]. See `docs/upgrade-guide.md`.
+    pub const SCHEMAV: Symbol = symbol_short!("SCHEMAV");
 }
+
+/// Current storage schema version written by a fresh deployment.
+///
+/// Bumped only via [`AlertRegistry::migrate`]; see `docs/upgrade-guide.md`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum number of owner-defined tags stored per alert (#395).
+pub const MAX_TAGS_PER_ALERT: u32 = 8;
+
+/// Maximum byte length of a single alert tag (#395).
+pub const MAX_TAG_LEN: u32 = 32;
+
+/// Maximum number of owner-index entries examined by one
+/// [`AlertRegistry::remove_all_alerts`] call (#398).
+pub const MAX_REMOVALS_PER_CALL: u32 = 50;
 
 /// Errors returned by `AlertRegistry` entry points.
 #[contracterror]
@@ -319,6 +350,17 @@ pub enum ContractError {
     /// Returned by `confirm_webhook` when the pending webhook rotation was
     /// proposed more than [`WEBHOOK_PROPOSAL_EXPIRY_LEDGERS`] ledgers ago.
     WebhookProposalExpired = 29,
+    /// Returned by `set_alert_tags` when more than [`MAX_TAGS_PER_ALERT`] tags
+    /// are supplied.
+    TooManyTags = 30,
+    /// Returned by `set_alert_tags` when a tag is empty or exceeds
+    /// [`MAX_TAG_LEN`] bytes.
+    InvalidTag = 31,
+    /// Returned by `migrate` when `from` does not match the schema version
+    /// currently stored in instance storage.
+    SchemaVersionMismatch = 32,
+    /// Returned by `migrate` when `to` is not strictly greater than `from`.
+    InvalidSchemaVersion = 33,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -486,6 +528,9 @@ impl AlertRegistry {
     /// Running atomically with deployment prevents front-running the initialization window.
     pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&instance_key::ADMIN, &admin);
+        env.storage()
+            .instance()
+            .set(&instance_key::SCHEMAV, &CURRENT_SCHEMA_VERSION);
         Self::extend_instance_ttl(&env);
 
         env.events()
@@ -510,11 +555,91 @@ impl AlertRegistry {
             return Err(ContractError::AlreadyInitialized);
         }
         env.storage().instance().set(&instance_key::ADMIN, &admin);
+        if !env.storage().instance().has(&instance_key::SCHEMAV) {
+            env.storage()
+                .instance()
+                .set(&instance_key::SCHEMAV, &CURRENT_SCHEMA_VERSION);
+        }
         Self::extend_instance_ttl(&env);
 
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("init")), (admin,));
         Ok(())
+    }
+
+    /// Return the storage schema version currently recorded in instance
+    /// storage.
+    ///
+    /// Contracts deployed before this field existed (and never migrated)
+    /// return `0`, which never collides with [`CURRENT_SCHEMA_VERSION`] (#397).
+    #[must_use]
+    pub fn get_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&instance_key::SCHEMAV)
+            .unwrap_or(0)
+    }
+
+    /// Admin-only, resumable migration entrypoint between storage schema
+    /// versions.
+    ///
+    /// `cursor` lets a migration that touches more entries than fit in one
+    /// invocation resume where the previous call left off, mirroring the
+    /// cursor pattern used by [`AlertRegistry::deactivate_all_alerts`] and
+    /// [`AlertRegistry::prune_expired_alerts`]. The current build has no
+    /// registered per-version field rewrite, so each call advances the
+    /// cursor over the live alert ID range doing no work, and the version is
+    /// only committed once `cursor` reaches [`AlertRegistry::get_alert_count`];
+    /// see `docs/upgrade-guide.md` for how to add a real rewrite step for a
+    /// future layout change.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from the current admin.
+    ///
+    /// # Returns
+    /// The cursor position after this call. Once it equals the alert count
+    /// the stored schema version has been advanced to `to` and the migration
+    /// is finished; call again with the returned cursor otherwise.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the admin.
+    /// Returns [`ContractError::SchemaVersionMismatch`] if `from` does not
+    /// match [`AlertRegistry::get_schema_version`].
+    /// Returns [`ContractError::InvalidSchemaVersion`] if `to <= from`.
+    ///
+    /// # Events
+    /// Emits `(Symbol("schema"), Symbol("migrate"))` with data
+    /// `(from: u32, to: u32)` once the migration completes.
+    pub fn migrate(
+        env: Env,
+        caller: Address,
+        from: u32,
+        to: u32,
+        cursor: u32,
+    ) -> Result<u32, ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+
+        let current = Self::get_schema_version(env.clone());
+        if current != from {
+            return Err(ContractError::SchemaVersionMismatch);
+        }
+        if to <= from {
+            return Err(ContractError::InvalidSchemaVersion);
+        }
+
+        let total: u32 = Self::get_alert_count(env.clone()).min(u32::MAX as u64) as u32;
+        let next_cursor = (cursor + MAX_PRUNE_PER_CALL).min(total);
+
+        if next_cursor >= total {
+            env.storage().instance().set(&instance_key::SCHEMAV, &to);
+            Self::extend_instance_ttl(&env);
+            env.events()
+                .publish((symbol_short!("schema"), symbol_short!("migrate")), (from, to));
+        }
+
+        Ok(next_cursor)
     }
 
     /// Transfer the admin role to a new address (admin only).
@@ -2435,6 +2560,71 @@ impl AlertRegistry {
         Ok(())
     }
 
+    /// Remove every alert owned by `caller`, bounded per call.
+    ///
+    /// Unlike [`AlertRegistry::deactivate_all_alerts`], which scans a sliding
+    /// `[offset, offset + MAX_DEACTIVATIONS_PER_CALL)` window of the owner
+    /// index, removal shrinks that index in place (`remove_alert_record` ->
+    /// `remove_from_owner_index` rewrites it without the removed ID), so each
+    /// pass simply keeps removing the index's current first entry until it
+    /// has processed [`MAX_REMOVALS_PER_CALL`] entries or the index is empty.
+    /// No separate resumable cursor key is needed: call this repeatedly until
+    /// it returns `0`, exactly like [`AlertRegistry::deactivate_all_alerts`].
+    ///
+    /// A dangling ID (its record expired instead of being removed) is dropped
+    /// from the index the same way [`AlertRegistry::prune_expired_alerts`]
+    /// would, and still counts toward the per-call bound.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`.
+    ///
+    /// # Returns
+    /// The number of index entries processed (removed alerts plus dropped
+    /// dangling IDs) in this pass. `0` means `caller` has no alerts left.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::Paused`] while the contract is paused.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("remove_all"))` with data
+    /// `(caller: Address, count: u32)` when at least one entry was processed.
+    pub fn remove_all_alerts(env: Env, caller: Address) -> Result<u32, ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let mut count: u32 = 0;
+        while count < MAX_REMOVALS_PER_CALL {
+            let ids = Self::owner_index(&env, &caller);
+            let Some(id) = ids.get(0) else {
+                break;
+            };
+            if let Some(config) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
+            {
+                Self::remove_alert_record(&env, &config, id, &caller);
+            } else {
+                // Dangling entry: its record already expired. Drop it from
+                // the index directly so the loop still makes progress.
+                let mut kept: Vec<u64> = vec![&env];
+                for j in 1..ids.len() {
+                    kept.push_back(ids.get(j).unwrap());
+                }
+                Self::drop_dangling_ids(&env, &caller, &vec![&env, id], &kept);
+            }
+            count += 1;
+        }
+
+        if count > 0 {
+            env.events().publish(
+                (symbol_short!("alert"), symbol_short!("rm_all")),
+                (caller, count),
+            );
+        }
+        Ok(count)
+    }
+
     /// Extend the TTL of an alert and its associated indexes.
     ///
     /// Callers should request at most [`MAX_TTL`] ledgers. Larger values are
@@ -2482,6 +2672,145 @@ impl AlertRegistry {
         );
 
         Ok(())
+    }
+
+    /// Set the owner-defined tags on an alert (e.g. `prod`, `treasury`),
+    /// replacing any previously stored tags.
+    ///
+    /// Tags are stored under [`DataKey::AlertTags`], separate from
+    /// [`AlertConfig`], so the config's on-chain encoding stays stable (#395).
+    /// Pass an empty `tags` vec to clear all tags.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must also be
+    /// the alert owner.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
+    /// Returns [`ContractError::TooManyTags`] if `tags` has more than
+    /// [`MAX_TAGS_PER_ALERT`] entries.
+    /// Returns [`ContractError::InvalidTag`] if any tag is empty or exceeds
+    /// [`MAX_TAG_LEN`] bytes.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("tags"))` with data
+    /// `(id: u64, count: u32)`.
+    pub fn set_alert_tags(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        tags: Vec<String>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+        Self::assert_owner(&config, &caller)?;
+
+        if tags.len() > MAX_TAGS_PER_ALERT {
+            return Err(ContractError::TooManyTags);
+        }
+        for i in 0..tags.len() {
+            let tag = tags.get(i).unwrap();
+            if tag.is_empty() || tag.len() > MAX_TAG_LEN {
+                return Err(ContractError::InvalidTag);
+            }
+        }
+
+        let key = DataKey::AlertTags(config_id);
+        env.storage().persistent().set(&key, &tags);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, DEFAULT_TTL, DEFAULT_TTL);
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("tags")),
+            (config_id, tags.len() as u32),
+        );
+
+        Ok(())
+    }
+
+    /// Retrieve the owner-defined tags stored for an alert.
+    ///
+    /// Returns an empty vec if no tags were ever set, or if `config_id` does
+    /// not identify an existing alert.
+    #[must_use]
+    pub fn get_alert_tags(env: Env, config_id: u64) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AlertTags(config_id))
+            .unwrap_or_else(|| vec![&env])
+    }
+
+    /// Snooze an alert until a given ledger sequence.
+    ///
+    /// While `env.ledger().sequence() < until_ledger`, the alert is treated as
+    /// inactive by every active-filtered getter ([`AlertRegistry::get_active_alerts_for_contract`],
+    /// [`AlertRegistry::get_active_contract_alerts_paged`], and the active-only
+    /// variants of the owner queries), even though its stored `active` flag is
+    /// untouched. Pass a `until_ledger` at or before the current ledger
+    /// sequence to clear an existing snooze early.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must also be
+    /// the alert owner.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::AlertNotFound`] if `config_id` does not exist.
+    /// Returns [`ContractError::Unauthorized`] if `caller` is not the alert owner.
+    ///
+    /// # Events
+    /// Emits `(Symbol("alert"), Symbol("snooze"))` with data
+    /// `(id: u64, until_ledger: u32)`.
+    pub fn snooze_alert(
+        env: Env,
+        caller: Address,
+        config_id: u64,
+        until_ledger: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env)?;
+
+        let config: AlertConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Alert(config_id))
+            .ok_or(ContractError::AlertNotFound)?;
+        Self::assert_owner(&config, &caller)?;
+
+        let key = DataKey::SnoozeUntil(config_id);
+        if until_ledger <= env.ledger().sequence() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &until_ledger);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, DEFAULT_TTL, DEFAULT_TTL);
+        }
+
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("snooze")),
+            (config_id, until_ledger),
+        );
+
+        Ok(())
+    }
+
+    /// Returns `true` if `config_id` is currently snoozed (see
+    /// [`AlertRegistry::snooze_alert`]).
+    #[must_use]
+    fn is_snoozed(env: &Env, config_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::SnoozeUntil(config_id))
+            .map(|until| env.ledger().sequence() < until)
+            .unwrap_or(false)
     }
 
     /// Retrieve all alert configs that watch a given contract address.
@@ -3939,7 +4268,7 @@ impl AlertRegistry {
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
             {
-                if cfg.active {
+                if cfg.active && !Self::is_snoozed(env, id) {
                     out.push_back(cfg);
                 }
             }
@@ -3986,7 +4315,7 @@ impl AlertRegistry {
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
             {
-                if cfg.active {
+                if cfg.active && !Self::is_snoozed(env, id) {
                     out.push_back(cfg);
                 }
             }
@@ -4009,7 +4338,7 @@ impl AlertRegistry {
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
             {
-                if cfg.active {
+                if cfg.active && !Self::is_snoozed(env, id) {
                     out.push_back(cfg);
                 }
             }
