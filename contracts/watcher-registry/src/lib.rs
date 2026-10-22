@@ -59,6 +59,9 @@ pub enum ContractError {
     /// Returned by `accept_admin_transfer` when the pending admin transfer is
     /// past its expiry ledger.
     AdminTransferExpired = 16,
+    /// Returned by `remove_admin` when `target_admin` is not currently an
+    /// admin, so there is nothing to remove.
+    AdminNotFound = 17,
 }
 
 // ── TTL constants ────────────────────────────────────────────────────────────
@@ -110,9 +113,12 @@ pub enum DataKey {
     Admins,
     /// Stores the `Vec<Address>` of authorized watcher nodes.
     Watchers,
-    /// Stores the `(Address, u32)` pair `(new_admin, expires_at_ledger)` proposed as the new admin set by
-    /// [`WatcherRegistry::propose_admin_transfer`], pending its own
-    /// acceptance via [`WatcherRegistry::accept_admin_transfer`].
+    /// Stores the `(Address, Address, u32)` triple
+    /// `(proposer, new_admin, expires_at_ledger)` proposed as the new admin
+    /// set by [`WatcherRegistry::propose_admin_transfer`], pending its own
+    /// acceptance via [`WatcherRegistry::accept_admin_transfer`]. The
+    /// `proposer` is re-checked on acceptance so a transfer proposed by an
+    /// admin who has since been removed cannot still be accepted.
     PendingAdminTransfer,
     /// Stores the timelock delay in ledgers (`u32`). Absent or `0` means the
     /// timelock is disabled and sensitive actions execute immediately.
@@ -267,6 +273,7 @@ impl WatcherRegistry {
     /// existing admin.
     /// # Errors
     /// Returns [`ContractError::LastAdmin`] if removing this admin would leave the contract with no admins.
+    /// Returns [`ContractError::AdminNotFound`] if `target_admin` is not currently an admin.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Panics
@@ -285,19 +292,58 @@ impl WatcherRegistry {
             return Err(ContractError::LastAdmin);
         }
 
+        let mut found = false;
         let mut updated: Vec<Address> = vec![&env];
         for i in 0..admins.len() {
             let a = admins.get(i).unwrap();
             if a != target_admin {
                 updated.push_back(a);
+            } else {
+                found = true;
             }
+        }
+        if !found {
+            return Err(ContractError::AdminNotFound);
         }
         env.storage().instance().set(&DataKey::Admins, &updated);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("remove")),
-            (caller, target_admin),
+            (caller.clone(), target_admin.clone()),
         );
+
+        // A pending admin transfer proposed by the just-removed admin is no
+        // longer trustworthy: invalidate it so it cannot be accepted later by
+        // an attacker the removed admin had proposed as the new admin set.
+        if let Some((proposer, _new_admin, _expires_at)) = env
+            .storage()
+            .instance()
+            .get::<_, (Address, Address, u32)>(&DataKey::PendingAdminTransfer)
+        {
+            if proposer == target_admin {
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::PendingAdminTransfer);
+                env.events().publish(
+                    (symbol_short!("admin"), symbol_short!("cancel")),
+                    (caller.clone(),),
+                );
+            }
+        }
+
+        // A queued sensitive action proposed by the just-removed admin should
+        // not still be executable by a remaining (or colluding) admin.
+        if let Some(pending) = env
+            .storage()
+            .instance()
+            .get::<_, PendingAction>(&DataKey::PendingAction)
+        {
+            if pending.proposer == target_admin {
+                env.storage().instance().remove(&DataKey::PendingAction);
+                env.events()
+                    .publish((symbol_short!("admin"), symbol_short!("cancel")), (caller,));
+            }
+        }
 
         Ok(())
     }
@@ -344,7 +390,7 @@ impl WatcherRegistry {
             .saturating_add(ADMIN_TRANSFER_EXPIRY_LEDGERS);
         env.storage().instance().set(
             &DataKey::PendingAdminTransfer,
-            &(new_admin.clone(), expires_at_ledger),
+            &(admin.clone(), new_admin.clone(), expires_at_ledger),
         );
 
         env.events().publish(
@@ -393,10 +439,12 @@ impl WatcherRegistry {
     /// or the pending proposal names a different address.
     /// Returns [`ContractError::AdminTransferExpired`] if the proposal is past
     /// its expiry ledger.
+    /// Returns [`ContractError::Unauthorized`] if the proposing admin has
+    /// since been removed from the admin set.
     pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
         new_admin.require_auth();
 
-        let (pending, expires_at_ledger): (Address, u32) = env
+        let (proposer, pending, expires_at_ledger): (Address, Address, u32) = env
             .storage()
             .instance()
             .get(&DataKey::PendingAdminTransfer)
@@ -407,6 +455,10 @@ impl WatcherRegistry {
         if env.ledger().sequence() > expires_at_ledger {
             return Err(ContractError::AdminTransferExpired);
         }
+        // The proposer must still be an admin: if they were removed after
+        // proposing, the transfer is no longer authorized and must not be
+        // honored even though it has not expired.
+        Self::assert_admin(&env, &proposer)?;
 
         env.storage()
             .instance()
@@ -1207,6 +1259,16 @@ impl WatcherRegistry {
         env.storage()
             .instance()
             .set(&DataKey::TimelockDelay, &delay_ledgers);
+
+        // A delay being turned on (0 -> >0) must not leave a transfer that
+        // was proposed under the old, delay-free rules still acceptable
+        // afterwards with no delay applied to it. Clearing it here forces
+        // any future transfer to go through the timelocked flow.
+        if delay_ledgers > 0 && env.storage().instance().has(&DataKey::PendingAdminTransfer) {
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingAdminTransfer);
+        }
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("timelock")),
