@@ -329,6 +329,7 @@ impl WatcherRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     pub fn propose_admin_transfer(
         env: Env,
         admin: Address,
@@ -337,6 +338,7 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
+        Self::assert_not_paused(&env)?;
 
         let expires_at_ledger = env
             .ledger()
@@ -365,6 +367,7 @@ impl WatcherRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     pub fn transfer_admin(
         env: Env,
         admin: Address,
@@ -373,6 +376,7 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
+        Self::assert_not_paused(&env)?;
 
         Self::do_transfer_admin(&env, new_admin);
 
@@ -2042,6 +2046,53 @@ mod tests {
             client.try_register_watcher(&admin, &watcher).unwrap(),
             Ok(())
         );
+    }
+
+    // pause blocks propose_admin_transfer: a compromised admin must not be
+    // able to queue a full admin-set replacement while the registry is
+    // paused during an incident.
+    #[test]
+    fn test_pause_blocks_propose_admin_transfer() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.pause(&admin);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+
+        client.unpause(&admin);
+        assert_eq!(
+            client.try_propose_admin_transfer(&admin, &new_admin).unwrap(),
+            Ok(())
+        );
+    }
+
+    // pause blocks transfer_admin: a compromised admin must not be able to
+    // perform a one-step full admin-set replacement while the registry is
+    // paused during an incident.
+    #[test]
+    fn test_pause_blocks_transfer_admin() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.pause(&admin);
+
+        assert_eq!(
+            client
+                .try_transfer_admin(&admin, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+
+        client.unpause(&admin);
+        assert_eq!(client.try_transfer_admin(&admin, &new_admin).unwrap(), Ok(()));
     }
 
     // pause does not block read-only calls
