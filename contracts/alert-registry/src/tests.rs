@@ -189,11 +189,21 @@ fn test_register_alert_event_carries_schema_version() {
         })
         .expect("alert.register event must be emitted");
     let (_, _, data) = event;
-    let (version, _id, emitted_owner, emitted_target): (u32, u64, Address, Address) =
-        soroban_sdk::FromVal::from_val(&env, &data);
+    let (version, _id, emitted_owner, emitted_target, emitted_label, emitted_hash, emitted_rules): (
+        u32,
+        u64,
+        Address,
+        Address,
+        String,
+        BytesN<32>,
+        Vec<String>,
+    ) = soroban_sdk::FromVal::from_val(&env, &data);
     assert_eq!(version, EVENT_SCHEMA_VERSION);
     assert_eq!(emitted_owner, owner);
     assert_eq!(emitted_target, target);
+    assert_eq!(emitted_label, str(&env, "Alert1"));
+    assert_eq!(emitted_hash, hash64(&env));
+    assert_eq!(emitted_rules, vec![&env, str(&env, "rule:transfer")]);
 }
 
 #[test]

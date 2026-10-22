@@ -43,10 +43,14 @@ Emitted when a new alert is successfully registered.
 | Topic 0 | `Symbol("alert")` |
 | Topic 1 | `Symbol("register")` |
 | Data (v1) | `(version: u32, id: u64, owner: Address, target_contract: Address)` |
+| Data (v2) | `(version: u32, id: u64, owner: Address, target_contract: Address, label: String, webhook_hash: BytesN<32>, rules: Vec<String>)` |
 
-`version` is `1` (`EVENT_SCHEMA_VERSION`) for every alert registered by the
-current contract code — this event has always carried the marker since it
-was versioned, so there is no pre-version shape to distinguish from.
+`version` is `2` (`EVENT_SCHEMA_VERSION`) for every alert registered by the
+current contract code. v2 adds `label`, `webhook_hash` and `rules` (#402) so
+an indexer can populate its view of a newly-registered alert from this event
+alone, instead of making a follow-up `get_alert` simulation that also fails
+in gated mode unless the indexer is itself a registered watcher. There is no
+v0 — this event has carried the version marker since it was introduced.
 
 **Status:** ✅ implemented (`register_alert`)
 

@@ -97,7 +97,7 @@ pub const MAX_PAGE_SIZE: u32 = 100;
 /// this value instead of guessing the shape from the payload length. See
 /// `docs/events.md` for the versioning policy and which events currently
 /// carry this marker.
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// Recognized rule descriptors accepted by [`AlertRegistry::validate_rule`].
 pub const VALID_RULE_DESCRIPTORS: [&str; 5] = [
@@ -1393,9 +1393,21 @@ impl AlertRegistry {
         Self::adjust_owner_active_count(&env, &owner, 1);
         Self::set_live_alert_count(&env, Self::get_live_alert_count(&env).saturating_add(1));
 
+        // Carries the full config (#402) so an indexer can populate its view
+        // from this event alone, instead of making a follow-up `get_alert`
+        // simulation that also fails in gated mode unless the indexer is
+        // itself a registered watcher.
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("register")),
-            (EVENT_SCHEMA_VERSION, id, owner, target_contract),
+            (
+                EVENT_SCHEMA_VERSION,
+                id,
+                owner,
+                target_contract,
+                config.label.clone(),
+                config.webhook_hash.clone(),
+                config.rules.clone(),
+            ),
         );
 
         Ok(id)
