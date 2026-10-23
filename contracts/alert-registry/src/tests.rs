@@ -8007,3 +8007,294 @@ fn test_validate_rule_rejects_bad_min_parameter() {
         );
     }
 }
+
+// ── #395: owner-defined alert tags ───────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_alert_tags() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    assert_eq!(client.get_alert_tags(&id).len(), 0);
+
+    let tags = vec![&env, str(&env, "prod"), str(&env, "treasury")];
+    client.set_alert_tags(&owner, &id, &tags);
+    assert_eq!(client.get_alert_tags(&id), tags);
+
+    // Replacing with an empty vec clears the tags.
+    client.set_alert_tags(&owner, &id, &vec![&env]);
+    assert_eq!(client.get_alert_tags(&id).len(), 0);
+}
+
+#[test]
+fn test_set_alert_tags_rejects_non_owner() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let other = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let result = client.try_set_alert_tags(&other, &id, &vec![&env, str(&env, "prod")]);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_set_alert_tags_rejects_too_many_tags() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let mut too_many = vec![&env];
+    for i in 0..(MAX_TAGS_PER_ALERT + 1) {
+        too_many.push_back(str(&env, "tag"));
+        let _ = i;
+    }
+    let result = client.try_set_alert_tags(&owner, &id, &too_many);
+    assert_eq!(result, Err(Ok(ContractError::TooManyTags)));
+}
+
+#[test]
+fn test_set_alert_tags_rejects_empty_or_overlong_tag() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let result = client.try_set_alert_tags(&owner, &id, &vec![&env, str(&env, "")]);
+    assert_eq!(result, Err(Ok(ContractError::InvalidTag)));
+
+    let overlong = str_repeat(&env, 'x', (MAX_TAG_LEN + 1) as usize);
+    let result = client.try_set_alert_tags(&owner, &id, &vec![&env, overlong]);
+    assert_eq!(result, Err(Ok(ContractError::InvalidTag)));
+}
+
+// ── #396: snooze-until-ledger for alerts ────────────────────────────────────
+
+#[test]
+fn test_snooze_alert_hides_it_from_active_getters() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    assert_eq!(
+        client
+            .get_active_contract_alerts_paged(&owner, &target, &0, &10)
+            .len(),
+        1
+    );
+
+    client.snooze_alert(&owner, &id, &200);
+
+    assert!(client.get_alert(&owner, &id).unwrap().active);
+    assert_eq!(
+        client
+            .get_active_contract_alerts_paged(&owner, &target, &0, &10)
+            .len(),
+        0
+    );
+
+    env.ledger().with_mut(|li| li.sequence_number = 201);
+    assert_eq!(
+        client
+            .get_active_contract_alerts_paged(&owner, &target, &0, &10)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn test_snooze_alert_until_ledger_in_past_clears_snooze() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.snooze_alert(&owner, &id, &200);
+    assert_eq!(
+        client
+            .get_active_contract_alerts_paged(&owner, &target, &0, &10)
+            .len(),
+        0
+    );
+
+    client.snooze_alert(&owner, &id, &50);
+    assert_eq!(
+        client
+            .get_active_contract_alerts_paged(&owner, &target, &0, &10)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn test_snooze_alert_rejects_non_owner() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let other = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let result = client.try_snooze_alert(&other, &id, &200);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+// ── #397: storage schema version and migration entrypoint ──────────────────
+
+#[test]
+fn test_schema_version_set_by_constructor() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.get_schema_version(), CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn test_migrate_advances_schema_version() {
+    let (_env, admin, client) = setup();
+    assert_eq!(client.get_schema_version(), 1);
+
+    let _cursor = client.migrate(&admin, &1, &2, &0);
+    assert_eq!(client.get_schema_version(), 2);
+}
+
+#[test]
+fn test_migrate_rejects_non_admin() {
+    let (env, _admin, client) = setup();
+    let other = Address::generate(&env);
+    let result = client.try_migrate(&other, &1, &2, &0);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_migrate_rejects_schema_mismatch() {
+    let (_env, admin, client) = setup();
+    let result = client.try_migrate(&admin, &99, &100, &0);
+    assert_eq!(result, Err(Ok(ContractError::SchemaVersionMismatch)));
+}
+
+#[test]
+fn test_migrate_rejects_non_increasing_version() {
+    let (_env, admin, client) = setup();
+    let result = client.try_migrate(&admin, &1, &1, &0);
+    assert_eq!(result, Err(Ok(ContractError::InvalidSchemaVersion)));
+}
+
+// ── #398: paginated remove_all_alerts ────────────────────────────────────────
+
+#[test]
+fn test_remove_all_alerts_removes_every_owned_alert() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let mut ids = vec![&env];
+    for i in 0..5u32 {
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        ids.push_back(id);
+        let _ = i;
+    }
+
+    let removed = client.remove_all_alerts(&owner);
+    assert_eq!(removed, 5);
+    assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+    for id in ids.iter() {
+        assert!(client.get_alert(&owner, &id).unwrap().is_none());
+    }
+
+    assert_eq!(client.remove_all_alerts(&owner), 0);
+}
+
+#[test]
+fn test_remove_all_alerts_is_bounded_per_call() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let total = MAX_REMOVALS_PER_CALL + 3;
+    for _ in 0..total {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "Alert"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    let first_pass = client.remove_all_alerts(&owner);
+    assert_eq!(first_pass, MAX_REMOVALS_PER_CALL);
+    assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 3);
+
+    let second_pass = client.remove_all_alerts(&owner);
+    assert_eq!(second_pass, 3);
+    assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+}
+
+#[test]
+fn test_remove_all_alerts_rejects_while_paused() {
+    let (env, admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    client.pause(&admin);
+    let result = client.try_remove_all_alerts(&owner);
+    assert_eq!(result, Err(Ok(ContractError::Paused)));
+}
