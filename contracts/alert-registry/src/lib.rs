@@ -568,6 +568,15 @@ impl AlertRegistry {
     /// via [`Self::__constructor`] during deployment, calling this again returns
     /// [`ContractError::AlreadyInitialized`].
     ///
+    /// # Deprecation
+    /// Deprecated as of v0.2.0; scheduled for removal in v0.3.0. Every
+    /// contract deployed with `__constructor` is already initialized at
+    /// deploy time, so on such deployments this call can only ever return
+    /// `AlreadyInitialized`. It is kept solely for contracts deployed
+    /// before `__constructor` existed. New deployments should not call
+    /// this, and integrators should not list it as a "getting started"
+    /// step.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`. This prevents a
     /// front-running attack where an arbitrary account claims the admin role

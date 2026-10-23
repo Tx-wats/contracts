@@ -62,7 +62,7 @@ class. The method signatures mirror the Soroban contract interface exactly.
 
 | Method | Auth required | Description |
 |---|---|---|
-| `initialize(admin)` | `admin` | Initialize the registry (once only) |
+| `initialize(admin)` | `admin` | *(Deprecated, removal in v0.3.0)* Backwards-compatible initializer for pre-`__constructor` deployments; new deployments are already initialized at deploy time |
 | `register_watcher(admin, watcher)` | `admin` | Authorize a watcher address |
 | `remove_watcher(admin, watcher)` | `admin` | Revoke a watcher address |
 | `is_watcher_authorized(watcher)` | — | Check if an address is authorized |

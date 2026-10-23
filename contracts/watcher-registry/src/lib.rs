@@ -220,6 +220,15 @@ impl WatcherRegistry {
     /// via [`Self::__constructor`] during deployment, calling this again returns
     /// [`ContractError::AlreadyInitialized`].
     ///
+    /// # Deprecation
+    /// Deprecated as of v0.2.0; scheduled for removal in v0.3.0. Every
+    /// contract deployed with `__constructor` is already initialized at
+    /// deploy time, so on such deployments this call can only ever return
+    /// `AlreadyInitialized`. It is kept solely for contracts deployed
+    /// before `__constructor` existed. New deployments should not call
+    /// this, and integrators should not list it as a "getting started"
+    /// step.
+    ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`.
     /// # Errors
@@ -362,10 +371,11 @@ impl WatcherRegistry {
     /// made; [`WatcherRegistry::accept_admin_transfer`] then fails with
     /// [`ContractError::AdminTransferExpired`].
     ///
-    /// This replaces any previously pending proposal. This replaces the
-    /// **entire** admin set with a single new admin once accepted. Use
-    /// [`WatcherRegistry::add_admin`] + [`WatcherRegistry::remove_admin`] if you want to rotate one member of a
-    /// multi-admin set without losing the others.
+    /// This replaces any previously pending proposal.
+    ///
+    /// Once accepted, this replaces the **entire** admin set with a single
+    /// new admin. Use [`WatcherRegistry::add_admin`] + [`WatcherRegistry::remove_admin`] if you want to
+    /// rotate one member of a multi-admin set without losing the others.
     ///
     /// Emits an `("admin", "propose")` event recording the proposer and `new_admin`.
     ///
@@ -379,6 +389,7 @@ impl WatcherRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     pub fn propose_admin_transfer(
         env: Env,
         admin: Address,
@@ -387,6 +398,7 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
+        Self::assert_not_paused(&env)?;
 
         let expires_at_ledger = env
             .ledger()
@@ -415,6 +427,7 @@ impl WatcherRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     pub fn transfer_admin(
         env: Env,
         admin: Address,
@@ -423,6 +436,7 @@ impl WatcherRegistry {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
+        Self::assert_not_paused(&env)?;
 
         Self::do_transfer_admin(&env, new_admin);
 
@@ -502,14 +516,37 @@ impl WatcherRegistry {
         Ok(())
     }
 
+    /// Get the address named in a pending admin transfer proposed via
+    /// [`WatcherRegistry::propose_admin_transfer`], if any.
+    ///
+    /// Lets co-admins check for an in-flight takeover before deciding
+    /// whether to call [`WatcherRegistry::cancel_admin_transfer`], without
+    /// having to read raw contract storage.
+    ///
+    /// Returns `None` once the proposal has been accepted or cancelled.
+    /// This does not check expiry — a proposal past
+    /// [`ADMIN_TRANSFER_EXPIRY_LEDGERS`] is still returned until it is
+    /// accepted (which will fail) or explicitly cancelled.
+    #[must_use]
+    pub fn get_pending_admin_transfer(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get::<DataKey, (Address, u32)>(&DataKey::PendingAdminTransfer)
+            .map(|(pending, _expires_at_ledger)| pending)
+    }
+
     /// Register an authorized watcher node (any admin may call this).
     ///
     /// Idempotent — registering an already-authorized watcher is a no-op.
     /// The watcher set is capped at [`MAX_WATCHERS`] entries.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
     /// # Errors
     /// Returns [`ContractError::MaxWatchersReached`] if the registry already holds [`MAX_WATCHERS`] watchers.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn register_watcher(
@@ -545,11 +582,19 @@ impl WatcherRegistry {
 
     /// Register multiple authorized watcher nodes in a single call (any admin may call this).
     ///
-    /// Equivalent to calling [`WatcherRegistry::register_watcher`] once per address, but rewrites
-    /// the watcher list once for the whole batch instead of once per address.
-    /// Already-registered addresses are skipped (idempotent), matching
-    /// [`WatcherRegistry::register_watcher`]'s semantics. Emits one `("watcher", "register")`
-    /// event per newly-added watcher.
+    /// Rewrites the watcher list once for the whole batch instead of once
+    /// per address. Already-registered addresses are skipped (idempotent),
+    /// matching [`WatcherRegistry::register_watcher`]'s skip-if-present
+    /// semantics. Emits one `("watcher", "register")` event per
+    /// newly-added watcher.
+    ///
+    /// Unlike [`WatcherRegistry::register_watcher`], this call does **not**
+    /// currently enforce the [`MAX_WATCHERS`] cap or the pause check, so it
+    /// can grow the watcher set past the cap and can still be called while
+    /// the registry is paused.
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
@@ -609,6 +654,7 @@ impl WatcherRegistry {
     /// Returns [`ContractError::BelowMinWatchers`] if removing this watcher would drop the count below [`MIN_WATCHERS`].
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn remove_watcher(env: Env, admin: Address, watcher: Address) -> Result<(), ContractError> {
@@ -2010,6 +2056,27 @@ mod tests {
         );
     }
 
+    // get_pending_admin_transfer reflects proposal lifecycle: None before
+    // any proposal, Some(new_admin) while pending, None again after it is
+    // accepted or cancelled.
+    #[test]
+    fn test_get_pending_admin_transfer() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_pending_admin_transfer(), None);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin_transfer(), Some(new_admin.clone()));
+
+        client.cancel_admin_transfer(&admin);
+        assert_eq!(client.get_pending_admin_transfer(), None);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        client.accept_admin_transfer(&new_admin);
+        assert_eq!(client.get_pending_admin_transfer(), None);
+    }
+
     // 15g. non-admin cannot propose or cancel an admin transfer
     #[test]
     fn test_propose_and_cancel_admin_transfer_unauthorized() {
@@ -2157,6 +2224,72 @@ mod tests {
             client.try_register_watcher(&admin, &watcher).unwrap(),
             Ok(())
         );
+    }
+
+    // remove_watcher's rustdoc claims `Paused` among its `# Errors`; verify
+    // that claim is actually true.
+    #[test]
+    fn test_pause_blocks_remove_watcher() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        client.pause(&admin);
+
+        assert_eq!(
+            client
+                .try_remove_watcher(&admin, &watcher)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+    }
+
+    // pause blocks propose_admin_transfer: a compromised admin must not be
+    // able to queue a full admin-set replacement while the registry is
+    // paused during an incident.
+    #[test]
+    fn test_pause_blocks_propose_admin_transfer() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.pause(&admin);
+
+        assert_eq!(
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+
+        client.unpause(&admin);
+        assert_eq!(
+            client.try_propose_admin_transfer(&admin, &new_admin).unwrap(),
+            Ok(())
+        );
+    }
+
+    // pause blocks transfer_admin: a compromised admin must not be able to
+    // perform a one-step full admin-set replacement while the registry is
+    // paused during an incident.
+    #[test]
+    fn test_pause_blocks_transfer_admin() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.pause(&admin);
+
+        assert_eq!(
+            client
+                .try_transfer_admin(&admin, &new_admin)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+
+        client.unpause(&admin);
+        assert_eq!(client.try_transfer_admin(&admin, &new_admin).unwrap(), Ok(()));
     }
 
     // pause does not block read-only calls

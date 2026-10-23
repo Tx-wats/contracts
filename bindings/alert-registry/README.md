@@ -80,7 +80,7 @@ The bindings provide TypeScript types and methods for all AlertRegistry contract
 - `update_alert` - Update rules and active status
 - `update_webhook` - Update webhook hash
 - `remove_alert` - Remove an alert
-- `initialize` - Initialize the contract with an admin (one-time)
+- `initialize` - *(Deprecated, removal in v0.3.0)* Backwards-compatible initializer for pre-`__constructor` deployments; new deployments are already initialized at deploy time
 - `transfer_admin` - Transfer admin role
 - `set_per_owner_alert_limit` - Set per-owner alert limit (admin only)
 - `set_per_contract_alert_limit` - Set per-contract alert limit (admin only)
