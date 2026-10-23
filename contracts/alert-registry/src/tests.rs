@@ -94,6 +94,108 @@ fn test_update_alert() {
     assert_eq!(cfg.rules.get(0).unwrap(), str(&env, "rule:mint"));
 }
 
+// 2b. revision counter (#401) — starts at 0, increments on each content
+// mutation, and gates the *_checked mutators.
+#[test]
+fn test_alert_revision_counter() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let cfg0 = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg0.revision, 0);
+
+    client.update_alert(&owner, &id, &vec![&env, str(&env, "rule:mint")], &true);
+    let cfg1 = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg1.revision, 1);
+
+    client.set_alert_active(&owner, &id, &false);
+    let cfg2 = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg2.revision, 2);
+}
+
+// 2c. update_alert_checked / set_alert_active_checked (#401) — a stale
+// expected_revision is rejected with RevisionMismatch, and a correct one
+// both succeeds and advances the revision like the unchecked mutators.
+#[test]
+fn test_checked_mutators_enforce_revision() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    // Correct expected_revision succeeds and advances the counter.
+    assert_eq!(
+        client
+            .try_update_alert_checked(
+                &owner,
+                &id,
+                &vec![&env, str(&env, "rule:mint")],
+                &true,
+                &Some(0u32),
+            )
+            .unwrap(),
+        Ok(())
+    );
+    let cfg = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg.revision, 1);
+
+    // Stale expected_revision (still 0, but the alert is now at revision 1)
+    // is rejected without mutating anything.
+    assert_eq!(
+        client
+            .try_update_alert_checked(
+                &owner,
+                &id,
+                &vec![&env, str(&env, "rule:transfer")],
+                &false,
+                &Some(0u32),
+            )
+            .unwrap_err()
+            .unwrap(),
+        ContractError::RevisionMismatch
+    );
+    let cfg_after_conflict = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg_after_conflict.revision, 1);
+    assert!(cfg_after_conflict.active);
+
+    // set_alert_active_checked with the correct revision succeeds.
+    assert_eq!(
+        client
+            .try_set_alert_active_checked(&owner, &id, &false, &Some(1u32))
+            .unwrap(),
+        Ok(())
+    );
+    let cfg_final = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg_final.revision, 2);
+    assert!(!cfg_final.active);
+
+    // expected_revision: None skips the check entirely (back-compat path).
+    assert_eq!(
+        client
+            .try_update_alert_checked(&owner, &id, &vec![&env, str(&env, "rule:mint")], &true, &None)
+            .unwrap(),
+        Ok(())
+    );
+    let cfg_unchecked = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(cfg_unchecked.revision, 3);
+}
+
 // update_alert emits an alert.update event
 #[test]
 fn test_update_alert_emits_event() {
@@ -156,6 +258,54 @@ fn test_update_unauthorized() {
             .unwrap(),
         ContractError::Unauthorized
     );
+}
+
+// alert.register carries EVENT_SCHEMA_VERSION as its first data element
+// (#400) so a long-lived indexer can tell which payload shape it is looking
+// at instead of guessing from length, across future field additions such as
+// #402.
+#[test]
+fn test_register_alert_event_carries_schema_version() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert1"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("register")
+        })
+        .expect("alert.register event must be emitted");
+    let (_, _, data) = event;
+    let (version, _id, emitted_owner, emitted_target, emitted_label, emitted_hash, emitted_rules): (
+        u32,
+        u64,
+        Address,
+        Address,
+        String,
+        BytesN<32>,
+        Vec<String>,
+    ) = soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_owner, owner);
+    assert_eq!(emitted_target, target);
+    assert_eq!(emitted_label, str(&env, "Alert1"));
+    assert_eq!(emitted_hash, hash64(&env));
+    assert_eq!(emitted_rules, vec![&env, str(&env, "rule:transfer")]);
 }
 
 #[test]
@@ -5269,6 +5419,61 @@ fn test_get_alerts_by_owner_paginated() {
     // offset beyond length returns empty
     let empty = client.get_alerts_by_owner_paginated(&owner, &owner, &10u32, &3u32);
     assert_eq!(empty.len(), 0);
+}
+
+// 18c. get_alerts_by_owner_for_contract (#399) — intersection of the owner
+// and contract indexes, paginated over the owner index.
+#[test]
+fn test_get_alerts_by_owner_for_contract() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target_a = Address::generate(&env);
+    let target_b = Address::generate(&env);
+
+    // Three alerts on target_a, two on target_b, all owned by `owner`.
+    for label in ["A1", "A2", "A3"] {
+        client.register_alert(
+            &owner,
+            &target_a,
+            &str(&env, label),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+    for label in ["B1", "B2"] {
+        client.register_alert(
+            &owner,
+            &target_b,
+            &str(&env, label),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    // A page wide enough to cover the whole owner index returns only the
+    // alerts watching target_a.
+    let page = client.get_alerts_by_owner_for_contract(&owner, &owner, &target_a, &0u32, &10u32);
+    assert_eq!(page.len(), 3);
+    for cfg in page.iter() {
+        assert_eq!(cfg.target_contract, target_a);
+    }
+
+    // Same for target_b.
+    let page_b = client.get_alerts_by_owner_for_contract(&owner, &owner, &target_b, &0u32, &10u32);
+    assert_eq!(page_b.len(), 2);
+
+    // A narrower page still only returns matches within that owner-index
+    // window; it is legal for it to come back shorter than `limit`.
+    let narrow = client.get_alerts_by_owner_for_contract(&owner, &owner, &target_a, &0u32, &2u32);
+    assert!(narrow.len() <= 2);
+    for cfg in narrow.iter() {
+        assert_eq!(cfg.target_contract, target_a);
+    }
+
+    // A different owner has no alerts at all, so every page is empty.
+    let other_owner = Address::generate(&env);
+    let none = client.get_alerts_by_owner_for_contract(&owner, &other_owner, &target_a, &0u32, &10u32);
+    assert_eq!(none.len(), 0);
 }
 
 // 19. get_contract_alerts_paginated — basic pagination
