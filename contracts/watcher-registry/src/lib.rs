@@ -62,6 +62,13 @@ pub enum ContractError {
     /// Returned when a proposed transfer recipient is invalid, e.g.
     /// `propose_admin_transfer` naming the sole current admin as `new_admin`.
     InvalidTransferRecipient = 17,
+    /// Returned when proposing [`AdminAction::AddAdmin`] for an address that
+    /// is already an admin — queuing it would only waste the single pending
+    /// action slot for the full timelock delay on a no-op.
+    AdminAlreadyExists = 17,
+    /// Returned by `remove_admin` when `target_admin` is not currently an
+    /// admin, so there is nothing to remove.
+    AdminNotFound = 17,
 }
 
 // ── TTL constants ────────────────────────────────────────────────────────────
@@ -117,9 +124,12 @@ pub enum DataKey {
     Admins,
     /// Stores the `Vec<Address>` of authorized watcher nodes.
     Watchers,
-    /// Stores the `(Address, u32)` pair `(new_admin, expires_at_ledger)` proposed as the new admin set by
-    /// [`WatcherRegistry::propose_admin_transfer`], pending its own
-    /// acceptance via [`WatcherRegistry::accept_admin_transfer`].
+    /// Stores the `(Address, Address, u32)` triple
+    /// `(proposer, new_admin, expires_at_ledger)` proposed as the new admin
+    /// set by [`WatcherRegistry::propose_admin_transfer`], pending its own
+    /// acceptance via [`WatcherRegistry::accept_admin_transfer`]. The
+    /// `proposer` is re-checked on acceptance so a transfer proposed by an
+    /// admin who has since been removed cannot still be accepted.
     PendingAdminTransfer,
     /// Stores the timelock delay in ledgers (`u32`). Absent or `0` means the
     /// timelock is disabled and sensitive actions execute immediately.
@@ -295,6 +305,7 @@ impl WatcherRegistry {
     /// existing admin.
     /// # Errors
     /// Returns [`ContractError::LastAdmin`] if removing this admin would leave the contract with no admins.
+    /// Returns [`ContractError::AdminNotFound`] if `target_admin` is not currently an admin.
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Panics
@@ -313,19 +324,58 @@ impl WatcherRegistry {
             return Err(ContractError::LastAdmin);
         }
 
+        let mut found = false;
         let mut updated: Vec<Address> = vec![&env];
         for i in 0..admins.len() {
             let a = admins.get(i).unwrap();
             if a != target_admin {
                 updated.push_back(a);
+            } else {
+                found = true;
             }
+        }
+        if !found {
+            return Err(ContractError::AdminNotFound);
         }
         env.storage().instance().set(&DataKey::Admins, &updated);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("remove")),
-            (caller, target_admin),
+            (caller.clone(), target_admin.clone()),
         );
+
+        // A pending admin transfer proposed by the just-removed admin is no
+        // longer trustworthy: invalidate it so it cannot be accepted later by
+        // an attacker the removed admin had proposed as the new admin set.
+        if let Some((proposer, _new_admin, _expires_at)) = env
+            .storage()
+            .instance()
+            .get::<_, (Address, Address, u32)>(&DataKey::PendingAdminTransfer)
+        {
+            if proposer == target_admin {
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::PendingAdminTransfer);
+                env.events().publish(
+                    (symbol_short!("admin"), symbol_short!("cancel")),
+                    (caller.clone(),),
+                );
+            }
+        }
+
+        // A queued sensitive action proposed by the just-removed admin should
+        // not still be executable by a remaining (or colluding) admin.
+        if let Some(pending) = env
+            .storage()
+            .instance()
+            .get::<_, PendingAction>(&DataKey::PendingAction)
+        {
+            if pending.proposer == target_admin {
+                env.storage().instance().remove(&DataKey::PendingAction);
+                env.events()
+                    .publish((symbol_short!("admin"), symbol_short!("cancel")), (caller,));
+            }
+        }
 
         Ok(())
     }
@@ -382,7 +432,7 @@ impl WatcherRegistry {
             .saturating_add(ADMIN_TRANSFER_EXPIRY_LEDGERS);
         env.storage().instance().set(
             &DataKey::PendingAdminTransfer,
-            &(new_admin.clone(), expires_at_ledger),
+            &(admin.clone(), new_admin.clone(), expires_at_ledger),
         );
 
         env.events().publish(
@@ -431,10 +481,12 @@ impl WatcherRegistry {
     /// or the pending proposal names a different address.
     /// Returns [`ContractError::AdminTransferExpired`] if the proposal is past
     /// its expiry ledger.
+    /// Returns [`ContractError::Unauthorized`] if the proposing admin has
+    /// since been removed from the admin set.
     pub fn accept_admin_transfer(env: Env, new_admin: Address) -> Result<(), ContractError> {
         new_admin.require_auth();
 
-        let (pending, expires_at_ledger): (Address, u32) = env
+        let (proposer, pending, expires_at_ledger): (Address, Address, u32) = env
             .storage()
             .instance()
             .get(&DataKey::PendingAdminTransfer)
@@ -445,6 +497,10 @@ impl WatcherRegistry {
         if env.ledger().sequence() > expires_at_ledger {
             return Err(ContractError::AdminTransferExpired);
         }
+        // The proposer must still be an admin: if they were removed after
+        // proposing, the transfer is no longer authorized and must not be
+        // honored even though it has not expired.
+        Self::assert_admin(&env, &proposer)?;
 
         env.storage()
             .instance()
@@ -929,14 +985,7 @@ impl WatcherRegistry {
 
         Self::assert_not_paused(&env)?;
 
-        let watchers = Self::load_watchers(&env);
-        if !watchers.is_empty() && MIN_WATCHERS > 0 {
-            return Err(ContractError::BelowMinWatchers);
-        }
-
-        Self::do_clear_all_watchers(&env);
-
-        Ok(())
+        Self::do_clear_all_watchers(&env)
     }
 
     /// Remove up to `max_count` registered watchers in a single admin call.
@@ -1253,6 +1302,16 @@ impl WatcherRegistry {
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// Returns [`ContractError::ActionAlreadyPending`] if another action is already queued.
+    /// Returns [`ContractError::AdminAlreadyExists`] if `action` is [`AdminAction::AddAdmin`] for an existing admin.
+    /// Returns [`ContractError::MaxAdminsReached`] if `action` is [`AdminAction::AddAdmin`] and the admin set is full.
+    /// Returns [`ContractError::BelowMinWatchers`] if `action` is [`AdminAction::ClearAllWatchers`] and the registry is non-empty.
+    /// Returns [`ContractError::DelayTooLarge`] if `action` is [`AdminAction::SetTimelockDelay`] above [`MAX_TIMELOCK_DELAY`].
+    /// Returns [`ContractError::TimelockRequired`] if `action` is [`AdminAction::SetTimelockDelay`] below the current delay.
+    ///
+    /// Note: [`AdminAction::Upgrade`] is not pre-validated here — whether a
+    /// WASM hash is installed is a host-level check that
+    /// `update_current_contract_wasm` performs when the action actually
+    /// runs, and there is no contract-level way to probe it earlier.
     pub fn propose_admin_action(
         env: Env,
         caller: Address,
@@ -1261,10 +1320,37 @@ impl WatcherRegistry {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
 
-        if let AdminAction::SetTimelockDelay(delay) = action {
-            if delay > MAX_TIMELOCK_DELAY {
-                return Err(ContractError::DelayTooLarge);
+        // Run the same validation `execute_admin_action` would run, so an
+        // action that is guaranteed to fail cannot occupy the single pending
+        // slot for the full timelock delay only to be rejected at the end of
+        // it.
+        match &action {
+            AdminAction::AddAdmin(new_admin) => {
+                let admins = Self::load_admins(&env);
+                for i in 0..admins.len() {
+                    if admins.get(i).unwrap() == *new_admin {
+                        return Err(ContractError::AdminAlreadyExists);
+                    }
+                }
+                if admins.len() >= MAX_ADMINS {
+                    return Err(ContractError::MaxAdminsReached);
+                }
             }
+            AdminAction::ClearAllWatchers => {
+                let watchers = Self::load_watchers(&env);
+                if !watchers.is_empty() && MIN_WATCHERS > 0 {
+                    return Err(ContractError::BelowMinWatchers);
+                }
+            }
+            AdminAction::SetTimelockDelay(delay) => {
+                if *delay > MAX_TIMELOCK_DELAY {
+                    return Err(ContractError::DelayTooLarge);
+                }
+                if *delay < Self::timelock_delay(&env) {
+                    return Err(ContractError::TimelockRequired);
+                }
+            }
+            AdminAction::TransferAdmin(_) | AdminAction::Upgrade(_) => {}
         }
 
         if env.storage().instance().has(&DataKey::PendingAction) {
@@ -1356,7 +1442,7 @@ impl WatcherRegistry {
             AdminAction::TransferAdmin(new_admin) => {
                 Self::do_transfer_admin(&env, new_admin);
             }
-            AdminAction::ClearAllWatchers => Self::do_clear_all_watchers(&env),
+            AdminAction::ClearAllWatchers => Self::do_clear_all_watchers(&env)?,
             AdminAction::SetTimelockDelay(delay) => {
                 if delay > MAX_TIMELOCK_DELAY {
                     return Err(ContractError::DelayTooLarge);
@@ -1403,6 +1489,16 @@ impl WatcherRegistry {
             .instance()
             .set(&DataKey::TimelockDelay, &delay_ledgers);
 
+        // A delay being turned on (0 -> >0) must not leave a transfer that
+        // was proposed under the old, delay-free rules still acceptable
+        // afterwards with no delay applied to it. Clearing it here forces
+        // any future transfer to go through the timelocked flow.
+        if delay_ledgers > 0 && env.storage().instance().has(&DataKey::PendingAdminTransfer) {
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingAdminTransfer);
+        }
+
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("timelock")),
             (caller.clone(), delay_ledgers),
@@ -1436,10 +1532,19 @@ impl WatcherRegistry {
     }
 
     /// Replace the entire admin set with `new_admin`.
+    ///
+    /// Also clears any stale [`DataKey::PendingAdminTransfer`]: without this,
+    /// a transfer proposed before this call (whether this call came from
+    /// [`WatcherRegistry::transfer_admin`] or `execute_admin_action`'s
+    /// `TransferAdmin` arm) would remain acceptable afterwards and could
+    /// overturn the admin set this call just established.
     fn do_transfer_admin(env: &Env, new_admin: Address) {
         let old_admins = Self::load_admins(env);
         let new_admins: Vec<Address> = vec![env, new_admin.clone()];
         env.storage().instance().set(&DataKey::Admins, &new_admins);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTransfer);
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("transfer")),
@@ -1448,8 +1553,21 @@ impl WatcherRegistry {
     }
 
     /// Deauthorize every registered watcher, emitting one removal event each.
-    fn do_clear_all_watchers(env: &Env) {
+    ///
+    /// Enforces [`MIN_WATCHERS`] itself (rather than leaving it to callers) so
+    /// the guard applies identically whether this runs from
+    /// [`WatcherRegistry::clear_all_watchers`]'s direct path or from
+    /// `execute_admin_action`'s `ClearAllWatchers` arm — previously the check
+    /// lived only in `clear_all_watchers`, so enabling the timelock bypassed it.
+    /// # Errors
+    /// Returns [`ContractError::BelowMinWatchers`] if the registry is
+    /// non-empty and [`MIN_WATCHERS`] is greater than zero.
+    fn do_clear_all_watchers(env: &Env) -> Result<(), ContractError> {
         let watchers = Self::load_watchers(env);
+        if !watchers.is_empty() && MIN_WATCHERS > 0 {
+            return Err(ContractError::BelowMinWatchers);
+        }
+
         for i in 0..watchers.len() {
             let w = watchers.get(i).unwrap();
             env.events()
@@ -1461,6 +1579,8 @@ impl WatcherRegistry {
 
         // Reset the count to zero
         env.storage().instance().set(&symbol_short!("W_CNT"), &0u32);
+
+        Ok(())
     }
 
     fn increment_watcher_count(env: &Env) {
@@ -1667,12 +1787,7 @@ mod tests {
         client.accept_admin_transfer(&new_admin);
 
         let events = env.events().all();
-        // Find the transfer event
-        let found = events.events().iter().any(|e| {
-            // topics are (symbol "admin", symbol "transfer")
-            // we just verify at least one event was emitted after transfer
-            let _ = e;
-            true
+        // Find the transfer event.
         let transfer_event = events.iter().find(|(_, topics, _)| {
             topics.len() == 2
                 && Symbol::from_val(&env, &topics.get(0).unwrap())
@@ -3181,6 +3296,83 @@ mod tests {
         );
     }
 
+    /// Regression test for #408 — `AddAdmin` for an existing admin, or past
+    /// `MAX_ADMINS`, is rejected at propose time instead of silently queuing
+    /// a no-op (or a doomed action) for the full timelock delay.
+    #[test]
+    fn test_propose_add_admin_rejects_existing_and_full_set() {
+        let (env, admin, client) = setup();
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+
+        assert_eq!(
+            client
+                .try_propose_admin_action(&admin, &AdminAction::AddAdmin(admin.clone()))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::AdminAlreadyExists
+        );
+        assert!(client.get_pending_action().is_none());
+
+        for _ in 1..MAX_ADMINS {
+            let next = Address::generate(&env);
+            client.add_admin(&admin, &next);
+        }
+        assert_eq!(client.get_admins().len(), MAX_ADMINS);
+
+        let overflow = Address::generate(&env);
+        assert_eq!(
+            client
+                .try_propose_admin_action(&admin, &AdminAction::AddAdmin(overflow))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::MaxAdminsReached
+        );
+        assert!(client.get_pending_action().is_none());
+    }
+
+    /// Regression test for #410 — a direct `transfer_admin` must clear a
+    /// stale `PendingAdminTransfer`, so an old proposal cannot later be
+    /// accepted and overturn the direct transfer.
+    #[test]
+    fn test_transfer_admin_clears_stale_pending_transfer() {
+        let (env, admin, client) = setup();
+        let proposed = Address::generate(&env);
+        let direct_new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &proposed);
+        client.transfer_admin(&admin, &direct_new_admin);
+
+        // The old proposal must no longer be acceptable.
+        assert_eq!(
+            client.try_accept_admin_transfer(&proposed).unwrap_err().unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        assert_eq!(client.get_admins().len(), 1);
+        assert_eq!(client.get_admins().get(0).unwrap(), direct_new_admin);
+    }
+
+    /// Regression test for #410 — the timelocked `TransferAdmin` admin
+    /// action must also clear a stale `PendingAdminTransfer`.
+    #[test]
+    fn test_execute_transfer_admin_clears_stale_pending_transfer() {
+        let (env, admin, client) = setup();
+        let proposed = Address::generate(&env);
+        let queued_new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &proposed);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::TransferAdmin(queued_new_admin.clone()));
+        advance_ledgers(&env, TEST_DELAY);
+        client.execute_admin_action(&admin);
+
+        assert_eq!(
+            client.try_accept_admin_transfer(&proposed).unwrap_err().unwrap(),
+            ContractError::NoPendingTransfer
+        );
+        assert_eq!(client.get_admins().get(0).unwrap(), queued_new_admin);
+    }
+
     // 40. Non-admins cannot propose, cancel or execute.
     #[test]
     fn test_timelock_flow_rejects_non_admin() {
@@ -3283,6 +3475,12 @@ mod tests {
     // 42. clear_all_watchers still works when executed through the timelock.
     #[test]
     fn test_execute_clear_all_watchers() {
+        // Regression test for #407: with watchers registered, MIN_WATCHERS
+        // (1) must reject `ClearAllWatchers` the same way whether it is
+        // queued behind the timelock or called directly — previously the
+        // check lived only in `clear_all_watchers`, so the timelocked path
+        // via `propose_admin_action`/`execute_admin_action` bypassed it and
+        // actually cleared every watcher.
         let (env, admin, client) = setup();
         let w1 = Address::generate(&env);
         let w2 = Address::generate(&env);
@@ -3291,12 +3489,17 @@ mod tests {
         client.register_watcher(&admin, &w2);
 
         client.set_timelock_delay(&admin, &TEST_DELAY);
-        client.propose_admin_action(&admin, &AdminAction::ClearAllWatchers);
-        advance_ledgers(&env, TEST_DELAY);
-        client.execute_admin_action(&admin);
+        assert_eq!(
+            client
+                .try_propose_admin_action(&admin, &AdminAction::ClearAllWatchers)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::BelowMinWatchers
+        );
 
-        assert_eq!(client.get_watchers().len(), 0);
-        assert_eq!(client.get_watcher_count(), 0);
+        // Watchers are untouched since the action was never queued.
+        assert_eq!(client.get_watchers().len(), 2);
+        assert_eq!(client.get_watcher_count(), 2);
     }
 
     // 34. register_watchers emits one event per newly-added watcher

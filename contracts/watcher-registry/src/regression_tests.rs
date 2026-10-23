@@ -345,4 +345,95 @@ fn test_are_watchers_authorized_batch_query() {
         client.are_watchers_authorized(&oversized).len() as u32,
         MAX_PAGE_SIZE
     );
+/// Regression test for #403: `remove_admin` on an address that is not an
+/// admin must return `ContractError::AdminNotFound` and must not rewrite the
+/// admin set or emit an `admin.remove` event.
+#[test]
+fn test_regression_remove_admin_non_admin_target_errors() {
+    let (env, admin, client) = setup();
+    let second_admin = Address::generate(&env);
+    client.add_admin(&admin, &second_admin);
+
+    let not_an_admin = Address::generate(&env);
+    let admins_before = client.get_admins();
+
+    let res = client.try_remove_admin(&admin, &not_an_admin);
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        ContractError::AdminNotFound,
+        "Removing a non-admin target must return AdminNotFound"
+    );
+    assert_eq!(
+        client.get_admins(),
+        admins_before,
+        "Admin set must be unchanged when the target was never an admin"
+    );
+}
+
+/// Regression test for #404: enabling the timelock (raising the delay above
+/// `0`) must invalidate any admin transfer that was proposed while the
+/// timelock was off, so it cannot later be accepted with no delay applied.
+#[test]
+fn test_regression_timelock_enable_clears_pending_admin_transfer() {
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin_transfer(&admin, &new_admin);
+    client.set_timelock_delay(&admin, &10);
+
+    let res = client.try_accept_admin_transfer(&new_admin);
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        ContractError::NoPendingTransfer,
+        "Enabling the timelock must clear a transfer proposed before it was configured"
+    );
+    assert!(!client.is_admin(&new_admin));
+}
+
+/// Regression test for #405: a pending admin transfer proposed by an admin
+/// who is subsequently removed must be invalidated, not left acceptable by
+/// the proposed (potentially attacker-controlled) address.
+#[test]
+fn test_regression_pending_transfer_invalidated_on_proposer_removal() {
+    let (env, admin, client) = setup();
+    let second_admin = Address::generate(&env);
+    client.add_admin(&admin, &second_admin);
+
+    let attacker = Address::generate(&env);
+    client.propose_admin_transfer(&second_admin, &attacker);
+
+    client.remove_admin(&admin, &second_admin);
+
+    let res = client.try_accept_admin_transfer(&attacker);
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        ContractError::NoPendingTransfer,
+        "A transfer proposed by a removed admin must no longer be acceptable"
+    );
+    assert!(!client.is_admin(&attacker));
+}
+
+/// Regression test for #406: a queued `PendingAction` whose proposer is
+/// subsequently removed from the admin set must be auto-cancelled, not left
+/// executable by a remaining or colluding admin.
+#[test]
+fn test_regression_pending_action_cancelled_on_proposer_removal() {
+    let (env, admin, client) = setup();
+    let second_admin = Address::generate(&env);
+    client.add_admin(&admin, &second_admin);
+
+    let third_admin = Address::generate(&env);
+    client.propose_admin_action(&second_admin, &AdminAction::AddAdmin(third_admin.clone()));
+    assert!(client.get_pending_action().is_some());
+
+    client.remove_admin(&admin, &second_admin);
+
+    assert!(
+        client.get_pending_action().is_none(),
+        "A pending action proposed by a removed admin must be auto-cancelled"
+    );
+
+    let res = client.try_execute_admin_action(&admin);
+    assert_eq!(res.unwrap_err().unwrap(), ContractError::NoPendingAction);
+    assert!(!client.is_admin(&third_admin));
 }

@@ -9,11 +9,32 @@ Events follow the Soroban two-topic convention: `(category, action)`.
 > up to emit. The per-entry status line is authoritative — this table is
 > audited against the contract source (see issue #110 for the automated check).
 
+### Event schema versioning (#400)
+
+Event payloads have changed shape between releases with no version marker
+(see #367, #250), which leaves a long-lived indexer unable to tell whether a
+historical event and a current event with the same topics decode with the
+same code.
+
+Going forward, any event whose data shape may need to grow or change carries
+`version: u32` as the first element of its data tuple (not an extra topic,
+so existing subscriptions filtering on `(category, action)` topics keep
+working unchanged). `EVENT_SCHEMA_VERSION` in
+`contracts/alert-registry/src/lib.rs` is the current version written by this
+contract; it is bumped whenever a versioned event's data shape changes, and
+the affected event's entry below is updated with the new shape per version.
+
+An indexer should read the leading `u32` of a versioned event's data before
+decoding the rest, and keep a decoder per version it has ever seen on chain
+rather than assuming the current shape. Events not yet marked `(versioned)`
+below predate this policy and do not carry the marker; they may be migrated
+to it as their shapes change.
+
 ---
 
 ## AlertRegistry
 
-### `alert.register`
+### `alert.register` (versioned)
 
 Emitted when a new alert is successfully registered.
 
@@ -21,7 +42,15 @@ Emitted when a new alert is successfully registered.
 |---|---|
 | Topic 0 | `Symbol("alert")` |
 | Topic 1 | `Symbol("register")` |
-| Data | `(id: u64, owner: Address, target_contract: Address)` |
+| Data (v1) | `(version: u32, id: u64, owner: Address, target_contract: Address)` |
+| Data (v2) | `(version: u32, id: u64, owner: Address, target_contract: Address, label: String, webhook_hash: BytesN<32>, rules: Vec<String>)` |
+
+`version` is `2` (`EVENT_SCHEMA_VERSION`) for every alert registered by the
+current contract code. v2 adds `label`, `webhook_hash` and `rules` (#402) so
+an indexer can populate its view of a newly-registered alert from this event
+alone, instead of making a follow-up `get_alert` simulation that also fails
+in gated mode unless the indexer is itself a registered watcher. There is no
+v0 — this event has carried the version marker since it was introduced.
 
 **Status:** ✅ implemented (`register_alert`)
 

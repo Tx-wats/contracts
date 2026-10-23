@@ -119,3 +119,49 @@ Rollback is just another upgrade: invoke `upgrade` with the previous WASM hash,
 which stays installed on the network. This only works while the old build can
 still read the current state — an upgrade that migrated stored data is not
 reversible this way.
+
+## Storage schema version and migrations (`AlertRegistry`)
+
+Before this guide's checks above were codified, layout changes were migrated
+lazily and ad hoc — for example `legacy_owner_active_count_key` in
+`contracts/alert-registry/src/lib.rs`, which rewrites an entry under its old
+key the first time it is read under the new one. That approach has no way to
+tell a freshly deployed contract what layout an existing one is on, so a new
+build cannot decide whether a lazy-migration path is even needed.
+
+`AlertRegistry` now also stores an explicit schema version in instance storage
+under `instance_key::SCHEMAV`, set to `CURRENT_SCHEMA_VERSION` by both
+`__constructor` and `initialize`. Read it with:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> ... -- get_schema_version
+```
+
+When a future upgrade changes the on-chain layout (a new field, a changed
+key, a format change to an existing value), bump `CURRENT_SCHEMA_VERSION` and
+add the field rewrite inside `AlertRegistry::migrate`:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> --source deployer --network testnet \
+  -- migrate --caller <ADMIN_ADDRESS> --from <OLD_VERSION> --to <NEW_VERSION> --cursor 0
+```
+
+`migrate` is admin-only and resumable: it returns the cursor to pass into the
+next call, mirroring the cursor pattern already used by
+`deactivate_all_alerts` and `prune_expired_alerts`. Call it repeatedly with the
+returned cursor until the call that sets the cursor to the (then-current)
+alert count also advances `SCHEMAV` to `to` and emits
+`(Symbol("schema"), Symbol("migrate"))`. It rejects with
+`SchemaVersionMismatch` if `from` does not match the version currently
+stored, and with `InvalidSchemaVersion` if `to` is not strictly greater than
+`from`, so a stale or out-of-order migration call cannot silently skip steps.
+
+Recommended sequence for a layout-changing upgrade:
+
+1. Deploy the new WASM via `upgrade` as above — the new build must still be
+   able to read the **old** layout, since `migrate` has not run yet.
+2. Call `migrate` repeatedly (new cursor each time) until it reports the new
+   version via `get_schema_version`.
+3. Only after migration completes should new code paths that assume the new
+   layout be exercised (e.g. by a second, separate upgrade, or a feature flag
+   inside the same build).
