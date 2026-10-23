@@ -219,6 +219,132 @@ fn test_regression_admin_transfer_proposal_expires() {
     assert!(client.is_admin(&new_admin));
 }
 
+/// Regression test for #415: proposing a transfer to an address that is
+/// already the sole current admin must be rejected rather than creating a
+/// meaningless pending transfer and emitting an ("admin", "propose") event.
+#[test]
+fn test_regression_propose_admin_transfer_rejects_sole_admin_as_new_admin() {
+    let (env, admin, client) = setup();
+
+    let res = client.try_propose_admin_transfer(&admin, &admin);
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        ContractError::InvalidTransferRecipient,
+        "Proposing the sole admin as new_admin must be rejected"
+    );
+    // No pending transfer should have been created, and no event emitted.
+    assert!(env.events().all().is_empty());
+    assert_eq!(
+        client.try_accept_admin_transfer(&admin).unwrap_err().unwrap(),
+        ContractError::NoPendingTransfer
+    );
+
+    // A transfer to a genuinely different address still works.
+    let other = Address::generate(&env);
+    client.propose_admin_transfer(&admin, &other);
+    client.accept_admin_transfer(&other);
+    assert!(client.is_admin(&other));
+}
+
+/// Test for #416: optional per-watcher metadata (label/operator) can be set,
+/// read back, and cleared by an admin.
+#[test]
+fn test_watcher_info_set_get_and_clear() {
+    let (env, admin, client) = setup();
+    let watcher = Address::generate(&env);
+    client.register_watcher(&admin, &watcher);
+
+    assert!(client.get_watcher_info(&watcher).is_none());
+
+    let info = WatcherInfo {
+        label: String::from_str(&env, "keeper-east"),
+        operator: String::from_str(&env, "Acme Monitoring"),
+    };
+    client.set_watcher_info(&admin, &watcher, &Some(info.clone()));
+
+    let stored = client.get_watcher_info(&watcher);
+    assert_eq!(stored, Some(info));
+
+    // Clearing with None removes the stored metadata.
+    client.set_watcher_info(&admin, &watcher, &None);
+    assert!(client.get_watcher_info(&watcher).is_none());
+
+    // Non-admins cannot set watcher info.
+    let not_admin = Address::generate(&env);
+    let res = client.try_set_watcher_info(
+        &not_admin,
+        &watcher,
+        &Some(WatcherInfo {
+            label: String::from_str(&env, "x"),
+            operator: String::from_str(&env, "y"),
+        }),
+    );
+    assert_eq!(res.unwrap_err().unwrap(), ContractError::Unauthorized);
+}
+
+/// Test for #417: an unscoped watcher is authorized for every target, while
+/// a watcher with a configured scope is only authorized for listed targets.
+#[test]
+fn test_watcher_scope_restricts_is_watcher_authorized_for() {
+    let (env, admin, client) = setup();
+    let watcher = Address::generate(&env);
+    let target_a = Address::generate(&env);
+    let target_b = Address::generate(&env);
+    client.register_watcher(&admin, &watcher);
+
+    // Default: unscoped, authorized for any target.
+    assert!(client.is_watcher_authorized_for(&watcher, &target_a));
+    assert!(client.is_watcher_authorized_for(&watcher, &target_b));
+    assert!(client.get_watcher_scope(&watcher).is_empty());
+
+    // Restrict to target_a only.
+    let scope = soroban_sdk::vec![&env, target_a.clone()];
+    client.set_watcher_scope(&admin, &watcher, &scope);
+    assert!(client.is_watcher_authorized_for(&watcher, &target_a));
+    assert!(!client.is_watcher_authorized_for(&watcher, &target_b));
+    assert_eq!(client.get_watcher_scope(&watcher), scope);
+
+    // A watcher that isn't authorized at all is never authorized for a target,
+    // regardless of scope.
+    let unregistered = Address::generate(&env);
+    assert!(!client.is_watcher_authorized_for(&unregistered, &target_a));
+
+    // Clearing the scope (empty vec) restores unrestricted access.
+    client.set_watcher_scope(&admin, &watcher, &soroban_sdk::vec![&env]);
+    assert!(client.is_watcher_authorized_for(&watcher, &target_b));
+}
+
+/// Test for #418: `are_watchers_authorized` reports per-address authorization
+/// in one call and is capped at MAX_PAGE_SIZE entries.
+#[test]
+fn test_are_watchers_authorized_batch_query() {
+    let (env, admin, client) = setup();
+    let w1 = Address::generate(&env);
+    let w2 = Address::generate(&env);
+    let unregistered = Address::generate(&env);
+    client.register_watcher(&admin, &w1);
+    client.register_watcher(&admin, &w2);
+
+    let batch = soroban_sdk::vec![&env, w1.clone(), unregistered.clone(), w2.clone()];
+    let result = client.are_watchers_authorized(&batch);
+    assert_eq!(result.len(), 3);
+    assert!(result.get(0).unwrap());
+    assert!(!result.get(1).unwrap());
+    assert!(result.get(2).unwrap());
+
+    // Empty input yields empty output.
+    let empty: Vec<Address> = soroban_sdk::vec![&env];
+    assert_eq!(client.are_watchers_authorized(&empty).len(), 0);
+
+    // Entries beyond MAX_PAGE_SIZE are ignored rather than reported false.
+    let mut oversized: Vec<Address> = soroban_sdk::vec![&env];
+    for _ in 0..(MAX_PAGE_SIZE + 5) {
+        oversized.push_back(w1.clone());
+    }
+    assert_eq!(
+        client.are_watchers_authorized(&oversized).len() as u32,
+        MAX_PAGE_SIZE
+    );
 /// Regression test for #403: `remove_admin` on an address that is not an
 /// admin must return `ContractError::AdminNotFound` and must not rewrite the
 /// admin set or emit an `admin.remove` event.

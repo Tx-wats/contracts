@@ -12,7 +12,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec, Address,
-    BytesN, Env, Vec,
+    BytesN, Env, String, Vec,
 };
 
 contractmeta!(key = "Name", val = "WatcherRegistry");
@@ -59,6 +59,9 @@ pub enum ContractError {
     /// Returned by `accept_admin_transfer` when the pending admin transfer is
     /// past its expiry ledger.
     AdminTransferExpired = 16,
+    /// Returned when a proposed transfer recipient is invalid, e.g.
+    /// `propose_admin_transfer` naming the sole current admin as `new_admin`.
+    InvalidTransferRecipient = 17,
     /// Returned when proposing [`AdminAction::AddAdmin`] for an address that
     /// is already an admin — queuing it would only waste the single pending
     /// action slot for the full timelock delay on a no-op.
@@ -108,6 +111,10 @@ pub const MAX_TIMELOCK_DELAY: u32 = 518_400;
 /// compromised admin key) from halting the monitoring system entirely.
 pub const MIN_WATCHERS: u32 = 1;
 
+/// Maximum number of addresses accepted per call by batch query entry points
+/// such as [`WatcherRegistry::are_watchers_authorized`].
+pub const MAX_PAGE_SIZE: u32 = 100;
+
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Storage key variants used to address instance entries.
@@ -131,6 +138,27 @@ pub enum DataKey {
     PendingAction,
     /// Stores the `bool` paused flag.
     Paused,
+    /// Stores the optional [`WatcherInfo`] for a given watcher address.
+    WatcherInfo(Address),
+    /// Stores the optional `Vec<Address>` of target contracts a given
+    /// watcher is scoped to. Absent, or present but empty, means
+    /// unrestricted (authorized for every target).
+    WatcherScope(Address),
+}
+
+/// Optional off-chain-identifying metadata for a registered watcher.
+///
+/// Purely informational — it carries no authorization weight. Stored
+/// separately from the watcher list itself so that setting/clearing it
+/// never touches the hot `Watchers` vector.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatcherInfo {
+    /// Human-readable label for the watcher (operator-chosen free text).
+    pub label: String,
+    /// Identifier for the operator running this watcher (free text, e.g. an
+    /// organization name or contact handle).
+    pub operator: String,
 }
 
 // ── Timelock types ───────────────────────────────────────────────────────────
@@ -399,6 +427,16 @@ impl WatcherRegistry {
         Self::assert_admin(&env, &admin)?;
         Self::assert_timelock_disabled(&env)?;
         Self::assert_not_paused(&env)?;
+
+        // Proposing a transfer to an address that is already the sole admin
+        // is a no-op that would only create a meaningless pending state and
+        // emit a misleading ("admin", "propose") event. Mirrors AlertRegistry's
+        // propose_alert_transfer, which rejects `new_owner == owner` with
+        // InvalidTransferRecipient.
+        let admins = Self::load_admins(&env);
+        if admins.len() == 1 && admins.get(0).unwrap() == new_admin {
+            return Err(ContractError::InvalidTransferRecipient);
+        }
 
         let expires_at_ledger = env
             .ledger()
@@ -805,6 +843,163 @@ impl WatcherRegistry {
     #[must_use]
     pub fn is_authorized(env: Env, watcher: Address) -> bool {
         Self::is_watcher_authorized(env, watcher)
+    }
+
+    /// Check whether `watcher` is authorized for a specific `target` contract.
+    ///
+    /// Watchers have an optional scope set (see [`WatcherRegistry::set_watcher_scope`]). An
+    /// unscoped watcher (no scope set, or an empty scope) is authorized for
+    /// every target, preserving today's behavior for existing deployments.
+    /// A watcher with a non-empty scope is authorized only for the target
+    /// contracts listed in it. Callers that know the target they are
+    /// checking against (e.g. AlertRegistry's gated getters) should prefer
+    /// this over [`WatcherRegistry::is_watcher_authorized`] for multi-tenant
+    /// deployments.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    #[must_use]
+    pub fn is_watcher_authorized_for(env: Env, watcher: Address, target: Address) -> bool {
+        if !Self::is_watcher_authorized(env.clone(), watcher.clone()) {
+            return false;
+        }
+        let scope = Self::load_watcher_scope(&env, &watcher);
+        if scope.is_empty() {
+            return true;
+        }
+        for i in 0..scope.len() {
+            if scope.get(i).unwrap() == target {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set (or clear, with an empty `Vec`) the scope set of target contracts
+    /// `watcher` is restricted to (admin-only).
+    ///
+    /// An empty scope (the default) means unrestricted — the watcher is
+    /// authorized for every target, as before this feature existed. A
+    /// non-empty scope restricts [`WatcherRegistry::is_watcher_authorized_for`] to
+    /// return `true` only for the listed targets.
+    ///
+    /// Does not require `watcher` to be currently registered: operators can
+    /// pre-configure scope before `register_watcher`.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Events
+    /// Emits `("watcher", "scope")` with data `(watcher: Address, scope: Vec<Address>)`.
+    pub fn set_watcher_scope(
+        env: Env,
+        admin: Address,
+        watcher: Address,
+        scope: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WatcherScope(watcher.clone()), &scope);
+
+        env.events().publish(
+            (symbol_short!("watcher"), symbol_short!("scope")),
+            (watcher, scope),
+        );
+
+        Ok(())
+    }
+
+    /// Get the scope set configured for `watcher` via [`WatcherRegistry::set_watcher_scope`].
+    ///
+    /// Returns an empty `Vec` (meaning unrestricted) if no scope has been set.
+    #[must_use]
+    pub fn get_watcher_scope(env: Env, watcher: Address) -> Vec<Address> {
+        Self::load_watcher_scope(&env, &watcher)
+    }
+
+    /// Set (or clear, with `None`) optional off-chain-identifying metadata
+    /// for `watcher` (admin-only).
+    ///
+    /// Purely informational: carries no authorization weight and does not
+    /// require `watcher` to be currently registered.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// # Events
+    /// Emits `("watcher", "info")` with data `(watcher: Address, label: String, operator: String)`.
+    pub fn set_watcher_info(
+        env: Env,
+        admin: Address,
+        watcher: Address,
+        info: Option<WatcherInfo>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        match info {
+            Some(info) => {
+                env.events().publish(
+                    (symbol_short!("watcher"), symbol_short!("info")),
+                    (watcher.clone(), info.label.clone(), info.operator.clone()),
+                );
+                env.storage()
+                    .instance()
+                    .set(&DataKey::WatcherInfo(watcher), &info);
+            }
+            None => {
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::WatcherInfo(watcher));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the optional metadata stored for `watcher` via [`WatcherRegistry::set_watcher_info`].
+    ///
+    /// Returns `None` if no metadata has been set.
+    #[must_use]
+    pub fn get_watcher_info(env: Env, watcher: Address) -> Option<WatcherInfo> {
+        env.storage().instance().get(&DataKey::WatcherInfo(watcher))
+    }
+
+    /// Check authorization for a batch of addresses in a single call.
+    ///
+    /// Equivalent to calling [`WatcherRegistry::is_watcher_authorized`] once per address, but
+    /// avoids one simulation per address for off-chain health checks against
+    /// a fleet of watchers. `watchers` is capped at [`MAX_PAGE_SIZE`]
+    /// entries — addresses beyond that are ignored (not reported `false`),
+    /// since reporting a wrong answer would be worse than truncating.
+    /// # Panics
+    /// Panics if the contract's stored state is malformed or missing.
+    #[must_use]
+    pub fn are_watchers_authorized(env: Env, watchers: Vec<Address>) -> Vec<bool> {
+        let current = Self::load_watchers(&env);
+        let count = watchers.len().min(MAX_PAGE_SIZE);
+
+        let mut out: Vec<bool> = vec![&env];
+        for i in 0..count {
+            let candidate = watchers.get(i).unwrap();
+            let mut found = false;
+            for j in 0..current.len() {
+                if current.get(j).unwrap() == candidate {
+                    found = true;
+                    break;
+                }
+            }
+            out.push_back(found);
+        }
+        out
     }
 
     /// Remove all registered watchers in a single admin call.
@@ -1471,6 +1666,15 @@ impl WatcherRegistry {
         env.storage()
             .instance()
             .get(&DataKey::Admins)
+            .unwrap_or_else(|| vec![env])
+    }
+
+    /// Load the scope set configured for `watcher`, or an empty vec
+    /// (unrestricted) if none has been set.
+    fn load_watcher_scope(env: &Env, watcher: &Address) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::WatcherScope(watcher.clone()))
             .unwrap_or_else(|| vec![env])
     }
 
