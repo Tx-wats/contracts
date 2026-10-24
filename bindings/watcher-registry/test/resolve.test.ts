@@ -21,6 +21,8 @@ describe("WatcherRegistry package resolution (post-build)", () => {
     // Issue #279: precise network keys verification
     expect(esm.networks.testnet).toBeDefined();
     expect(esm.networks.mainnet).toBeDefined();
-    expect(esm.networks.testnet.contractId).toBe("CCSHRYACRNVSLC5NP3V2DL6LGID57TQT2TJXVUVXBBZX6SED6N3F7X6J");
+    // The concrete ID changes on every testnet redeploy (DEPLOYMENTS.md is the
+    // source of truth), so only assert that it is a well-formed strkey contract address.
+    expect(esm.networks.testnet.contractId).toMatch(/^C[A-Z2-7]{55}$/);
   });
 });
