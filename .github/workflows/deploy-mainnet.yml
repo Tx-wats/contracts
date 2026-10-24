@@ -111,7 +111,6 @@ jobs:
             --alert-hash "${{ steps.deploy.outputs.alert_hash }}" \
             --watcher-hash "${{ steps.deploy.outputs.watcher_hash }}" \
             --tag "$RELEASE_TAG" \
-            --cli-version "v28.0.0" \
             --tag "${{ github.event.inputs.release_tag }}" \
             --notes "Production mainnet release"
 
