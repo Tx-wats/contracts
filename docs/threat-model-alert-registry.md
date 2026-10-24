@@ -95,6 +95,52 @@ The contract supports:
 
 ---
 
+## Pending State
+
+`AlertRegistry` holds three kinds of staged state between transactions. Each is authority or routing that can be exercised after the situation it was proposed in has changed, so each is checked against that change.
+
+### Stale proposals
+
+| State | Created by | Expiry | Cleared when |
+|---|---|---|---|
+| `PendingAdminTransfer` | `propose_admin_transfer` | `ADMIN_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers, about 7 days) | `accept_admin_transfer`, `cancel_admin_transfer`, or `transfer_admin` |
+| `PendingTransfer(alert_id)` | `propose_alert_transfer` | `ALERT_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers) | `accept_alert_transfer`, `reject_alert_transfer`, or `cancel_alert_transfer` |
+| `pending_webhook_hash` on each `AlertConfig` | `propose_webhook` | `WEBHOOK_PROPOSAL_EXPIRY_LEDGERS` (120,960 ledgers) | `confirm_webhook`, `cancel_webhook_proposal`, a re-proposal, or `update_webhook` |
+
+### Attack scenarios
+
+- **Admin transfer accepted after a direct transfer (#365, #410).** A proposal to address B survives an admin rotation to C, and B accepts it. `transfer_admin` clears `PendingAdminTransfer`, so the old proposal cannot be accepted by its target after the handover.
+- **Admin transfer accepted after the timelock is enabled (#404).** `AlertRegistry` has no timelock; that case is handled by the `WatcherRegistry` section. Here the equivalent risk is a proposal that is still live during an incident. `accept_admin_transfer` is blocked by `pause`, and `cancel_admin_transfer` remains available while paused, so an admin can revoke the proposal before it is accepted.
+- **Stale webhook rotation (#392).** `confirm_webhook` rejects a staged hash once `WEBHOOK_PROPOSAL_EXPIRY_LEDGERS` has passed (`WebhookProposalExpired`, 29), but **the staged hash is not removed**. It stays in `pending_webhook_hash` until the owner cancels or re-proposes. A fresh proposal overwrites it, but an owner who forgets it leaves a dormant routing change on the alert. Note that `propose_webhook` itself does not expire: it can re-stage at any time.
+- **Direct update races a staged rotation.** A staged hash must not be promoted over a newer direct `update_webhook`. `update_webhook` clears `pending_webhook_hash`, so a later `confirm_webhook` has nothing to promote. See [ADR 0001](adr/0001-two-phase-webhook-rotation.md).
+
+### Mitigations
+
+- `transfer_admin` clears any pending admin transfer, so a stale admin proposal cannot survive a handover.
+- `accept_admin_transfer`, `accept_alert_transfer`, and `confirm_webhook` return errors once the expiry window has passed.
+- `pause` blocks `propose_admin_transfer` and `accept_admin_transfer`. `cancel_admin_transfer` remains available while paused, so an admin can revoke a pending proposal during an incident.
+- `update_webhook` supersedes any staged rotation.
+- Owners can cancel their own proposals with `cancel_webhook_proposal` and `cancel_alert_transfer`.
+
+### Operator checks
+
+```bash
+# Pending admin transfer: should be None, or a proposal you made and are tracking
+stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_pending_admin_transfer
+
+# Pending transfer for a specific alert: an expired entry is still returned
+stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_pending_alert_transfer --config_id <CONFIG_ID>
+
+# Staged webhook rotation: pending_webhook_hash should be null unless you are mid-rotation
+stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_alert --querier <QUERIER_ADDRESS> --config_id <CONFIG_ID>
+```
+
+- None of the getters return the expiry ledger for a pending webhook rotation. Use the `alert.wh_prop` event ledger, and treat a rotation older than 120,960 ledgers as stale.
+- Stale admin proposals are cleared with `cancel_admin_transfer`. Stale alert transfers and webhook rotations are cleared by the owner with `cancel_alert_transfer` and `cancel_webhook_proposal`.
+- Audit `("admin", "transfer")`, `("admin", "pause")`, `("alert", "xfer_prop")`, `("alert", "wh_prop")`, and `("alert", "wh_conf")` for the period since the last check.
+
+---
+
 ## Attack Scenarios
 
 ### 1. Attacker Attempts to Hijack Webhook Destination
