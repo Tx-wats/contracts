@@ -61,6 +61,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # Issue #449 — Lint feature-gated code (e.g. watcher-gating) too
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
       # Issue #387 — Fail on broken intra-doc links in rustdoc
       - name: Check rustdoc links
         run: cargo doc --workspace --no-deps --locked

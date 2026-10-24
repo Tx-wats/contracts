@@ -7,8 +7,11 @@ build:
 test:
 	cargo test --workspace --locked
 
+# Mirrors the CI clippy steps: default features first, then --all-features so
+# code behind `watcher-gating` and `testutils` is linted too.
 lint:
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --locked -- -D warnings
+	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 fmt:
 	cargo fmt --all
