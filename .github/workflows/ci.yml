@@ -259,6 +259,28 @@ jobs:
       - name: Cargo audit
         run: cargo audit
 
+  # License, banned-crate, duplicate-version, and source policy (deny.toml).
+  # Advisories stay with cargo audit above.
+  deny:
+    runs-on: ubuntu-latest
+
+    # Same toolchain override as the audit job: keep the pinned rust-toolchain.toml
+    # from applying to the cargo-deny install and run.
+    env:
+      RUSTUP_TOOLCHAIN: stable
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Cargo deny
+        run: cargo deny check licenses bans sources
+
   # Issue #350 — Lint workflow files
   actionlint:
     name: Actionlint

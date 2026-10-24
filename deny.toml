@@ -1,0 +1,43 @@
+# cargo-deny policy: licenses, banned crates, duplicate versions, and sources.
+# Advisories are gated by `cargo audit` (see the `audit` job in ci.yml), so they
+# are intentionally not checked here.
+# Run locally with: cargo deny check licenses bans sources
+
+[graph]
+all-features = true
+exclude-dev = false
+
+[licenses]
+# This repo is Apache-2.0. Every dependency must be under a permissive license
+# compatible with redistribution in the WASM artifacts.
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# Duplicate versions bloat the WASM and are reported as warnings so that
+# transitive splits from soroban-sdk do not block CI on their own.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+# Native TLS stacks do not build for wasm32-unknown-unknown and must never
+# reach the contract crates.
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
