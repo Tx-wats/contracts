@@ -175,6 +175,40 @@ stellar contract invoke \
 ### Action 2.1b: AlertRegistry Pause Policy for Pending Admin Transfers
 Pausing the AlertRegistry (`pause`) blocks `propose_admin_transfer` **and** `accept_admin_transfer`, so an attacker-controlled pending admin cannot complete a takeover while the contract is paused. `cancel_admin_transfer` is deliberately allowed while paused, so the current admin can revoke a pending proposal during the incident. `transfer_admin` also clears any pending proposal, so a stale proposal can never be accepted after the admin changes.
 
+### Action 2.1c: Clear Stale Pending State
+Before or immediately after rotating keys, cancel any staged state the compromised key could still act on. A proposal, queued action, or staged webhook rotation survives the key change unless it is cleared. See [Pending State in the WatcherRegistry threat model](threat-model.md#pending-state) and [Pending State in the AlertRegistry threat model](threat-model-alert-registry.md#pending-state).
+
+```bash
+# WatcherRegistry: cancel a pending admin transfer and any queued admin action
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source-account <UNCOMPROMISED_ADMIN_SECRET> \
+  --network <NETWORK> \
+  -- \
+  cancel_admin_transfer \
+  --admin <UNCOMPROMISED_ADMIN_ADDRESS>
+
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source-account <UNCOMPROMISED_ADMIN_SECRET> \
+  --network <NETWORK> \
+  -- \
+  cancel_admin_action \
+  --caller <UNCOMPROMISED_ADMIN_ADDRESS>
+
+# AlertRegistry: cancel a pending admin transfer (allowed while paused)
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source-account <UNCOMPROMISED_ADMIN_SECRET> \
+  --network <NETWORK> \
+  -- \
+  cancel_admin_transfer \
+  --admin <UNCOMPROMISED_ADMIN_ADDRESS>
+```
+
+* `WatcherRegistry.pause` does **not** block `accept_admin_transfer`, so a pending proposal must be cancelled, not just paused against.
+* Staged webhook rotations and per-alert transfers belong to the alert owner, not the admin. Owners cancel them with `cancel_webhook_proposal` and `cancel_alert_transfer`, and the owners of affected alerts should be told to check (see [Phase 5](#6-phase-5-stakeholder-communication--disclosure)).
+
 ### Action 2.2: AlertRegistry (or Sole Admin WatcherRegistry) Rotation
 If the compromised key is the sole admin, rotate immediately to a clean cold storage address or multisig contract:
 

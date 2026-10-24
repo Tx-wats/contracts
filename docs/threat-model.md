@@ -77,6 +77,53 @@ prevent a compromised admin from registering watchers, which stays immediate.
 
 ---
 
+## Pending State
+
+Two-step and queued admin operations keep authority in storage between transactions: a `PendingAdminTransfer` (from `propose_admin_transfer`) and a `PendingAction` (from `propose_admin_action`). Anything left there can be exercised later, after the admin set has changed, so the contract clears it on the transitions below. Operators must check for what the contract cannot clear.
+
+### Stale proposals and queued actions
+
+| State | Created by | Expiry | Cleared when |
+|---|---|---|---|
+| `PendingAdminTransfer` | `propose_admin_transfer` | `ADMIN_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers, about 7 days) | `accept_admin_transfer`, `cancel_admin_transfer`, a direct `transfer_admin`, enabling a timelock delay, or removal of the proposer via `remove_admin` |
+| `PendingAction` | `propose_admin_action` | **None.** Executable any time after `ready_at` | `execute_admin_action`, `cancel_admin_action`, or removal of the proposer via `remove_admin` |
+
+### Attack scenarios
+
+- **Proposal accepted after a direct transfer (#365, #410).** An admin proposes a transfer to address B, then rotates admin directly to C. If the old proposal survived, B could accept it and take control. `do_transfer_admin` clears `PendingAdminTransfer` on every direct handover.
+- **Proposal accepted after the timelock is enabled (#404).** A proposal made while the timelock was off stays live once `set_timelock_delay` moves the delay above zero. Enabling a delay clears `PendingAdminTransfer`, so the proposal is never accepted under the new regime. Admins must re-propose through the timelock.
+- **Proposal or queued action outlives its proposer (#405, #406).** A removed admin's proposal would otherwise remain acceptable, or their queued action remain executable by a colluding admin. `remove_admin` clears both when the proposer is removed. `accept_admin_transfer` also re-checks that the proposer is still an admin, so a proposal that slipped past this would still be rejected.
+- **Expired proposal left in storage.** After 120,960 ledgers `accept_admin_transfer` returns `AdminTransferExpired`, but the record is **not** deleted. `get_pending_admin_transfer` still returns the address. An expired record is harmless to accept but is clutter that can mislead an operator.
+- **Forgotten queued action.** A `PendingAction` has no expiry. A queued `SetTimelockDelay` or `Upgrade` that nobody cancels stays executable indefinitely once its `ready_at` has passed.
+
+### Mitigations
+
+- The contract clears pending state on every transition listed in the table above.
+- `accept_admin_transfer` is rejected once the expiry ledger has passed, and when the proposer is no longer an admin.
+- Any admin can call `cancel_admin_transfer` or `cancel_admin_action` at any time, including during an incident.
+- **Gap:** `pause` does **not** block `accept_admin_transfer` on `WatcherRegistry`; the entrypoint has no pause check. During an incident, cancel the proposal rather than relying on the pause.
+
+### Operator checks
+
+Run these after any admin rotation, timelock change, or suspected compromise:
+
+```bash
+# Pending admin transfer: should be None, or a proposal you made and are tracking
+stellar contract invoke --id <WATCHER_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_pending_admin_transfer
+
+# Queued action: should be None, or an action you proposed with a known ready_at
+stellar contract invoke --id <WATCHER_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_pending_action
+
+# Timelock delay: should match the value you intended
+stellar contract invoke --id <WATCHER_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_timelock_delay
+```
+
+- `get_pending_admin_transfer` does not return the expiry ledger. Record the ledger at which each proposal was made (from the `admin.propose` event) and treat anything older than 120,960 ledgers as stale.
+- Clear stale state with `cancel_admin_transfer` (admin) or `cancel_admin_action` (admin).
+- Audit the `("admin", "propose")`, `("admin", "cancel")`, and `("admin", "transfer")` events for the period since the last check.
+
+---
+
 ## Attack Scenarios
 
 ### 1. Attacker tries to register themselves as a watcher
