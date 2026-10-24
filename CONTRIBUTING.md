@@ -1,5 +1,15 @@
 # Contributing
 
+## Dev Container (Codespaces / VS Code)
+
+The repo ships a dev container in `.devcontainer/devcontainer.json` with everything needed to build and test:
+
+- Rust, pinned to the channel in `rust-toolchain.toml`, with the `wasm32-unknown-unknown` target
+- Stellar CLI 28.0.0, the same version CI uses
+- Node 20
+
+Open the repo in GitHub Codespaces or "Reopen in Container" in VS Code. Setup runs once on creation and compiles the Stellar CLI from source, so expect it to take a while. The manual steps below are not needed inside the container.
+
 ## Prerequisites
 
 Install the Rust toolchain and Soroban target:
