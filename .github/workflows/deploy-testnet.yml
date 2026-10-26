@@ -17,7 +17,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # Issue #124 — refuse to release a tag that CHANGELOG.md does not document.
       - name: Require a CHANGELOG section for this tag

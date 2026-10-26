@@ -19,7 +19,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # Issue #124 — refuse to release a tag that CHANGELOG.md does not document.
       - name: Require a CHANGELOG section for this tag
@@ -163,7 +163,7 @@ jobs:
 
       # ── Node.js / npm setup ──────────────────────────────────────────────────
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
