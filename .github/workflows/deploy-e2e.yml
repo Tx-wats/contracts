@@ -105,7 +105,7 @@ jobs:
           IDENTITY: deployer
         run: |
           set -o pipefail
-          bash scripts/deploy.sh
+          bash scripts/deploy.sh --watcher "$(stellar keys address deployer)"
 
       - name: Verify deployed contracts via get_configuration + get_watchers
         env:

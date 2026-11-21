@@ -86,14 +86,16 @@ curl "https://friendbot.stellar.org?addr=$(stellar keys address deployer)"
 Run the deployment script:
 
 ```bash
-bash scripts/deploy.sh
+bash scripts/deploy.sh --watcher <WATCHER_ADDRESS>
 ```
+
+`--watcher` is repeatable. Gating (the default) requires at least one: `set_watcher_registry` rejects a registry with no watchers, so the script fails early if none are given. Pass `--no-gating` to deploy without gating. On mainnet the script asks for confirmation unless `--yes` is passed.
 
 This will:
 - Compile `alert-registry` and `watcher-registry` to optimized `wasm32-unknown-unknown` binaries using single-crate `--locked` builds.
 - Install the WASM bytecode onto Testnet.
 - Instantiate `AlertRegistry` and `WatcherRegistry` with the deployer/admin address. Each contract's `__constructor` initializes it atomically during deployment, closing the deploy-then-initialize front-running window. Do not call `initialize` afterwards; it is deprecated and returns `AlreadyInitialized` on constructor-deployed contracts.
-- Wire up watcher-gating on `AlertRegistry` by invoking `set_watcher_registry` pointing to `WatcherRegistry` (unless `--no-gating` is passed).
+- Register each `--watcher` address on `WatcherRegistry`, then wire up watcher-gating on `AlertRegistry` by invoking `set_watcher_registry` pointing to `WatcherRegistry` (unless `--no-gating` is passed).
 - Verify that `AlertRegistry` reports the expected admin (`get_admin`) and gated `WatcherRegistry` (`get_watcher_registry`). The script exits non-zero on any mismatch.
 - Print the newly assigned contract addresses and WASM hashes.
 
@@ -165,6 +167,7 @@ stellar keys add deployer --secret-key <<< "$MAINNET_DEPLOYER_SECRET"
 Contract upgrades on mainnet are performed using `scripts/upgrade.sh`:
 - Bytecode is uploaded using `stellar contract upload` (replacing the deprecated `contract install`).
 - The script checks and displays both current on-chain WASM hash and new WASM hash.
+- After a direct upgrade it re-reads the deployed WASM hash and fails on mismatch. For `alert-registry` it compares `get_schema_version` with the new code's `CURRENT_SCHEMA_VERSION` and calls `migrate` until the migration completes.
 - To prevent accidental production upgrades, interactive confirmation is required, or `--yes` must be provided explicitly:
 ```bash
 ./scripts/upgrade.sh \

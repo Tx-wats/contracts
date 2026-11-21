@@ -102,7 +102,7 @@ jobs:
           IDENTITY: deployer
         run: |
           set -o pipefail
-          bash scripts/deploy.sh
+          bash scripts/deploy.sh --watcher "$(stellar keys address deployer)"
 
       - name: Install Node + run bindings e2e
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

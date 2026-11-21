@@ -93,9 +93,9 @@ jobs:
         env:
           STELLAR_IDENTITY: deployer
           NETWORK: mainnet
-        run: bash scripts/deploy.sh --network mainnet
+        run: bash scripts/deploy.sh --network mainnet --yes --watcher "${{ vars.MAINNET_WATCHER_ADDRESS }}"
         run: |
-          OUTPUT=$(bash scripts/deploy.sh --network mainnet 2>&1)
+          OUTPUT=$(bash scripts/deploy.sh --network mainnet --yes --watcher "${{ vars.MAINNET_WATCHER_ADDRESS }}" 2>&1)
           echo "$OUTPUT"
           python3 scripts/deployment_outputs.py <<< "$OUTPUT" >> "$GITHUB_OUTPUT"
 
