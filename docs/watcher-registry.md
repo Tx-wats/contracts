@@ -2,6 +2,8 @@
 
 Contract that stores authorized watcher node addresses on-chain. Only registered watchers (trusted instances of `stellar-txwatch-core`) may interact with the alert registry.
 
+Watcher scopes and how `AlertRegistry` enforces them are decided in [ADR 0003](adr/0003-watcher-scopes.md).
+
 The watcher set is capped at `MAX_WATCHERS` (100) and the admin set at `MAX_ADMINS` (10). `register_watcher`/`add_admin` return a typed error (`MaxWatchersReached`/`MaxAdminsReached`) once the cap is reached.
 The registry uses a **set of admins** (N independent signers). Any single admin can perform every privileged operation. All admin and watcher mutations emit Soroban events so changes are auditable on-chain.
 

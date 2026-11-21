@@ -144,8 +144,10 @@ jobs:
 
       - name: Build and test Alert Registry bindings
         run: |
+          export CONTRACT_ID=$(python3 scripts/deployment_address.py --network testnet --contract "Alert Registry")
           cd bindings/alert-registry
           npm install
+          npm run generate
           npm run build
           npm test
 

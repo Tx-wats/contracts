@@ -2,6 +2,8 @@
 
 Contract that stores alert configurations on-chain, keyed by contract address.
 
+Watcher scope enforcement is decided in [ADR 0003](adr/0003-watcher-scopes.md); the meaning of "active" is decided in [ADR 0002](adr/0002-alert-activity-model.md).
+
 ---
 
 ## Data Types

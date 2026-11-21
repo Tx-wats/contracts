@@ -893,6 +893,8 @@ impl WatcherRegistry {
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
     /// # Events
     /// Emits `("watcher", "scope")` with data `(watcher: Address, scope: Vec<Address>)`.
+    ///
+    /// See `docs/adr/0003-watcher-scopes.md` for how `AlertRegistry` enforces scopes.
     pub fn set_watcher_scope(
         env: Env,
         admin: Address,

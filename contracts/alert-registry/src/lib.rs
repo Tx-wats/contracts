@@ -2980,6 +2980,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
     /// and `querier` is not a registered watcher.
+    ///
+    /// See `docs/adr/0002-alert-activity-model.md` for how "active" combines the owner flag, admin suspension, snooze and expiry.
     #[deprecated(
         since = "0.3.0",
         note = "Use `get_active_contract_alerts_paginated` instead to avoid exceeding read limits on large indexes"
@@ -3116,6 +3118,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
     /// and `querier` is not a registered watcher.
+    ///
+    /// See `docs/adr/0002-alert-activity-model.md` for how "active" combines the owner flag, admin suspension, snooze and expiry.
     pub fn get_active_contract_alerts_paginated(
     /// Get a page of **active** alert configs for a target contract.
     ///
@@ -3136,6 +3140,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
     /// and `querier` is not a registered watcher.
+    ///
+    /// See `docs/adr/0002-alert-activity-model.md` for how "active" combines the owner flag, admin suspension, snooze and expiry.
     #[must_use]
     pub fn get_active_contract_alerts_paged(
         env: Env,
@@ -3239,6 +3245,8 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
     /// and `querier` is not a registered watcher.
+    ///
+    /// See `docs/adr/0002-alert-activity-model.md` for how "active" combines the owner flag, admin suspension, snooze and expiry.
     pub fn get_alert_active(
         env: Env,
         querier: Address,
@@ -3647,6 +3655,8 @@ impl AlertRegistry {
     /// live count is enough, or page the alerts with
     /// [`AlertRegistry::get_alerts_by_owner_paginated`] and filter on `active`
     /// (#384).
+    ///
+    /// See `docs/adr/0002-alert-activity-model.md` for how "active" combines the owner flag, admin suspension, snooze and expiry.
     #[deprecated(
         since = "0.2.0",
         note = "unbounded scan; prefer get_non_removed_alert_count or paginated reads (removed in 0.4.0)"
@@ -3675,6 +3685,8 @@ impl AlertRegistry {
     ///
     /// Keyed by target contract rather than owner. Deactivated alerts still
     /// count as live until they are removed.
+    ///
+    /// See `docs/adr/0002-alert-activity-model.md` for how "active" combines the owner flag, admin suspension, snooze and expiry.
     pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
         Self::contract_live_count(&env, &target_contract)
         let ids = Self::contract_index(&env, &target_contract);
@@ -3739,6 +3751,8 @@ impl AlertRegistry {
     /// perform a cross-contract call to verify that `querier` is a registered
     /// watcher. Returns `Ok(())` when no registry is configured (gating is
     /// disabled) or when the querier passes the check.
+    ///
+    /// Watcher scopes are not yet enforced here; see `docs/adr/0003-watcher-scopes.md`.
     fn assert_watcher_if_configured(env: &Env, querier: &Address) -> Result<(), ContractError> {
         let maybe_registry: Option<Address> = env.storage().instance().get(&instance_key::WATCHREG);
 

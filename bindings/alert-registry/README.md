@@ -113,9 +113,12 @@ The bindings provide TypeScript types and methods for all AlertRegistry contract
 cd ../..
 cargo build --release --target wasm32-unknown-unknown
 
-# Generate bindings
+# Generate bindings (needs the Stellar CLI and the WASM above)
 cd bindings/alert-registry
 npm install
+CONTRACT_ID=C... npm run generate   # CONTRACT_ID is optional for local builds
+
+# Compile (tsc only, works offline once dist/ exists)
 npm run build
 ```
 

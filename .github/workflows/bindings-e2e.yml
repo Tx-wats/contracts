@@ -112,6 +112,8 @@ jobs:
         working-directory: bindings/alert-registry
         run: |
           npm ci || npm install
+          export CONTRACT_ID=$(python3 ../../scripts/deployment_address.py --network testnet --contract "Alert Registry")
+          npm run generate
           npm run build
       - name: Run bindings e2e test
         working-directory: bindings/alert-registry
