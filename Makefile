@@ -20,6 +20,7 @@ check-events:
 	bash scripts/check-events-doc.sh
 
 shellcheck:
+	for f in scripts/*.sh scripts/lib/*.sh; do bash -n "$$f" || exit 1; done
 	shellcheck -x scripts/*.sh scripts/lib/*.sh
 
 deploy-testnet:

@@ -42,7 +42,7 @@ ALERT_ID=$(stellar contract deploy \
   --network "$NETWORK" \
   --rpc-url "$RPC_URL" \
   --network-passphrase "$NETWORK_PASSPHRASE" \
-  -- --admin "$ADMIN_ADDRESS"
+  -- --admin "$ADMIN_ADDRESS")
 echo "Alert Registry deployed: $ALERT_ID"
 
 echo "==> Deploying Watcher Registry..."
@@ -54,18 +54,6 @@ WATCHER_ID=$(stellar contract deploy \
   --network-passphrase "$NETWORK_PASSPHRASE" \
   -- --admin "$ADMIN_ADDRESS")
 echo "Watcher Registry deployed: $WATCHER_ID"
-
-ADMIN_ADDRESS="${ADMIN_ADDRESS:-$(stellar keys address "$IDENTITY")}"
-
-echo "==> Initializing Alert Registry..."
-stellar contract invoke \
-  --id "$ALERT_ID" \
-  --source "$IDENTITY" \
-  --network "$NETWORK" \
-  --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE" \
-  -- initialize \
-  --admin "$ADMIN_ADDRESS"
 
 if [ "$NO_GATING" = true ]; then
   echo "==> Skipping WatcherRegistry gating (--no-gating specified)."

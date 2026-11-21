@@ -11,6 +11,7 @@ on:
     paths:
       - 'bindings/**'
       - 'scripts/deploy.sh'
+      - '.github/quickstart/Dockerfile'
       - 'scripts/lib/common.sh'
       - 'scripts/update-spec-golden.sh'
       - 'scripts/spec-golden.sh'
@@ -67,7 +68,8 @@ jobs:
       - name: Start Stellar quickstart (local mode)
         run: |
           docker rm -f quickstart-local 2>/dev/null || true
-          docker run -d -p 8000:8000 --name quickstart-local stellar/quickstart --local --core-log-level error
+          QUICKSTART_IMAGE=$(awk '/^FROM /{print $2}' .github/quickstart/Dockerfile)
+          docker run -d -p 8000:8000 --name quickstart-local "$QUICKSTART_IMAGE" --local --core-log-level error
           for i in $(seq 1 80); do
             if curl -s http://localhost:8000/ >/dev/null && curl -s http://localhost:8000/soroban-rpc >/dev/null; then
               echo "quickstart ready after ${i}s"
