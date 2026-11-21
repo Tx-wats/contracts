@@ -110,6 +110,16 @@ The fuzz target subjects `AlertRegistry::validate_rule` and `AlertRegistry::vali
 
 The nightly [Fuzz targets workflow](../.github/workflows/fuzz.yml) builds both fuzz targets and runs each for 60 seconds. If a fuzz run fails, its crash artifacts are uploaded for investigation.
 
+## Reproducing Nightly CI Jobs Locally
+
+| Target | Mirrors | Requires |
+|---|---|---|
+| `make fuzz-build` | `fuzz.yml` (builds `validate_rule` and `register_alert`) | nightly toolchain, `cargo-fuzz` |
+| `make proptest-nightly` | `nightly-proptest.yml` (release WASM build + `cargo test --workspace -- --no-fail-fast`) | — |
+| `make e2e` | `deploy-e2e.yml` (starts `stellar/quickstart --local` via docker, optimizes WASM, runs `scripts/deploy.sh`) | docker, `stellar` CLI |
+
+Stop the quickstart container afterwards with `docker rm -f quickstart-local`.
+
 ## Summary
 
 | Test type | Use `mock_all_auths()`? | What it verifies |
@@ -224,17 +234,11 @@ exclude_globs = [
     "**/tests/**",
 ]
 
-exclude_re = [
-    "^#\\[cfg\\(test\\)\\]",
-    "^\\s*mod tests \\{",
-    "^\\s*mod regression_tests \\{",
-]
-
 minimum_test_timeout = 30
 timeout_multiplier = 2
 ```
 
-The `exclude_re` patterns exclude inline test modules and regression test blocks, ensuring only production code is examined for mutations.
+Only the files in `examine_globs` are mutated, so test modules (which live in separate files) are never examined. Note that cargo-mutants matches `exclude_re` against mutant names (e.g. `replace foo -> bool with true`), not source lines; check the effective scope with `cargo mutants --list`.
 
 ### Mutation Analysis & Baseline Results
 

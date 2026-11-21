@@ -18,6 +18,16 @@ use soroban_sdk::{
 contractmeta!(key = "Name", val = "WatcherRegistry");
 contractmeta!(key = "Version", val = "0.1.0");
 
+/// Instance-storage keys that are plain `Symbol`s rather than [`DataKey`]
+/// variants. The on-chain encoding is unchanged from the previous raw
+/// `symbol_short!` literals.
+pub mod instance_key {
+    use soroban_sdk::{symbol_short, Symbol};
+
+    /// `u32` number of currently registered watchers.
+    pub const W_CNT: Symbol = symbol_short!("W_CNT");
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Errors returned by `WatcherRegistry` entry points.
@@ -1079,11 +1089,11 @@ impl WatcherRegistry {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32);
         env.storage()
             .instance()
-            .set(&symbol_short!("W_CNT"), &count.saturating_sub(remove_count));
+            .set(&instance_key::W_CNT, &count.saturating_sub(remove_count));
 
         Ok(())
     }
@@ -1224,7 +1234,7 @@ impl WatcherRegistry {
     pub fn get_watcher_count(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32)
     }
 
@@ -1624,7 +1634,7 @@ impl WatcherRegistry {
         env.storage().instance().set(&DataKey::Watchers, &empty);
 
         // Reset the count to zero
-        env.storage().instance().set(&symbol_short!("W_CNT"), &0u32);
+        env.storage().instance().set(&instance_key::W_CNT, &0u32);
 
         Ok(())
     }
@@ -1633,23 +1643,23 @@ impl WatcherRegistry {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32);
         env.storage()
             .instance()
-            .set(&symbol_short!("W_CNT"), &(count + 1));
+            .set(&instance_key::W_CNT, &(count + 1));
     }
 
     fn decrement_watcher_count(env: &Env) {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32);
         if count > 0 {
             env.storage()
                 .instance()
-                .set(&symbol_short!("W_CNT"), &(count - 1));
+                .set(&instance_key::W_CNT, &(count - 1));
         }
     }
 

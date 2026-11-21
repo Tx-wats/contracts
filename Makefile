@@ -1,5 +1,6 @@
 .PHONY: build test lint fmt check-events shellcheck deploy-testnet verify upgrade audit \
-        bindings bindings-watcher bindings-alert bindings-all clean spec-check spec-golden-update
+        bindings bindings-watcher bindings-alert bindings-all clean spec-check spec-golden-update \
+        fuzz-build proptest-nightly e2e
 
 build:
 	cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
@@ -81,3 +82,33 @@ spec-check:
 # WASM. Run only after building and optimizing the release WASM.
 spec-golden-update:
 	bash scripts/update-spec-golden.sh
+
+# Mirror of .github/workflows/fuzz.yml (build step). Requires nightly + cargo-fuzz.
+fuzz-build:
+	cd contracts/alert-registry && cargo +nightly fuzz build validate_rule && cargo +nightly fuzz build register_alert
+
+# Mirror of .github/workflows/nightly-proptest.yml.
+proptest-nightly: build
+	cargo test --workspace --locked -- --no-fail-fast
+
+# Mirror of .github/workflows/deploy-e2e.yml: start stellar/quickstart in local
+# mode via docker, optimize the WASM, then run deploy.sh against it.
+# Requires: docker, stellar CLI. Stop with: docker rm -f quickstart-local
+E2E_RPC_URL := http://localhost:8000/soroban-rpc
+E2E_PASSPHRASE := Standalone Network ; February 2017
+
+e2e: build
+	docker rm -f quickstart-local 2>/dev/null || true
+	docker run -d -p 8000:8000 --name quickstart-local stellar/quickstart --local --core-log-level error
+	for i in $$(seq 1 80); do \
+		curl -sf http://localhost:8000/ >/dev/null && curl -s $(E2E_RPC_URL) >/dev/null && break; \
+		sleep 2; \
+	done
+	stellar contract optimize --wasm target/wasm32-unknown-unknown/release/alert_registry.wasm
+	stellar contract optimize --wasm target/wasm32-unknown-unknown/release/watcher_registry.wasm
+	stellar network add local --rpc-url $(E2E_RPC_URL) --network-passphrase "$(E2E_PASSPHRASE)"
+	stellar keys generate deployer --network local --overwrite
+	curl -s "http://localhost:8000/friendbot?addr=$$(stellar keys address deployer)" >/dev/null
+	NETWORK=local RPC_URL=$(E2E_RPC_URL) NETWORK_PASSPHRASE="$(E2E_PASSPHRASE)" \
+		FRIENDBOT_URL=http://localhost:8000/friendbot STELLAR_IDENTITY=deployer IDENTITY=deployer \
+		bash scripts/deploy.sh

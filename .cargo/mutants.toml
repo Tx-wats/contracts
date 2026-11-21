@@ -13,11 +13,5 @@ exclude_globs = [
     "**/tests/**",
 ]
 
-exclude_re = [
-    "^#\\[cfg\\(test\\)\\]",
-    "^\\s*mod tests \\{",
-    "^\\s*mod regression_tests \\{",
-]
-
 minimum_test_timeout = 30
 timeout_multiplier = 2
