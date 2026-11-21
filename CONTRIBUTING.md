@@ -326,6 +326,30 @@ that gap.
    reason (network timeout, rate limit), re-run it from the GitHub Actions UI.
    Do not merge around the failure.
 
+### Merge queue (recommended)
+
+Maintainers should enable GitHub's [merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
+on `main` so that required checks run against the merged result of queued PRs,
+not each branch in isolation. As a backstop, the `Main Smoke` workflow
+(`.github/workflows/main-smoke.yml`) runs `cargo check --workspace --all-targets`
+on every push to `main` and opens or updates a "main is broken" issue on failure.
+
+### Resolving conflicts in contract sources
+
+Most build breaks on `main` come from conflicts that were resolved by keeping
+both sides. When a conflict touches a contract source file (for example `lib.rs`):
+
+- [ ] **Rebase, don't merge.** Run `git fetch origin && git rebase origin/main`
+      instead of merging `main` into your branch.
+- [ ] **Never keep both versions of a function.** Pick one implementation (or
+      combine them by hand) so each function, `impl` item, error variant, and
+      storage key is defined exactly once.
+- [ ] **Remove every conflict marker** (`<<<<<<<`, `=======`, `>>>>>>>`).
+- [ ] **Re-run `cargo check --workspace --all-targets`** after resolving, then
+      `cargo test` for the affected contract, before pushing.
+- [ ] **Run the duplicate-definition lint from Issue #90** and fix anything it reports.
+- [ ] Push with `git push --force-with-lease`.
+
 ### Setting up branch protection (maintainers)
 
 If you need to re-apply the branch protection rule (e.g. after a repo transfer),
