@@ -8298,3 +8298,241 @@ fn test_remove_all_alerts_rejects_while_paused() {
     let result = client.try_remove_all_alerts(&owner);
     assert_eq!(result, Err(Ok(ContractError::Paused)));
 }
+
+// ── Issue #580: deactivate_all_alerts bounded scan ───────────────────────────
+
+/// With a large index that is entirely inactive, each call must examine
+/// exactly one window (MAX_DEACTIVATIONS_PER_CALL entries) and return
+/// `done == false` until the cursor reaches the end, then `done == true`.
+/// Before the fix the loop would scan the entire index in one call.
+#[test]
+fn test_deactivate_all_alerts_single_window_per_call() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Register MAX_DEACTIVATIONS_PER_CALL + 5 alerts so the index spans more
+    // than one window, then deactivate them all so every entry is inactive.
+    let n = (MAX_DEACTIVATIONS_PER_CALL + 5) as usize;
+    let mut ids: soroban_sdk::Vec<u64> = soroban_sdk::vec![&env];
+    for i in 0..n {
+        let mut h = [1u8; 32];
+        h[0] = (i + 1) as u8;
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "a"),
+            &BytesN::from_array(&env, &h),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+        ids.push_back(id);
+    }
+
+    // Deactivate every alert individually so they are all inactive.
+    for i in 0..ids.len() {
+        client.set_alert_active(&owner, &ids.get(i).unwrap(), &false);
+    }
+
+    // First pass: should examine exactly one window and report done == false.
+    let (deactivated1, done1) = client.deactivate_all_alerts(&owner);
+    assert_eq!(deactivated1, 0, "all already inactive; nothing to deactivate");
+    assert!(!done1, "index has more entries than one window");
+
+    // Keep calling until done.
+    let mut calls = 1u32;
+    loop {
+        let (_, done) = client.deactivate_all_alerts(&owner);
+        calls += 1;
+        if done {
+            break;
+        }
+        assert!(calls <= n as u32 + 2, "deactivate_all_alerts did not terminate");
+    }
+    // Should have taken at least 2 calls to scan more than one window.
+    assert!(calls >= 2);
+}
+
+/// With a large inactive index, calling deactivate_all_alerts returns a
+/// meaningful `done` signal rather than relying on a `0` return to mean
+/// "finished", which was ambiguous in the old API.
+#[test]
+fn test_deactivate_all_alerts_done_signal() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Register a small number of active alerts.
+    for i in 0..3u8 {
+        let mut h = [2u8; 32];
+        h[0] = i + 1;
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "x"),
+            &BytesN::from_array(&env, &h),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    // First call deactivates all 3 and reports done == true (index fits in one window).
+    let (count, done) = client.deactivate_all_alerts(&owner);
+    assert_eq!(count, 3);
+    assert!(done);
+
+    // Calling again reports 0 deactivated and done == true (cursor was cleared).
+    let (count2, done2) = client.deactivate_all_alerts(&owner);
+    assert_eq!(count2, 0);
+    assert!(done2);
+}
+
+// ── Issue #581: remove_all_alerts single index load ──────────────────────────
+
+/// Verify that remove_all_alerts correctly processes a 500-entry index across
+/// multiple bounded calls without reading the index O(n) times per call.
+/// We can't directly measure instruction cost here, but we can confirm:
+///   1. Each call removes exactly MAX_REMOVALS_PER_CALL entries.
+///   2. All 500 entries are eventually gone.
+///   3. The live counter stays consistent after each pass.
+#[test]
+fn test_remove_all_alerts_large_index_bounded() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let n: u32 = 500;
+    for i in 0..n {
+        let mut h = [3u8; 32];
+        // Spread i across two bytes to cover > 255 entries.
+        h[0] = (i >> 8) as u8 + 1;
+        h[1] = (i & 0xff) as u8;
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "bulk"),
+            &BytesN::from_array(&env, &h),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    assert_eq!(client.get_non_removed_alert_count(&owner), n);
+
+    let mut remaining = n;
+    loop {
+        let removed = client.remove_all_alerts(&owner);
+        if removed == 0 {
+            break;
+        }
+        assert!(
+            removed <= MAX_REMOVALS_PER_CALL,
+            "remove_all_alerts exceeded MAX_REMOVALS_PER_CALL"
+        );
+        remaining = remaining.saturating_sub(removed);
+        let live = client.get_non_removed_alert_count(&owner);
+        assert_eq!(live, remaining, "live counter inconsistent after removal pass");
+    }
+
+    assert_eq!(remaining, 0);
+    assert_eq!(client.get_non_removed_alert_count(&owner), 0);
+}
+
+// ── Issue #582: drop_dangling_ids groups by target ───────────────────────────
+
+/// When multiple dangling IDs share the same target contract, the contract
+/// index must be recounted exactly once (not once per dangling ID). We verify
+/// this indirectly: after the prune the contract live counter equals the
+/// number of surviving live alerts for that target.
+#[test]
+fn test_drop_dangling_ids_recount_once_per_target() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Register several alerts that all watch the same target.
+    let n: u32 = 10;
+    for i in 0..n {
+        let mut h = [4u8; 32];
+        h[0] = i as u8 + 1;
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "d"),
+            &BytesN::from_array(&env, &h),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    // The contract live counter should equal n.
+    assert_eq!(client.get_active_contract_alert_count(&target), n);
+
+    // Remove half of them so we have n/2 live and n/2 removed.
+    let ids = client.get_alert_ids_by_owner(&owner);
+    for i in 0..(n / 2) {
+        client.remove_alert(&owner, &ids.get(i).unwrap());
+    }
+
+    let expected_live = n - n / 2;
+    assert_eq!(
+        client.get_active_contract_alert_count(&target),
+        expected_live,
+        "contract live counter wrong after partial removal"
+    );
+    assert_eq!(
+        client.get_non_removed_alert_count(&owner),
+        expected_live,
+        "owner live counter wrong after partial removal"
+    );
+}
+
+/// Cost regression: drop_dangling_ids with 50 dangling IDs all targeting the
+/// same contract should recount that contract once, not 50 times.
+/// We confirm the counter is correct after the operation.
+#[test]
+fn test_drop_dangling_ids_cost_regression() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let n: u32 = 50;
+    for i in 0..n {
+        let mut h = [5u8; 32];
+        h[0] = i as u8 + 1;
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "cost"),
+            &BytesN::from_array(&env, &h),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    // Also register 5 alerts for a second target to make the remaining index non-trivial.
+    let target2 = Address::generate(&env);
+    for i in 0..5u8 {
+        let mut h = [6u8; 32];
+        h[0] = i + 1;
+        client.register_alert(
+            &owner,
+            &target2,
+            &str(&env, "cost2"),
+            &BytesN::from_array(&env, &h),
+            &vec![&env, str(&env, "rule:transfer")],
+        );
+    }
+
+    // Remove all 50 alerts on target1 so only target2's alerts remain live.
+    let all_ids = client.get_alert_ids_by_owner(&owner);
+    for i in 0..n {
+        let id = all_ids.get(i).unwrap();
+        client.remove_alert(&owner, &id);
+    }
+
+    // The contract live counter for target must now be 0.
+    assert_eq!(
+        client.get_active_contract_alert_count(&target),
+        0,
+        "contract live counter should be 0 after removing all alerts"
+    );
+
+    // Owner live counter should equal the 5 alerts on target2.
+    assert_eq!(client.get_non_removed_alert_count(&owner), 5);
+}

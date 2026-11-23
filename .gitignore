@@ -9,6 +9,8 @@ target/
 
 # Soroban test snapshots
 **/test_snapshots/
+**/__snapshots__/
+*.snap
 
 # IDE / editor
 .vscode/
@@ -33,3 +35,12 @@ abi/
 mutants.out/
 mutants.out.old/
 
+# Node / JS tooling
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

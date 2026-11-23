@@ -25,5 +25,12 @@ path = "fuzz_targets/register_alert.rs"
 test = false
 doc = false
 
+# #579 — env-free round-trip fuzzer for rule_params::parse_min_param
+[[bin]]
+name = "parse_min_param"
+path = "fuzz_targets/parse_min_param.rs"
+test = false
+doc = false
+
 [workspace]
 [workspace]
