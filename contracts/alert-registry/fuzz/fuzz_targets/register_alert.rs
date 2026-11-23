@@ -1,14 +1,11 @@
 #![no_main]
 
-use alert_registry::{AlertRegistry, AlertRegistryClient, ContractError};
+use alert_registry::{AlertRegistry, AlertRegistryClient, ContractError, VALID_RULE_DESCRIPTORS};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use soroban_sdk::{
     testutils::Address as _, Address, BytesN, Env, String as SorobanString, Vec as SorobanVec,
 };
-
-/// The set of rule descriptors the contract currently recognises.
-const VALID_RULES: &[&str] = &["rule:transfer", "rule:mint"];
 
 /// Structured fuzz input derived via `arbitrary`, replacing the manual
 /// byte-slice parsing that caused out-of-bounds indexing (see #426).
@@ -18,8 +15,8 @@ struct FuzzInput {
     label_bytes: Vec<u8>,
     /// 32-byte webhook hash.
     webhook_hash: [u8; 32],
-    /// Indices into VALID_RULES (arbitrary crate keeps values in range via
-    /// modular reduction in the harness, so any u8 value is safe).
+    /// Indices into VALID_RULE_DESCRIPTORS (arbitrary crate keeps values in
+    /// range via modular reduction in the harness, so any u8 value is safe).
     rule_indices: Vec<u8>,
 }
 
@@ -27,14 +24,10 @@ fuzz_target!(|input: FuzzInput| {
     let env = Env::default();
     env.mock_all_auths();
 
-    // Fix #3: register the contract with constructor args so initialize is
-    // called before any mutating entry point.
-    let contract_id = env.register(AlertRegistry, ());
-    let client = AlertRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    // initialize returns Err(AlreadyInitialized) on a second call; we call it
-    // exactly once here so this never fails.
-    client.initialize(&admin);
+    // Register with constructor args — no separate `initialize` call needed.
+    let contract_id = env.register(AlertRegistry, (&admin,));
+    let client = AlertRegistryClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
@@ -49,10 +42,10 @@ fuzz_target!(|input: FuzzInput| {
     let hash = BytesN::from_array(&env, &input.webhook_hash);
 
     // Build a rule list from the fuzz-controlled indices. Every index is
-    // reduced modulo VALID_RULES.len() so no OOB access is possible.
+    // reduced modulo VALID_RULE_DESCRIPTORS.len() so no OOB access is possible.
     let mut rules: SorobanVec<SorobanString> = SorobanVec::new(&env);
     for idx in &input.rule_indices {
-        let rule = VALID_RULES[*idx as usize % VALID_RULES.len()];
+        let rule = VALID_RULE_DESCRIPTORS[*idx as usize % VALID_RULE_DESCRIPTORS.len()];
         rules.push_back(SorobanString::from_str(&env, rule));
     }
 
@@ -80,7 +73,9 @@ fuzz_target!(|input: FuzzInput| {
                         | ContractError::EmptyLabel
                         | ContractError::LabelTooLong
                         | ContractError::TooManyRules
+                        | ContractError::EmptyRules
                         | ContractError::InvalidRuleDescriptor
+                        | ContractError::InvalidWebhookHash
                         | ContractError::DuplicateRule
                         | ContractError::OwnerAlertLimitExceeded
                         | ContractError::ContractAlertLimitExceeded

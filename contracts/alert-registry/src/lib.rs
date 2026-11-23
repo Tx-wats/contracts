@@ -1628,17 +1628,6 @@ impl AlertRegistry {
 
         Self::persist_alert(&env, config_id, &config);
 
-        // Update active count if active status changed
-        if was_active != active {
-            let owner = config.owner.clone();
-            let active_count = Self::owner_active_count(&env, &owner);
-            if active {
-                Self::set_owner_active_count(&env, &owner, active_count + 1);
-            } else {
-                Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
-            }
-        }
-
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("update")),
             (config_id, config.owner.clone(), active),
@@ -1748,22 +1737,10 @@ impl AlertRegistry {
 
         Self::persist_alert(&env, config_id, &config);
 
-        // Update active count if active status changed
-        if was_active != active {
-            let owner = config.owner.clone();
-            let active_count = Self::owner_active_count(&env, &owner);
-            if active {
-                Self::set_owner_active_count(&env, &owner, active_count + 1);
-            } else {
-                Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
-            }
-        }
-
         // Distinct topic from `update_alert`'s `alert.update`: an indexer can
         // tell an activation toggle (rules unchanged) from a rules rewrite
         // without re-fetching the alert (#382).
         env.events().publish(
-            (symbol_short!("alert"), symbol_short!("active")),
             (symbol_short!("alert"), symbol_short!("act_set")),
             (config_id, config.owner, active),
         );
@@ -2323,39 +2300,19 @@ impl AlertRegistry {
 
         let key = DataKey::AdminSuspended(config_id);
         if !env.storage().persistent().has(&key) {
+            let was_active = config.active;
             config.active = false;
             config.updated_at = env.ledger().timestamp();
             config.updated_ledger = env.ledger().sequence();
             config.revision = config.revision.saturating_add(1);
 
+            if was_active {
+                Self::adjust_owner_active_count(&env, &config.owner, -1);
+            }
+
             env.storage().persistent().set(&key, &true);
             Self::persist_alert(&env, config_id, &config);
-        let was_active = config.active;
-        config.active = false;
-        config.updated_at = env.ledger().timestamp();
-        config.updated_ledger = env.ledger().sequence();
-        config.revision = config.revision.saturating_add(1);
 
-        if was_active {
-            Self::adjust_owner_active_count(&env, &config.owner, -1);
-        }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminSuspended(config_id), &true);
-        Self::persist_alert(&env, config_id, &config);
-
-        // Update active count if the alert was active
-        if was_active {
-            let owner = config.owner.clone();
-            let active_count = Self::owner_active_count(&env, &owner);
-            Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
-        }
-
-        env.events().publish(
-            (symbol_short!("alert"), symbol_short!("admin_off")),
-            (config_id, admin),
-        );
             env.events().publish(
                 (symbol_short!("alert"), symbol_short!("admin_off")),
                 (config_id, admin),
@@ -4269,38 +4226,10 @@ impl AlertRegistry {
             .persistent()
             .get::<DataKey, u32>(&DataKey::OwnerActiveCount(owner.clone()))
             .unwrap_or(0)
-    /// Read the per-owner **active**-alert counter, lazily rebuilding it from
-    /// the owner index on a miss (#385).
-    ///
-    /// Every mutator that flips `active`, moves an alert between owners, or
-    /// removes one keeps this counter in step, so the rebuild only runs for
-    /// owners whose alerts predate the counter.
-    fn owner_active_count(env: &Env, owner: &Address) -> u32 {
-        let key = DataKey::OwnerActiveCount(owner.clone());
-        if let Some(count) = env.storage().persistent().get::<DataKey, u32>(&key) {
-            return count;
-        }
-        let storage = env.storage().persistent();
-        let mut count: u32 = 0;
-        for id in Self::owner_index(env, owner).iter() {
-            if storage.get::<DataKey, bool>(&DataKey::AlertActive(id)) == Some(true) {
-                count += 1;
-            }
-        }
-        Self::set_owner_active_count(env, owner, count);
-        count
     }
 
     /// Persist the running per-owner active-alert counter with a refreshed TTL.
     fn set_owner_active_count(env: &Env, owner: &Address, count: u32) {
-        env.storage()
-            .persistent()
-            .set(&DataKey::OwnerActiveCount(owner.clone()), &count);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OwnerActiveCount(owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
         let key = DataKey::OwnerActiveCount(owner.clone());
         env.storage().persistent().set(&key, &count);
         env.storage()
@@ -4339,13 +4268,8 @@ impl AlertRegistry {
         );
         let live_count = Self::owner_live_count(env, owner);
         Self::set_owner_live_count(env, owner, live_count + 1);
-        // New alerts are active by default, so increment active count too
-        let active_count = Self::owner_active_count(env, owner);
-        Self::set_owner_active_count(env, owner, active_count + 1);
         Ok(())
     }
-
-    /// Append `id` to the contract's index and persist it with a refreshed TTL.
     fn push_contract_index(env: &Env, target: &Address, id: u64) -> Result<(), ContractError> {
         let mut ids = Self::contract_index(env, target);
         for i in 0..ids.len() {
@@ -4372,17 +4296,10 @@ impl AlertRegistry {
         let ids = Self::owner_index(env, owner);
         let mut updated: Vec<u64> = vec![env];
         let mut removed = false;
-        let mut was_active = false;
         for i in 0..ids.len() {
             let v = ids.get(i).unwrap();
             if v == id {
                 removed = true;
-                // Check if the alert was active before removing
-                was_active = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, bool>(&DataKey::AlertActive(id))
-                    == Some(true);
             } else {
                 updated.push_back(v);
             }
@@ -4404,10 +4321,6 @@ impl AlertRegistry {
         if removed {
             let live_count = Self::owner_live_count(env, owner);
             Self::set_owner_live_count(env, owner, live_count.saturating_sub(1));
-            if was_active {
-                let active_count = Self::owner_active_count(env, owner);
-                Self::set_owner_active_count(env, owner, active_count.saturating_sub(1));
-            }
         }
     }
 

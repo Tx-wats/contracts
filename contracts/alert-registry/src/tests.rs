@@ -8536,3 +8536,232 @@ fn test_drop_dangling_ids_cost_regression() {
     // Owner live counter should equal the 5 alerts on target2.
     assert_eq!(client.get_non_removed_alert_count(&owner), 5);
 }
+
+// ── Issue #556: register, remove, and transfer must not double-count ─────────
+
+#[test]
+fn test_active_count_after_register() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Brand-new owner starts at zero.
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    // Exactly 1 — no double-count from push_owner_index + register_alert.
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "B"),
+        &hash64c(&env, '1'),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+}
+
+#[test]
+fn test_active_count_after_remove() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id1 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    let id2 = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "B"),
+        &hash64c(&env, '1'),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+
+    client.remove_alert(&owner, &id1);
+    // Exactly 1 — no double-decrement from remove_from_owner_index + remove_alert_record.
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    client.remove_alert(&owner, &id2);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}
+
+#[test]
+fn test_active_count_after_transfer() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "A"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+    assert_eq!(client.get_active_alert_count(&recipient), 0);
+
+    client.propose_alert_transfer(&owner, &id, &recipient);
+    client.accept_alert_transfer(&recipient, &id);
+
+    // No double-count on either side.
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+    assert_eq!(client.get_active_alert_count(&recipient), 1);
+}
+
+// ── Issue #557: update_alert and set_alert_active must not double-adjust ─────
+
+#[test]
+fn test_active_count_update_alert_toggle() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    // Deactivate — should be exactly 0, not -1 or something via saturating.
+    client.update_alert(&owner, &id, &rules, &false);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+
+    // Reactivate.
+    client.update_alert(&owner, &id, &rules, &true);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    // Deactivate again.
+    client.update_alert(&owner, &id, &rules, &false);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}
+
+#[test]
+fn test_active_count_set_alert_active_toggle() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    client.set_alert_active(&owner, &id, &false);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+
+    client.set_alert_active(&owner, &id, &true);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    client.set_alert_active(&owner, &id, &false);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}
+
+// ── Issue #558: deactivate_all_alerts must adjust counter exactly once ────────
+
+#[test]
+fn test_active_count_deactivate_all_alerts() {
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    // Register 3 active + 2 inactive alerts.
+    let id1 = client.register_alert(&owner, &target, &str(&env, "A"), &hash64c(&env, '1'), &rules);
+    let id2 = client.register_alert(&owner, &target, &str(&env, "B"), &hash64c(&env, '2'), &rules);
+    let id3 = client.register_alert(&owner, &target, &str(&env, "C"), &hash64c(&env, '3'), &rules);
+    let id4 = client.register_alert(&owner, &target, &str(&env, "D"), &hash64c(&env, '4'), &rules);
+    let id5 = client.register_alert(&owner, &target, &str(&env, "E"), &hash64c(&env, '5'), &rules);
+
+    client.set_alert_active(&owner, &id4, &false);
+    client.set_alert_active(&owner, &id5, &false);
+    assert_eq!(client.get_active_alert_count(&owner), 3);
+
+    // First pass: deactivates 3 active alerts and signals done.
+    let (count, done) = client.deactivate_all_alerts(&owner);
+    assert_eq!(count, 3);
+    assert!(done);
+    // Counter must be exactly 0, not underflowing via saturation.
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+
+    let _ = (id1, id2, id3);
+}
+
+// ── Issue #559: deactivate_alert_by_admin counter, revision, event ───────────
+
+#[test]
+fn test_deactivate_by_admin_active_count_decremented() {
+    let (env, admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
+    assert_eq!(client.get_active_alert_count(&owner), 1);
+
+    client.deactivate_alert_by_admin(&admin, &id);
+    // Counter must have decremented exactly once.
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}
+
+#[test]
+fn test_deactivate_by_admin_revision_incremented_once() {
+    let (env, admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
+    let before = client.get_alert(&owner, &id).unwrap();
+    assert_eq!(before.revision, 0);
+
+    client.deactivate_alert_by_admin(&admin, &id);
+    let after = client.get_alert(&owner, &id).unwrap();
+    // Revision must be incremented exactly once (+1), not twice.
+    assert_eq!(after.revision, 1);
+}
+
+#[test]
+fn test_deactivate_by_admin_emits_event_once() {
+    let (env, admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
+
+    let events_before = env.events().all().len();
+
+    client.deactivate_alert_by_admin(&admin, &id);
+    let events_after = env.events().all().len();
+    // Exactly one admin_off event — not two.
+    assert_eq!(events_after - events_before, 1);
+}
+
+#[test]
+fn test_deactivate_by_admin_already_inactive_no_count_change() {
+    let (env, admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule:transfer")];
+
+    let id = client.register_alert(&owner, &target, &str(&env, "A"), &hash64(&env), &rules);
+    // Deactivate via owner first.
+    client.set_alert_active(&owner, &id, &false);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+
+    // Admin deactivation of an already-inactive alert — counter stays at 0.
+    client.deactivate_alert_by_admin(&admin, &id);
+    assert_eq!(client.get_active_alert_count(&owner), 0);
+}

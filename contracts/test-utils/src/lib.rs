@@ -8,7 +8,10 @@
 //! ```
 
 use alert_registry::{AlertRegistry, AlertRegistryClient};
-use soroban_sdk::{Address, BytesN, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    Address, BytesN, Env, String,
+};
 use watcher_registry::{WatcherRegistry, WatcherRegistryClient};
 
 // ── String helpers ────────────────────────────────────────────────────────────
@@ -57,7 +60,6 @@ pub fn setup_alert_registry() -> (Env, Address, AlertRegistryClient<'static>) {
 ///
 /// Returns `(env, admin, client)`.
 pub fn setup_watcher_registry() -> (Env, Address, WatcherRegistryClient<'static>) {
-    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
