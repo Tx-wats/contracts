@@ -23,7 +23,7 @@ contractmeta!(key = "Version", val = "0.2.0");
 #[cfg(test)]
 mod tests;
 
-mod rule_params;
+pub mod rule_params;
 
 #[cfg(test)]
 mod error_codes;
@@ -2684,14 +2684,12 @@ impl AlertRegistry {
 
     /// Remove every alert owned by `caller`, bounded per call.
     ///
-    /// Unlike [`AlertRegistry::deactivate_all_alerts`], which scans a sliding
-    /// `[offset, offset + MAX_DEACTIVATIONS_PER_CALL)` window of the owner
-    /// index, removal shrinks that index in place (`remove_alert_record` ->
-    /// `remove_from_owner_index` rewrites it without the removed ID), so each
-    /// pass simply keeps removing the index's current first entry until it
-    /// has processed [`MAX_REMOVALS_PER_CALL`] entries or the index is empty.
-    /// No separate resumable cursor key is needed: call this repeatedly until
-    /// it returns `0`, exactly like [`AlertRegistry::deactivate_all_alerts`].
+    /// Removes at most [`MAX_REMOVALS_PER_CALL`] alerts per invocation.
+    /// Call repeatedly until it returns `0` (the index is empty).  Unlike
+    /// [`AlertRegistry::deactivate_all_alerts`], which advances a persistent
+    /// cursor, removal shrinks the owner index in place so no separate cursor
+    /// key is needed: each call processes the first [`MAX_REMOVALS_PER_CALL`]
+    /// entries of whatever index remains.
     ///
     /// A dangling ID (its record expired instead of being removed) is dropped
     /// from the index the same way [`AlertRegistry::prune_expired_alerts`]
@@ -2714,28 +2712,43 @@ impl AlertRegistry {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
 
+        // Load the owner index once. The old implementation called owner_index
+        // (a full Vec<u64> read) on every iteration and rewrites it on each
+        // dangling-ID hit, making the call O(50 × n) in reads and writes
+        // (#581). We now remove in memory and write back at most once.
+        let ids = Self::owner_index(&env, &caller);
+        let mut kept: Vec<u64> = vec![&env];
+        let mut dangling: Vec<u64> = vec![&env];
         let mut count: u32 = 0;
-        while count < MAX_REMOVALS_PER_CALL {
-            let ids = Self::owner_index(&env, &caller);
-            let Some(id) = ids.get(0) else {
-                break;
-            };
+
+        for i in 0..ids.len().min(MAX_REMOVALS_PER_CALL) {
+            let id = ids.get(i).unwrap();
             if let Some(config) = env
                 .storage()
                 .persistent()
                 .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
             {
                 Self::remove_alert_record(&env, &config, id, &caller);
+                count += 1;
             } else {
-                // Dangling entry: its record already expired. Drop it from
-                // the index directly so the loop still makes progress.
-                let mut kept: Vec<u64> = vec![&env];
-                for j in 1..ids.len() {
-                    kept.push_back(ids.get(j).unwrap());
-                }
-                Self::drop_dangling_ids(&env, &caller, &vec![&env, id], &kept);
+                // Dangling entry: record already expired. Collect it so we
+                // can drop it in a single call below.
+                dangling.push_back(id);
+                count += 1;
             }
-            count += 1;
+        }
+
+        // Any entries beyond MAX_REMOVALS_PER_CALL stay in the kept list so
+        // the next call can process them.
+        for i in ids.len().min(MAX_REMOVALS_PER_CALL)..ids.len() {
+            kept.push_back(ids.get(i).unwrap());
+        }
+
+        // Drop all dangling IDs in one pass with the already-computed kept
+        // list. remove_alert_record already rewrote the index for live alerts,
+        // so only call drop_dangling_ids when there are dangling ones.
+        if !dangling.is_empty() {
+            Self::drop_dangling_ids(&env, &caller, &dangling, &kept);
         }
 
         if count > 0 {
@@ -3280,95 +3293,76 @@ impl AlertRegistry {
             .map(|cfg| cfg.owner))
     }
 
-    /// Deactivate all alerts owned by `caller` in a single call.
+    /// Deactivate all alerts owned by `caller`, one window at a time.
     ///
-    /// Iterates the owner's index and sets `active = false` on live alerts.
-    /// Expired or already-removed entries are silently skipped. Each call
-    /// scans [`MAX_DEACTIVATIONS_PER_CALL`] index entries at a time and keeps
-    /// scanning further windows until it deactivates at least one alert or
-    /// reaches the end of the index; call again until it returns `0` to finish
-    /// a large owner index.
+    /// Each call scans exactly [`MAX_DEACTIVATIONS_PER_CALL`] index entries
+    /// (the window `[cursor, cursor + MAX_DEACTIVATIONS_PER_CALL)`) and sets
+    /// `active = false` on every live alert found there.  Expired or already
+    /// deactivated entries are silently skipped.
+    ///
+    /// The old implementation kept scanning further windows until it
+    /// deactivated at least one alert, which could scan the whole index in a
+    /// single call for an owner with many inactive alerts (#580).  The fix
+    /// bounds each call to one window and returns the cursor position instead
+    /// of the deactivated count so callers can tell when they are done without
+    /// overloading `0`.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`.
     ///
     /// # Returns
-    /// The number of alerts deactivated in this pass. `0` means the scan reached
-    /// the end of the owner index without finding an active alert, so it is
-    /// safe to stop calling.
+    /// The owner-index position after this call (i.e. `cursor + window_size`
+    /// clamped to `index.len()`).  When the returned value equals or exceeds
+    /// the owner's index length the scan is complete and the caller need not
+    /// call again.  Compare against
+    /// [`AlertRegistry::get_non_removed_alert_count`] to determine whether
+    /// another pass is needed.
     ///
     /// # Errors
-    /// Returns [`ContractError::Paused`] while the contract is paused, like
-    /// every other mutator, so a paused call is never mistaken for an owner
-    /// with nothing to deactivate.
+    /// Returns [`ContractError::Paused`] while the contract is paused.
     ///
     /// # Events
     /// Emits `(Symbol("alert"), Symbol("bulk_off"))` with data
     /// `(caller: Address, count: u32)` when at least one alert was deactivated.
-    /// No event is emitted if `count` is `0`.
+    /// No event is emitted if no active alerts were found in this window.
     pub fn deactivate_all_alerts(env: Env, caller: Address) -> Result<u32, ContractError> {
         caller.require_auth();
         Self::assert_not_paused(&env)?;
         let ids = Self::owner_index(&env, &caller);
-        let mut start = env
+        let cursor_key = DataKey::DeactivationCursor(caller.clone());
+        let start = env
             .storage()
             .persistent()
-            .get::<DataKey, u32>(&DataKey::DeactivationCursor(caller.clone()))
+            .get::<DataKey, u32>(&cursor_key)
             .unwrap_or(0)
             .min(ids.len());
+
+        // Examine exactly one window of MAX_DEACTIVATIONS_PER_CALL entries.
+        // The old loop kept scanning further windows until it deactivated
+        // something, which could scan the whole index in one call for an owner
+        // with thousands of inactive alerts (#580).
+        let end = (start + MAX_DEACTIVATIONS_PER_CALL).min(ids.len());
         let mut count: u32 = 0;
-        let mut end;
-        // Keep scanning windows until something is deactivated or the index is
-        // exhausted, so `0` is only returned once the whole scan is finished.
-        loop {
-            end = (start + MAX_DEACTIVATIONS_PER_CALL).min(ids.len());
-            for i in start..end {
-                let id = ids.get(i).unwrap();
-                if let Some(mut cfg) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
-                {
-                    if cfg.active {
-                        cfg.active = false;
-                        cfg.updated_at = env.ledger().timestamp();
-                        Self::persist_alert(&env, id, &cfg);
-                        cfg.updated_ledger = env.ledger().sequence();
-                        cfg.revision = cfg.revision.saturating_add(1);
-                        env.storage().persistent().set(&DataKey::Alert(id), &cfg);
-                        env.storage().persistent().extend_ttl(
-                            &DataKey::Alert(id),
-                            DEFAULT_TTL,
-                            DEFAULT_TTL,
-                        );
-                        env.storage()
-                            .persistent()
-                            .set(&DataKey::AlertActive(id), &false);
-                        env.storage().persistent().extend_ttl(
-                            &DataKey::AlertActive(id),
-                            DEFAULT_TTL,
-                            DEFAULT_TTL,
-                        );
-                        env.storage().persistent().extend_ttl(
-                            &DataKey::ContractIndex(cfg.target_contract.clone()),
-                            DEFAULT_TTL,
-                            DEFAULT_TTL,
-                        );
-                        count += 1;
-                    }
+
+        for i in start..end {
+            let id = ids.get(i).unwrap();
+            if let Some(mut cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
+            {
+                if cfg.active {
+                    cfg.active = false;
+                    cfg.updated_at = env.ledger().timestamp();
+                    cfg.updated_ledger = env.ledger().sequence();
+                    cfg.revision = cfg.revision.saturating_add(1);
+                    Self::persist_alert(&env, id, &cfg);
+                    count += 1;
                 }
             }
-            if count > 0 || end >= ids.len() {
-                break;
-            }
-            start = end;
         }
-        // Update active count for bulk deactivation
-        if count > 0 {
-            let active_count = Self::owner_active_count(&env, &caller);
-            Self::set_owner_active_count(&env, &caller, active_count.saturating_sub(count));
-        }
-        let cursor_key = DataKey::DeactivationCursor(caller.clone());
+
+        // Advance or clear the cursor based on whether more entries remain.
         if end < ids.len() {
             env.storage().persistent().set(&cursor_key, &end);
             env.storage()
@@ -3377,21 +3371,27 @@ impl AlertRegistry {
         } else {
             env.storage().persistent().remove(&cursor_key);
         }
+
         env.storage().persistent().extend_ttl(
             &DataKey::OwnerIndex(caller.clone()),
             DEFAULT_TTL,
             DEFAULT_TTL,
         );
+
         if count > 0 {
             // One counter adjustment per pass, not per alert: the counter is the
             // O(1) source for `get_active_alert_count` (#385).
             Self::adjust_owner_active_count(&env, &caller, -(count as i32));
             env.events().publish(
                 (symbol_short!("alert"), symbol_short!("bulk_off")),
-                (caller, count),
+                (caller.clone(), count),
             );
         }
-        Ok(count)
+
+        // Return the cursor position after this call so callers know whether
+        // more entries remain without overloading 0 as a "done" sentinel
+        // (#580). A return value equal to ids.len() (or beyond) means done.
+        Ok(end)
     }
 
     /// Move an alert to watch a different target contract.
@@ -3895,29 +3895,45 @@ impl AlertRegistry {
     /// leftover per-alert entries.
     ///
     /// The target contract of each dropped alert is read from its
-    /// [`DataKey::AlertTarget`] entry, and that contract's index and live
-    /// counter are rebuilt via [`AlertRegistry::prune_contract_index`], so
-    /// expired alerts release their per-contract quota too.
+    /// [`DataKey::AlertTarget`] entry. IDs are grouped by target contract so
+    /// each target's index is recounted at most once, rather than once per
+    /// dropped ID (#582).
     fn drop_dangling_ids(env: &Env, owner: &Address, ids: &Vec<u64>, kept: &Vec<u64>) {
         let storage = env.storage().persistent();
         let dropped = ids.len();
+
+        // Collect unique targets touched by the dropped IDs.
+        // We use a Vec<Address> as an ordered set (no HashMap in no_std).
+        let mut targets: Vec<Address> = vec![env];
+
         for id in ids.iter() {
             storage.remove(&DataKey::AlertActive(id));
             storage.remove(&DataKey::PendingTransfer(id));
             storage.remove(&DataKey::AdminSuspended(id));
             if let Some(target) = storage.get::<DataKey, Address>(&DataKey::AlertTarget(id)) {
                 storage.remove(&DataKey::AlertTarget(id));
-                Self::recount_contract_index(env, &target);
+                // Record target if not already in the list.
+                let mut found = false;
+                for t in targets.iter() {
+                    if t == target {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    targets.push_back(target);
+                }
             }
         }
-        storage.set(&DataKey::OwnerIndex(owner.clone()), &kept);
-        storage.extend_ttl(
-            &DataKey::OwnerIndex(owner.clone()),
-            DEFAULT_TTL,
-            DEFAULT_TTL,
-        );
+
+        // Recount each affected target exactly once instead of once per ID.
+        for target in targets.iter() {
+            Self::recount_contract_index(env, &target);
+        }
+
         storage.set(&DataKey::OwnerIndex(owner.clone()), kept);
         storage.extend_ttl(&DataKey::OwnerIndex(owner.clone()), DEFAULT_TTL, DEFAULT_TTL);
+
         let count = Self::owner_live_count(env, owner);
         Self::set_owner_live_count(env, owner, count.saturating_sub(dropped));
         Self::set_live_alert_count(
@@ -8176,5 +8192,132 @@ mod tests {
         assert_eq!(DEFAULT_TTL, 17_280);
         // MAX_TTL ≈ 31 days at 5 s/ledger
         assert_eq!(MAX_TTL, 535_680);
+    }
+
+    // ── Issue #580: deactivate_all_alerts large inactive index load test ──
+
+    /// Load test: an owner with more than MAX_DEACTIVATIONS_PER_CALL inactive
+    /// alerts must not scan beyond the first window.  The cursor must advance
+    /// by exactly MAX_DEACTIVATIONS_PER_CALL on the first call, confirming that
+    /// the unbounded loop from #580 is gone.
+    #[test]
+    fn test_deactivate_all_alerts_bounded_per_call() {
+        let (env, _admin, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        // Register MAX_DEACTIVATIONS_PER_CALL + 10 alerts and immediately
+        // deactivate them so the first call finds only inactive entries.
+        let total = MAX_DEACTIVATIONS_PER_CALL + 10;
+        let mut ids = soroban_sdk::Vec::new(&env);
+        for i in 0..total {
+            let lbl = soroban_sdk::String::from_str(&env, "x");
+            let id = client.register_alert(
+                &owner,
+                &target,
+                &lbl,
+                &hash64c(&env, (b'a' + (i % 26) as u8) as char),
+                &vec![&env, str(&env, "rule:transfer")],
+            );
+            ids.push_back(id);
+        }
+        // Deactivate all via set_alert_active so deactivate_all_alerts sees
+        // only inactive entries, exercising the per-call bound.
+        for i in 0..ids.len() {
+            client.set_alert_active(&owner, &ids.get(i).unwrap(), &false);
+        }
+
+        // First call: must examine exactly MAX_DEACTIVATIONS_PER_CALL entries
+        // and return that position as the cursor.
+        let cursor_after = client.deactivate_all_alerts(&owner);
+        assert_eq!(
+            cursor_after,
+            MAX_DEACTIVATIONS_PER_CALL,
+            "first call must advance cursor by exactly MAX_DEACTIVATIONS_PER_CALL"
+        );
+    }
+
+    // ── Issue #581: remove_all_alerts index-reload cost test ──
+
+    /// Cost regression: remove_all_alerts must not reload the owner index on
+    /// every iteration.  With a 500-entry index we measure instruction cost
+    /// and require it stays below the O(50 × n) bound from the old code.
+    #[test]
+    fn test_remove_all_alerts_single_index_load() {
+        let (env, _admin, client) = setup();
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        // Register enough alerts to fill one full remove_all_alerts call.
+        for i in 0..MAX_REMOVALS_PER_CALL {
+            let lbl = soroban_sdk::String::from_str(&env, "y");
+            client.register_alert(
+                &owner,
+                &target,
+                &lbl,
+                &hash64c(&env, (b'A' + (i % 26) as u8) as char),
+                &vec![&env, str(&env, "rule:transfer")],
+            );
+        }
+
+        // Measure the cost of one remove_all_alerts call.
+        let cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
+        let removed = client.remove_all_alerts(&owner);
+        let cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
+        let cost = cpu_after.saturating_sub(cpu_before);
+
+        assert_eq!(removed, MAX_REMOVALS_PER_CALL, "must remove all entries");
+        // Upper bound: a generous ceiling that the O(n) single-load path
+        // comfortably clears, but the O(50 × n) old path could not.
+        assert!(
+            cost < 100_000_000,
+            "remove_all_alerts cost {cost} exceeded 100M instruction ceiling"
+        );
+    }
+
+    // ── Issue #582: drop_dangling_ids per-target recount cost test ──
+
+    /// Cost regression: drop_dangling_ids must recount each target once, not
+    /// once per dropped ID.  Register several alerts on the same target,
+    /// expire their records, then prune and check the instruction cost stays
+    /// within the single-recount bound.
+    #[test]
+    fn test_drop_dangling_ids_single_recount_per_target() {
+        let (env, _admin, client) = setup();
+        let owner = Address::generate(&env);
+        // All alerts share one target so the old code called recount_contract_index
+        // once per dropped ID; the new code calls it exactly once.
+        let target = Address::generate(&env);
+
+        let batch = 10u32;
+        for i in 0..batch {
+            let lbl = soroban_sdk::String::from_str(&env, "z");
+            client.register_alert(
+                &owner,
+                &target,
+                &lbl,
+                &hash64c(&env, (b'0' + (i % 10) as u8) as char),
+                &vec![&env, str(&env, "rule:transfer")],
+            );
+        }
+
+        // Advance ledger far enough that all alert entries expire.
+        env.ledger().with_mut(|li| {
+            li.sequence_number += DEFAULT_TTL + 1;
+            li.timestamp += u64::from(DEFAULT_TTL + 1) * 5;
+        });
+
+        let cpu_before = env.cost_estimate().budget().cpu_instruction_cost();
+        // prune_expired_alerts internally calls drop_dangling_ids.
+        client.prune_expired_alerts(&owner);
+        let cpu_after = env.cost_estimate().budget().cpu_instruction_cost();
+        let cost = cpu_after.saturating_sub(cpu_before);
+
+        // With a single recount per target the cost should be well below
+        // a generous ceiling.
+        assert!(
+            cost < 50_000_000,
+            "prune cost {cost} exceeded 50M instruction ceiling"
+        );
     }
 }

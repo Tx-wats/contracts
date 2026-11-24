@@ -37,6 +37,7 @@ jobs:
         run: |
           cargo +nightly fuzz build validate_rule
           cargo +nightly fuzz build register_alert
+          cargo +nightly fuzz build parse_min_param
 
       - name: Fuzz validate_rule
         working-directory: contracts/alert-registry
@@ -45,6 +46,10 @@ jobs:
       - name: Fuzz register_alert
         working-directory: contracts/alert-registry
         run: cargo +nightly fuzz run register_alert -- -max_total_time=60
+
+      - name: Fuzz parse_min_param
+        working-directory: contracts/alert-registry
+        run: cargo +nightly fuzz run parse_min_param -- -max_total_time=60
 
       - name: Upload crash artifacts
         if: failure()

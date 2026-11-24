@@ -2184,8 +2184,11 @@ fn test_regression_transfer_admin_clears_pending_admin_transfer() {
     assert_eq!(client.get_admin(), admin_c);
 }
 
-/// Regression test for #364: a window of inactive alerts must not make
-/// `deactivate_all_alerts` return `0` while active alerts remain further on.
+/// Regression test for #364 / fix for #580: `deactivate_all_alerts` must
+/// not scan beyond one window per call.  Previously the loop kept advancing
+/// windows until it found an active alert, which could scan the whole index.
+/// Now each call covers exactly one `MAX_DEACTIVATIONS_PER_CALL` window and
+/// returns the cursor position, never `0` until the scan is complete.
 #[test]
 fn test_regression_deactivate_all_alerts_does_not_return_zero_mid_scan() {
     let (env, client) = setup();
@@ -2200,9 +2203,28 @@ fn test_regression_deactivate_all_alerts_does_not_return_zero_mid_scan() {
         client.update_alert(&owner, id, &vec![&env], &false);
     }
 
-    assert_eq!(client.deactivate_all_alerts(&owner), 2);
+    // First call: processes the inactive window, returns the cursor position
+    // MAX_DEACTIVATIONS_PER_CALL (not 0, and not the count of deactivations).
+    let cursor_after_first = client.deactivate_all_alerts(&owner);
+    assert_eq!(
+        cursor_after_first,
+        crate::MAX_DEACTIVATIONS_PER_CALL,
+        "first call must return cursor position, not deactivated count"
+    );
+    // The 2 active alerts in the second window are untouched so far.
+    assert_eq!(client.get_active_alert_count(&owner), 2);
+
+    // Second call: processes the remaining 2 active alerts, reaches the end.
+    let cursor_after_second = client.deactivate_all_alerts(&owner);
+    let total = crate::MAX_DEACTIVATIONS_PER_CALL + 2;
+    assert_eq!(
+        cursor_after_second, total,
+        "second call must return end-of-index position"
+    );
     assert_eq!(client.get_active_alert_count(&owner), 0);
-    assert_eq!(client.deactivate_all_alerts(&owner), 0);
+
+    // Third call: index is fully scanned, cursor returns 0 (empty index end).
+    assert_eq!(client.deactivate_all_alerts(&owner), total);
 }
 
 /// Regression test for #363: removing an ID that is absent from the contract

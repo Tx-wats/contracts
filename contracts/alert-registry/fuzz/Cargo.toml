@@ -25,5 +25,11 @@ path = "fuzz_targets/register_alert.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "parse_min_param"
+path = "fuzz_targets/parse_min_param.rs"
+test = false
+doc = false
+
 [workspace]
 [workspace]

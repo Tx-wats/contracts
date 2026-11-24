@@ -9,6 +9,9 @@ target/
 
 # Soroban test snapshots
 **/test_snapshots/
+**/__snapshots__/
+*.snap
+*.snap.new
 
 # IDE / editor
 .vscode/
@@ -33,3 +36,10 @@ abi/
 mutants.out/
 mutants.out.old/
 
+# Node / JS tooling
+node_modules/
+dist/
+*.tsbuildinfo
+
+# OS noise
+Thumbs.db

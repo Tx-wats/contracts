@@ -490,20 +490,31 @@ fn run_state_machine(actions: Vec<AlertAction>) {
 
             AlertAction::DeactivateAll { caller_idx } => {
                 let caller = &owners[caller_idx % owners.len()];
-                let deactivated_count = client.deactivate_all_alerts(caller);
+                let cursor_after = client.deactivate_all_alerts(caller);
 
-                let expected_deactivated = model_alerts
-                    .values_mut()
-                    .filter(|a| {
-                        !a.removed && a.owner_idx == (caller_idx % owners.len()) && a.active
-                    })
-                    .map(|a| {
+                // Count how many live, active alerts this owner had in the
+                // first window (the contract now returns a cursor position,
+                // not the deactivated count, so we verify via active-count).
+                let owner_live: u32 = model_alerts
+                    .values()
+                    .filter(|a| !a.removed && a.owner_idx == (caller_idx % owners.len()))
+                    .count() as u32;
+                let window_end = owner_live.min(crate::MAX_DEACTIVATIONS_PER_CALL);
+                assert_eq!(cursor_after, window_end,
+                    "cursor must equal min(live_count, MAX_DEACTIVATIONS_PER_CALL)");
+
+                // Update model: deactivate alerts in the first window.
+                let mut processed = 0u32;
+                for a in model_alerts.values_mut() {
+                    if processed >= crate::MAX_DEACTIVATIONS_PER_CALL {
+                        break;
+                    }
+                    if !a.removed && a.owner_idx == (caller_idx % owners.len()) {
                         a.active = false;
                         a.updated_at = current_time;
-                    })
-                    .count() as u32;
-
-                assert_eq!(deactivated_count, expected_deactivated);
+                        processed += 1;
+                    }
+                }
             }
 
             AlertAction::RemoveAlert {
