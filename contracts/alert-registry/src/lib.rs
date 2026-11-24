@@ -3363,11 +3363,7 @@ impl AlertRegistry {
             }
             start = end;
         }
-        // Update active count for bulk deactivation
-        if count > 0 {
-            let active_count = Self::owner_active_count(&env, &caller);
-            Self::set_owner_active_count(&env, &caller, active_count.saturating_sub(count));
-        }
+
         let cursor_key = DataKey::DeactivationCursor(caller.clone());
         if end < ids.len() {
             env.storage().persistent().set(&cursor_key, &end);
