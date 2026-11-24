@@ -705,6 +705,17 @@ impl AlertRegistry {
         env.storage()
             .instance()
             .remove(&DataKey::PendingAdminTransfer);
+        // Clear the guardian on admin handover so the new admin does not inherit
+        // a guardian chosen by the compromised key.
+        if env.storage().instance().has(&instance_key::GUARDIAN) {
+            env.storage()
+                .instance()
+                .remove(&instance_key::GUARDIAN);
+            env.events().publish(
+                (symbol_short!("admin"), symbol_short!("guardian")),
+                (admin.clone(), Option::<Address>::None),
+            );
+        }
         Self::extend_instance_ttl(&env);
 
         // Admin handover is security-relevant: emit it so off-chain watchers
@@ -817,17 +828,23 @@ impl AlertRegistry {
             .get(&instance_key::ADMIN)
             .ok_or(ContractError::NotInitialized)?;
 
-        let old_admin: Address = env
-            .storage()
-            .instance()
-            .get(&instance_key::ADMIN)
-            .ok_or(ContractError::NotInitialized)?;
         env.storage()
             .instance()
             .set(&instance_key::ADMIN, &new_admin);
         env.storage()
             .instance()
             .remove(&DataKey::PendingAdminTransfer);
+        // Clear the guardian on admin handover so the new admin does not inherit
+        // a guardian chosen by the compromised key.
+        if env.storage().instance().has(&instance_key::GUARDIAN) {
+            env.storage()
+                .instance()
+                .remove(&instance_key::GUARDIAN);
+            env.events().publish(
+                (symbol_short!("admin"), symbol_short!("guardian")),
+                (old_admin.clone(), Option::<Address>::None),
+            );
+        }
         Self::extend_instance_ttl(&env);
 
         env.events().publish(
@@ -867,8 +884,6 @@ impl AlertRegistry {
             .remove(&DataKey::PendingAdminTransfer);
         Self::extend_instance_ttl(&env);
 
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("cancel")), admin);
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("cancel")),
             (admin,),
@@ -962,7 +977,7 @@ impl AlertRegistry {
             per_contract_alert_limit: Self::get_per_contract_alert_limit(env.clone()),
             global_alert_limit: Self::get_global_alert_limit(env.clone()),
             watcher_registry: Self::get_watcher_registry(env.clone()),
-            pending_admin: Self::get_pending_admin_transfer(env),
+            pending_admin: Self::get_pending_admin_transfer(env.clone()),
             guardian: Self::get_guardian(env),
         })
     }
@@ -992,25 +1007,17 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
-    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::assert_admin(&env, &admin)?;
-        if !Self::is_paused(env.clone()) {
-            env.storage().instance().set(&instance_key::PAUSED, &true);
-            Self::extend_instance_ttl(&env);
-            env.events()
-                .publish((symbol_short!("admin"), symbol_short!("pause")), admin);
-        }
     /// Returns [`ContractError::NotAGuardian`] if `caller` is neither the admin nor the
     /// configured guardian.
     pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin_or_guardian(&env, &caller)?;
-        env.storage().instance().set(&instance_key::PAUSED, &true);
-        Self::extend_instance_ttl(&env);
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("pause")), (admin,));
-            .publish((symbol_short!("admin"), symbol_short!("pause")), caller);
+        if !Self::is_paused(env.clone()) {
+            env.storage().instance().set(&instance_key::PAUSED, &true);
+            Self::extend_instance_ttl(&env);
+            env.events()
+                .publish((symbol_short!("admin"), symbol_short!("pause")), caller);
+        }
         Ok(())
     }
 
@@ -1035,10 +1042,6 @@ impl AlertRegistry {
             env.events()
                 .publish((symbol_short!("admin"), symbol_short!("unpause")), admin);
         }
-        env.storage().instance().set(&instance_key::PAUSED, &false);
-        Self::extend_instance_ttl(&env);
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("unpause")), (admin,));
         Ok(())
     }
 
@@ -1068,6 +1071,7 @@ impl AlertRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if `admin` is not the current admin.
+    /// Returns [`ContractError::Paused`] while the contract is paused.
     ///
     /// # Events
     /// Emits `(Symbol("admin"), Symbol("guardian"))` with data
@@ -1079,6 +1083,7 @@ impl AlertRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
         env.storage()
             .instance()
             .set(&instance_key::GUARDIAN, &guardian);
@@ -1332,55 +1337,6 @@ impl AlertRegistry {
     /// watcher-gating has not been enabled.
     pub fn get_watcher_registry(env: Env) -> Option<Address> {
         env.storage().instance().get(&instance_key::WATCHREG)
-    }
-
-    /// Set (or clear) the optional guardian address (admin only).
-    ///
-    /// The guardian is an on-call operator or monitoring bot that may trip the
-    /// circuit-breaker with [`AlertRegistry::pause`] but can never
-    /// [`AlertRegistry::unpause`] or perform any other admin action. This lets
-    /// a low-trust key respond to incidents without also holding the power to
-    /// upgrade the contract or change limits.
-    ///
-    /// Passing `None` clears the guardian.
-    ///
-    /// # Auth
-    /// Requires a valid Stellar auth signature from `admin`.
-    ///
-    /// # Errors
-    /// Returns [`ContractError::NotInitialized`] if the contract has not been
-    /// initialized.
-    /// Returns [`ContractError::Unauthorized`] if `admin` is not the admin.
-    /// Returns [`ContractError::Paused`] while the contract is paused.
-    ///
-    /// # Events
-    /// Emits `(Symbol("admin"), Symbol("guardian"))` with data
-    /// `(admin: Address, guardian: Option<Address>)`.
-    pub fn set_guardian(
-        env: Env,
-        admin: Address,
-        guardian: Option<Address>,
-    ) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::assert_admin(&env, &admin)?;
-        Self::assert_not_paused(&env)?;
-
-        match &guardian {
-            Some(g) => env.storage().instance().set(&instance_key::GUARDIAN, g),
-            None => env.storage().instance().remove(&instance_key::GUARDIAN),
-        }
-        Self::extend_instance_ttl(&env);
-
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("guardian")),
-            (admin, guardian),
-        );
-        Ok(())
-    }
-
-    /// Return the configured guardian address, or `None` if none is set.
-    pub fn get_guardian(env: Env) -> Option<Address> {
-        env.storage().instance().get(&instance_key::GUARDIAN)
     }
 
     /// Set (or clear) the optional ledger at which an alert automatically
@@ -2321,39 +2277,28 @@ impl AlertRegistry {
 
         let key = DataKey::AdminSuspended(config_id);
         if !env.storage().persistent().has(&key) {
+            let was_active = config.active;
             config.active = false;
             config.updated_at = env.ledger().timestamp();
             config.updated_ledger = env.ledger().sequence();
             config.revision = config.revision.saturating_add(1);
 
-            env.storage().persistent().set(&key, &true);
+            env.storage()
+                .persistent()
+                .set(&key, &true);
             Self::persist_alert(&env, config_id, &config);
-        let was_active = config.active;
-        config.active = false;
-        config.updated_at = env.ledger().timestamp();
-        config.updated_ledger = env.ledger().sequence();
-        config.revision = config.revision.saturating_add(1);
 
-        if was_active {
-            Self::adjust_owner_active_count(&env, &config.owner, -1);
-        }
+            if was_active {
+                Self::adjust_owner_active_count(&env, &config.owner, -1);
+            }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminSuspended(config_id), &true);
-        Self::persist_alert(&env, config_id, &config);
+            // Update active count if the alert was active
+            if was_active {
+                let owner = config.owner.clone();
+                let active_count = Self::owner_active_count(&env, &owner);
+                Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
+            }
 
-        // Update active count if the alert was active
-        if was_active {
-            let owner = config.owner.clone();
-            let active_count = Self::owner_active_count(&env, &owner);
-            Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
-        }
-
-        env.events().publish(
-            (symbol_short!("alert"), symbol_short!("admin_off")),
-            (config_id, admin),
-        );
             env.events().publish(
                 (symbol_short!("alert"), symbol_short!("admin_off")),
                 (config_id, admin),
@@ -3047,17 +2992,6 @@ impl AlertRegistry {
     /// Returns an empty vec if `owner` has no registered alerts.
     #[must_use]
     pub fn get_alert_ids_by_owner(env: Env, owner: Address) -> Vec<u64> {
-        let ids = Self::owner_index(&env, &owner);
-        ids.into_iter()
-            .filter(|id| {
-                env.storage()
-                    .persistent()
-                    .has(&DataKey::Alert(*id))
-            })
-            .collect()
-    /// Returns an empty vec if `owner` has no live registered alerts.
-    #[must_use]
-    pub fn get_alert_ids_by_owner(env: Env, owner: Address) -> Vec<u64> {
         let storage = env.storage().persistent();
         let mut live: Vec<u64> = vec![&env];
         for id in Self::owner_index(&env, &owner).iter() {
@@ -3105,18 +3039,6 @@ impl AlertRegistry {
         Ok(Self::configs_paginated(&env, &ids, offset, limit))
     }
 
-    /// Get a page of **active** alert configs watching a target contract (offset + limit).
-    ///
-    /// Equivalent to [`AlertRegistry::get_contract_alerts_paginated`] but filters out
-    /// any entries where `active == false`. Returns an empty vec if no active alerts
-    /// watch `target_contract`.
-    ///
-    /// If a `WatcherRegistry` is configured, `querier` must be a registered
-    /// watcher or the call returns [`ContractError::NotAWatcher`].
-    /// # Errors
-    /// Returns [`ContractError::NotAWatcher`] if a watcher registry is configured
-    /// and `querier` is not a registered watcher.
-    pub fn get_active_contract_alerts_paginated(
     /// Get a page of **active** alert configs for a target contract.
     ///
     /// The bounded, paginated replacement for
@@ -3493,41 +3415,6 @@ impl AlertRegistry {
     /// advancing `offset` by `limit` until it reaches `get_alert_count()`;
     /// a short or empty result page does not indicate that the scan is complete.
     #[must_use]
-    pub fn get_alerts_modified_since(
-        env: Env,
-        since: u64,
-        offset: u32,
-        limit: u32,
-    ) -> Vec<AlertConfig> {
-        let total: u64 = env
-            .storage()
-            .instance()
-            .get(&instance_key::NEXT_ID)
-            .unwrap_or(0u64);
-
-        let range_start = u64::from(offset).min(total);
-        let range_end = u64::from(offset)
-            .saturating_add(u64::from(limit.min(MAX_PAGE_SIZE)))
-            .min(total);
-
-        let mut out: Vec<AlertConfig> = vec![&env];
-        for id in range_start..range_end {
-            if let Some(cfg) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
-                .or_else(|| {
-                    env.storage()
-                        .persistent()
-                        .get::<DataKey, AlertConfig>(&DataKey::RemovedAlert(id))
-                })
-            {
-                if cfg.updated_at >= since {
-                    out.push_back(cfg);
-                }
-            }
-        }
-        out
     pub fn get_alerts_modified_since(env: Env, since: u64, offset: u32, limit: u32) -> Vec<AlertConfig> {
         Self::scan_alerts_modified(&env, offset, limit, |cfg| cfg.updated_at >= since)
     }
@@ -3640,6 +3527,7 @@ impl AlertRegistry {
     #[deprecated(
         since = "0.3.0",
         note = "This function scans the owner's index; use per-owner counters instead"
+    )]
     ///
     /// **Deprecated since 0.2.0, removal in 0.4.0:** the scan over the owner
     /// index grows with the number of alerts the owner has ever registered.
@@ -3675,21 +3563,9 @@ impl AlertRegistry {
     ///
     /// Keyed by target contract rather than owner. Deactivated alerts still
     /// count as live until they are removed.
+    #[must_use]
     pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
         Self::contract_live_count(&env, &target_contract)
-        let ids = Self::contract_index(&env, &target_contract);
-        let mut count: u32 = 0;
-        for id in ids.iter() {
-            if env
-                .storage()
-                .persistent()
-                .get::<DataKey, bool>(&DataKey::AlertActive(id))
-                == Some(true)
-            {
-                count += 1;
-            }
-        }
-        count
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -4233,12 +4109,6 @@ impl AlertRegistry {
         );
     }
 
-    /// Read the running per-owner **active**-alert counter, or `0` if unset.
-    fn owner_active_count(env: &Env, owner: &Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, u32>(&DataKey::OwnerActiveCount(owner.clone()))
-            .unwrap_or(0)
     /// Read the per-owner **active**-alert counter, lazily rebuilding it from
     /// the owner index on a miss (#385).
     ///
@@ -4559,11 +4429,10 @@ impl AlertRegistry {
     /// # Panics
     /// Panics if indexing into `rules` fails unexpectedly.
     pub fn validate_rules(env: &Env, rules: &Vec<String>) -> Result<(), ContractError> {
-        if rules.len() > MAX_RULES_PER_ALERT {
         if rules.is_empty() {
             return Err(ContractError::EmptyRules);
         }
-        if rules.len() > 50 {
+        if rules.len() > MAX_RULES_PER_ALERT {
             return Err(ContractError::TooManyRules);
         }
         let mut seen: Vec<String> = vec![env];
