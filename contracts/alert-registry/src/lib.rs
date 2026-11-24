@@ -2343,12 +2343,7 @@ impl AlertRegistry {
             .set(&DataKey::AdminSuspended(config_id), &true);
         Self::persist_alert(&env, config_id, &config);
 
-        // Update active count if the alert was active
-        if was_active {
-            let owner = config.owner.clone();
-            let active_count = Self::owner_active_count(&env, &owner);
-            Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
-        }
+// Duplicate decrement removed (#559)
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("admin_off")),
