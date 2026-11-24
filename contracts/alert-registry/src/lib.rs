@@ -4559,11 +4559,10 @@ impl AlertRegistry {
     /// # Panics
     /// Panics if indexing into `rules` fails unexpectedly.
     pub fn validate_rules(env: &Env, rules: &Vec<String>) -> Result<(), ContractError> {
-        if rules.len() > MAX_RULES_PER_ALERT {
         if rules.is_empty() {
             return Err(ContractError::EmptyRules);
         }
-        if rules.len() > 50 {
+        if rules.len() > MAX_RULES_PER_ALERT {
             return Err(ContractError::TooManyRules);
         }
         let mut seen: Vec<String> = vec![env];

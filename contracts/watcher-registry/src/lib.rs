@@ -1179,11 +1179,8 @@ impl WatcherRegistry {
         if !Self::is_paused(env.clone()) {
             env.storage().instance().set(&DataKey::Paused, &true);
             env.events()
-                .publish((symbol_short!("admin"), symbol_short!("pause")), caller);
+                .publish((symbol_short!("admin"), symbol_short!("pause")), (caller,));
         }
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("pause")), (caller,));
         Ok(())
     }
 
@@ -1201,11 +1198,8 @@ impl WatcherRegistry {
         if Self::is_paused(env.clone()) {
             env.storage().instance().set(&DataKey::Paused, &false);
             env.events()
-                .publish((symbol_short!("admin"), symbol_short!("unpause")), caller);
+                .publish((symbol_short!("admin"), symbol_short!("unpause")), (caller,));
         }
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("unpause")), (caller,));
         Ok(())
     }
 
