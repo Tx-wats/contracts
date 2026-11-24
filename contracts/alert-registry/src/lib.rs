@@ -2190,7 +2190,14 @@ impl AlertRegistry {
             .get::<DataKey, AlertConfig>(&DataKey::Alert(config_id))
         else {
             if Self::owner_index(&env, &caller).contains(config_id) {
-                Self::drop_dangling_ids(&env, &caller, &vec![&env, config_id]);
+                let ids = Self::owner_index(&env, &caller);
+                let mut kept = vec![&env];
+                for id in ids.iter() {
+                    if id != config_id {
+                        kept.push_back(id);
+                    }
+                }
+                Self::drop_dangling_ids(&env, &caller, &vec![&env, config_id], &kept);
                 env.events().publish(
                     (symbol_short!("alert"), symbol_short!("remove")),
                     (config_id, caller),
@@ -4233,12 +4240,6 @@ impl AlertRegistry {
         );
     }
 
-    /// Read the running per-owner **active**-alert counter, or `0` if unset.
-    fn owner_active_count(env: &Env, owner: &Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, u32>(&DataKey::OwnerActiveCount(owner.clone()))
-            .unwrap_or(0)
     /// Read the per-owner **active**-alert counter, lazily rebuilding it from
     /// the owner index on a miss (#385).
     ///
@@ -4491,28 +4492,7 @@ impl AlertRegistry {
         out
     }
 
-    /// Like [`AlertRegistry::configs_paginated`] but only includes entries where `active == true`.
-    fn active_configs_paginated(env: &Env, ids: &Vec<u64>, offset: u32, limit: u32) -> Vec<AlertConfig> {
-        let mut out: Vec<AlertConfig> = vec![env];
-        let count = ids.len();
-        let first = offset.min(count);
-        let last = offset
-            .saturating_add(limit.min(MAX_PAGE_SIZE))
-            .min(count);
-        for i in first..last {
-            let id = ids.get(i).unwrap();
-            if let Some(cfg) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, AlertConfig>(&DataKey::Alert(id))
-            {
-                if cfg.active && !Self::is_snoozed(env, id) {
-                    out.push_back(cfg);
-                }
-            }
-        }
-        out
-    }
+
 }
 
 impl AlertRegistry {
