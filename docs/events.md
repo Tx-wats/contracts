@@ -30,6 +30,11 @@ rather than assuming the current shape. Events not yet marked `(versioned)`
 below predate this policy and do not carry the marker; they may be migrated
 to it as their shapes change.
 
+`admin.limit`, `admin.timelock` and `admin.watchreg` were migrated to the
+versioned scheme in #604, which also added the previous value (`old`) to each
+payload alongside the new one. Their v1 shapes (unversioned, new value only)
+remain documented so indexers can decode historical events.
+
 ---
 
 ## AlertRegistry
@@ -183,6 +188,27 @@ Emitted when an alert is removed by its owner or by an admin.
 | Data | `(id: u64, caller: Address)` |
 
 **Status:** ✅ implemented (`remove_alert`, `remove_alert_by_admin`)
+
+---
+
+### `alert.rm_all`
+
+Emitted by `remove_all_alerts` when at least one index entry is processed in
+the pass. Each call removes up to a bounded number of the caller's alerts, so
+a caller with more alerts needs repeated calls. The event is emitted once per
+call, not once per removed alert.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("rm_all")` |
+| Data | `(caller: Address, count: u32)` |
+
+> `count` is the number of entries processed in this pass, including dangling
+> IDs whose records had already expired. It is not necessarily the number of
+> alerts that were removed.
+
+**Status:** ✅ implemented (`remove_all_alerts`)
 
 ---
 
@@ -363,9 +389,104 @@ Emitted when an alert's TTL is renewed via `renew_alert_ttl`.
 |---|---|
 | Topic 0 | `Symbol("alert")` |
 | Topic 1 | `Symbol("renew")` |
-| Data | `(id: u64, owner: Address)` |
+| Data | `(id: u64, caller: Address, ttl: u32)` |
+
+> `caller` is the address that paid for the renewal (the owner or an
+> authorised renewer), and `ttl` is the effective TTL after clamping to
+> `MAX_TTL`.
 
 **Status:** ✅ implemented (`renew_alert_ttl`)
+
+---
+
+### `alert.snooze`
+
+Emitted when an alert is snoozed via `snooze_alert`, suppressing notifications
+until the snooze period elapses.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("snooze")` |
+| Data | `(id: u64, caller: Address, until_ledger: u32)` |
+
+> `caller` is the address that requested the snooze, and `until_ledger` is the
+> ledger sequence at which the alert resumes notifying. Indexers can use this
+> to suppress notifications locally without re-fetching the alert.
+
+**Status:** ✅ implemented (`snooze_alert`)
+
+---
+
+### `alert.tags`
+
+Emitted when an alert's tags are replaced via `set_alert_tags`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("tags")` |
+| Data | `(id: u64, caller: Address, tags: Vec<String>)` |
+
+> `caller` is the address that changed the tags. The full new tag list is
+> carried so an indexer can update its view without a follow-up `get_alert`.
+
+**Status:** ✅ implemented (`set_alert_tags`)
+
+---
+
+### `alert.rm_all`
+
+Emitted once per call to `remove_all_alerts` when at least one of the caller's
+alerts was removed. Carries the total affected count rather than one event per
+alert, keeping the bulk operation's footprint constant.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("rm_all")` |
+| Data | `(caller: Address, count: u32)` |
+
+> No event is emitted if `count` is `0` (e.g. the caller has no alerts).
+
+**Status:** ✅ implemented (`remove_all_alerts`)
+
+---
+
+### `alert.expiry`
+
+Emitted when an alert's expiry ledger is set or changed via `set_alert_expiry`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("alert")` |
+| Topic 1 | `Symbol("expiry")` |
+| Data | `(id: u64, caller: Address, expires_at_ledger: u32)` |
+
+> `expires_at_ledger` is the ledger sequence at or after which the alert is
+> considered expired. Indexers can use this event to schedule local purges
+> instead of polling `get_alert`.
+
+**Status:** ✅ implemented (`set_alert_expiry`)
+
+---
+
+### `schema.migrate`
+
+Emitted when the contract's storage schema is migrated to a new version via
+`schema_migrate`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("schema")` |
+| Topic 1 | `Symbol("migrate")` |
+| Data | `(caller: Address, from_version: u32, to_version: u32)` |
+
+> `caller` is the admin that triggered the migration. Indexers should treat a
+> change in `to_version` as a signal that stored records may have been
+> rewritten and re-read any cached state.
+
+**Status:** ✅ implemented (`schema_migrate`)
 
 ---
 
@@ -401,7 +522,7 @@ shape.
 
 ---
 
-### `admin.limit`
+### `admin.limit` (versioned)
 
 Emitted when an alert limit is changed.
 
@@ -409,17 +530,22 @@ Emitted when an alert limit is changed.
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("limit")` |
-| Data | `(admin: Address, kind: Symbol("owner") \| Symbol("contract") \| Symbol("global"), limit: u32)` |
+| Data (v1) | `(admin: Address, kind: Symbol("owner") \| Symbol("contract") \| Symbol("global"), limit: u32)` |
+| Data (v2) | `(version: u32, admin: Address, kind: Symbol("owner") \| Symbol("contract") \| Symbol("global"), old: u32, new: u32)` |
 
 The `kind` value identifies whether the per-owner, per-contract, or global
-limit was changed.
+limit was changed. v2 (#604) adds the version marker and carries both the
+previous (`old`) and the new (`new`) limit, so an auditor can reconstruct the
+change without replaying every earlier event. `version` is `2`
+(`EVENT_SCHEMA_VERSION`) for every limit change emitted by the current
+contract code.
 
 **Status:** ✅ implemented (`set_per_owner_alert_limit`,
 `set_per_contract_alert_limit`, `set_global_alert_limit`)
 
 ---
 
-### `admin.watchreg`
+### `admin.watchreg` (versioned)
 
 Emitted when watcher-gating is enabled or disabled. A `None` registry means
 gating was disabled.
@@ -428,7 +554,14 @@ gating was disabled.
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("watchreg")` |
-| Data | `(admin: Address, watcher_registry: Option<Address>)` |
+| Data (v1) | `(admin: Address, watcher_registry: Option<Address>)` |
+| Data (v2) | `(version: u32, admin: Address, old: Option<Address>, new: Option<Address>)` |
+
+v2 (#604) adds the version marker and carries both the previous (`old`) and
+the new (`new`) watcher registry, so an auditor can reconstruct the change
+without replaying every earlier event. `version` is `2`
+(`EVENT_SCHEMA_VERSION`) for every watcher-registry change emitted by the
+current contract code.
 
 **Status:** ✅ implemented (`set_watcher_registry`, `clear_watcher_registry`)
 
@@ -567,11 +700,57 @@ Emitted when a watcher address is de-authorised.
 > actually present in the registry — removing an unregistered address is a
 > silent no-op.
 
+> **Bulk clearing.** `clear_all_watchers` (and the timelocked
+> `AdminAction::ClearAllWatchers`) deauthorizes every watcher *except* a
+> caller-supplied kept set, emitting one `watcher.remove` per revoked address.
+> The kept set is never revoked, so the operation can succeed even while
+> `MIN_WATCHERS` watchers remain registered. Passing an empty kept set is
+> rejected with `BelowMinWatchers` when it would leave fewer than
+> `MIN_WATCHERS` watchers registered.
+
 > **Emitted alongside `watcher.replace`.** `replace_watcher` emits *both* a
 > `watcher.remove` for `old_watcher` and a `watcher.replace` carrying the same
 > `old_watcher`. A listener that reacts to both event types will see the old
 > watcher's revocation twice — see
 > [`watcher.replace`](#watcherreplace) for how to de-duplicate.
+
+---
+
+### `watcher.info`
+
+Emitted when a watcher's metadata (e.g. its endpoint or description) is
+updated via `set_watcher_info`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("watcher")` |
+| Topic 1 | `Symbol("info")` |
+| Data | `(watcher: Address, caller: Address)` |
+
+> The new metadata is intentionally omitted from the event data — it is
+> already stored on-chain and can be read via `get_watcher_info`. Omitting it
+> keeps the payload small.
+
+**Status:** ✅ implemented (`set_watcher_info`)
+
+---
+
+### `watcher.scope`
+
+Emitted when a watcher's authorised scope is changed via `set_watcher_scope`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("watcher")` |
+| Topic 1 | `Symbol("scope")` |
+| Data | `(watcher: Address, caller: Address, scope: Vec<Address>)` |
+
+> `scope` is the full new set of contracts the watcher is authorised to
+> monitor. An empty vector means the watcher is unscoped (authorised for all
+> contracts). Indexers gating on watcher trust should re-evaluate the watcher
+> against this list.
+
+**Status:** ✅ implemented (`set_watcher_scope`)
 
 ---
 
@@ -583,11 +762,18 @@ Emitted when an existing watcher address is atomically replaced with a new watch
 |---|---|
 | Topic 0 | `Symbol("watcher")` |
 | Topic 1 | `Symbol("replace")` |
-| Data | `(old_watcher: Address, new_watcher: Address)` |
+| Data | `(old_watcher: Address, new_watcher: Address, scope: WatcherScope)` |
 
 > A self-replace (`old_watcher == new_watcher`) is a no-op: the address stays
 > authorized throughout, so neither `watcher.replace` nor `watcher.remove` is
 > emitted.
+
+> **Metadata and scope are carried over.** `replace_watcher` is the key-rotation
+> path: the new address inherits the old watcher's `WatcherInfo` (metadata) and
+> `WatcherScope` (authorization scope) unchanged. The new address is **not**
+> unscoped — it is authorized for exactly the same targets as the old one. The
+> carried-over `scope` is included in the event data so indexers can update
+> their view of the replacement without a follow-up `get_watcher` call.
 
 **Status:** ✅ implemented (`replace_watcher`)
 
@@ -635,6 +821,27 @@ If you only need revocations, subscribing to `watcher.remove` alone is
 sufficient — `replace_watcher` always emits it. Subscribe to
 `watcher.replace` as well only when you also need the `new_watcher` half of
 the rotation.
+
+---
+
+### `watcher.info`
+
+Emitted when a watcher's metadata (`WatcherInfo`) is set or cleared via
+`set_watcher_info`.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("watcher")` |
+| Topic 1 | `Symbol("info")` |
+| Data (set) | `(watcher: Address, info: Option<WatcherInfo>)` where `info` is `Some(...)` |
+| Data (clear) | `(watcher: Address, info: Option<WatcherInfo>)` where `info` is `None` |
+
+Both shapes use the same topics and the same tuple layout; the only difference
+is whether the `Option` is `Some` or `None`. Clearing metadata emits the event
+with a `None` payload so indexers can drop stale metadata instead of continuing
+to display the previously-set values.
+
+**Status:** ✅ implemented (`set_watcher_info`)
 
 ---
 
@@ -697,7 +904,7 @@ is accepted by the proposed admin.
 
 ---
 
-### `admin.timelock`
+### `admin.timelock` (versioned)
 
 Emitted when the timelock delay applied to sensitive admin actions is changed.
 
@@ -705,7 +912,14 @@ Emitted when the timelock delay applied to sensitive admin actions is changed.
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("timelock")` |
-| Data | `(caller: Address, delay_ledgers: u32)` |
+| Data (v1) | `(caller: Address, delay_ledgers: u32)` |
+| Data (v2) | `(version: u32, caller: Address, old_delay_ledgers: u32, new_delay_ledgers: u32)` |
+
+v2 (#604) adds the version marker and carries both the previous
+(`old_delay_ledgers`) and the new (`new_delay_ledgers`) delay, so an auditor
+can reconstruct the change without replaying every earlier event. `version`
+is `2` (`EVENT_SCHEMA_VERSION`) for every timelock change emitted by the
+current contract code.
 
 **Status:** ✅ implemented (`set_timelock_delay`, `execute_admin_action`)
 
@@ -726,15 +940,21 @@ called directly or executed through the timelock.
 
 ---
 
-### `admin.propose`
+### `admin.queue`
 
-Emitted when a sensitive admin action is queued behind the timelock.
+Emitted when a sensitive admin action is queued behind the timelock via
+`propose_admin_action`. A distinct `queue` action (rather than `propose`) is
+used so it does not clash with admin-transfer proposals.
 
 | Field | Value |
 |---|---|
 | Topic 0 | `Symbol("admin")` |
-| Topic 1 | `Symbol("propose")` |
-| Data | `(proposer: Address, ready_at: u32)` |
+| Topic 1 | `Symbol("queue")` |
+| Data | `(proposer: Address, ready_at: u32, action: AdminAction)` |
+
+`AdminAction` is the queued action enum, e.g. `Upgrade(wasm_hash)` or
+`TransferAdmin(addr)`, so co-admins can tell from the event alone what was
+queued without calling `get_pending_action`.
 
 **Status:** ✅ implemented (`propose_admin_action`)
 
@@ -774,16 +994,41 @@ emitted alongside it.
 
 ---
 
+### `admin.guardian`
+
+Emitted when the guardian role is set or cleared via `set_guardian`. A `None`
+guardian means the role is unassigned.
+
+| Field | Value |
+|---|---|
+| Topic 0 | `Symbol("admin")` |
+| Topic 1 | `Symbol("guardian")` |
+| Data | `(admin: Address, guardian: Option<Address>)` |
+
+> The guardian is a pause-only role: it may call `pause` but never `unpause`,
+> and cannot upgrade the contract, change limits, or manage watchers. Assign it
+> to on-call responders or monitoring bots that need to trip the
+> circuit-breaker without holding full admin authority. Mirrors
+> [`AlertRegistry`'s `admin.guardian`](#adminguardian).
+
+**Status:** ✅ implemented (`set_guardian`)
+
+---
+
 ### `admin.pause`
 
-Emitted when an admin pauses the registry with `pause`. Mutating calls are
-rejected until `admin.unpause` is emitted.
+Emitted when an admin — or the guardian — pauses the registry with `pause`.
+Mutating calls are rejected until `admin.unpause` is emitted.
 
 | Field | Value |
 |---|---|
 | Topic 0 | `Symbol("admin")` |
 | Topic 1 | `Symbol("pause")` |
 | Data | `(caller: Address,)` |
+
+> The `caller` field carries the address that paused the registry, which may be
+> either an admin or the guardian (see
+> [`admin.guardian`](#adminguardian-1)). Only an admin can `unpause`.
 
 **Status:** ✅ implemented (`pause`)
 

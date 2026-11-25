@@ -8,6 +8,17 @@ cargo test
 make test
 ```
 
+## Coverage Floor
+
+CI's `coverage` job fails if line coverage drops below **60%** for either contract crate:
+
+```bash
+cargo llvm-cov -p alert-registry --locked --fail-under-lines 60
+cargo llvm-cov -p watcher-registry --locked --fail-under-lines 60
+```
+
+The Codecov upload stays non-blocking (`fail_ci_if_error: false`); the floor is enforced by the `cargo llvm-cov` steps. The 60% value is a provisional threshold, not a measured baseline. Raise it once the current per-crate line coverage is known.
+
 ## Test Setup Pattern
 
 Both contracts use the same setup helper pattern:
@@ -109,6 +120,16 @@ cargo +nightly fuzz run validate_rule -- -max_total_time=30
 The fuzz target subjects `AlertRegistry::validate_rule` and `AlertRegistry::validate_rules` to random byte streams, arbitrary UTF-8 strings, length boundaries, format-string-like patterns (`%s`, `%x`, `%n`), and invalid prefixes, verifying invariant enforcement and absence of panics. See [Fuzz Testing Findings](fuzzing-findings.md) for full execution results and coverage data.
 
 The nightly [Fuzz targets workflow](../.github/workflows/fuzz.yml) builds both fuzz targets and runs each for 60 seconds. If a fuzz run fails, its crash artifacts are uploaded for investigation.
+
+## Reproducing Nightly CI Jobs Locally
+
+| Target | Mirrors | Requires |
+|---|---|---|
+| `make fuzz-build` | `fuzz.yml` (builds `validate_rule` and `register_alert`) | nightly toolchain, `cargo-fuzz` |
+| `make proptest-nightly` | `nightly-proptest.yml` (release WASM build + `cargo test --workspace -- --no-fail-fast`) | — |
+| `make e2e` | `deploy-e2e.yml` (starts `stellar/quickstart --local` via docker, optimizes WASM, runs `scripts/deploy.sh`) | docker, `stellar` CLI |
+
+Stop the quickstart container afterwards with `docker rm -f quickstart-local`.
 
 ## Summary
 
@@ -224,17 +245,11 @@ exclude_globs = [
     "**/tests/**",
 ]
 
-exclude_re = [
-    "^#\\[cfg\\(test\\)\\]",
-    "^\\s*mod tests \\{",
-    "^\\s*mod regression_tests \\{",
-]
-
 minimum_test_timeout = 30
 timeout_multiplier = 2
 ```
 
-The `exclude_re` patterns exclude inline test modules and regression test blocks, ensuring only production code is examined for mutations.
+Only the files in `examine_globs` are mutated, so test modules (which live in separate files) are never examined. Note that cargo-mutants matches `exclude_re` against mutant names (e.g. `replace foo -> bool with true`), not source lines; check the effective scope with `cargo mutants --list`.
 
 ### Mutation Analysis & Baseline Results
 

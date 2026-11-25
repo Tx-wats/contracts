@@ -52,26 +52,6 @@ echo "==> Network: $NETWORK"
 echo "==> Upgrading contract: $CONTRACT ($CONTRACT_ID)"
 echo "==> Identity: $IDENTITY ($ADMIN)"
 
-confirm_mainnet() {
-  if [[ "$NETWORK" != "mainnet" ]]; then
-    return 0
-  fi
-  if [ "$ASSUME_YES" = true ]; then
-    echo "==> Mainnet operation confirmed via --yes flag."
-    return 0
-  fi
-  echo "======================================================================"
-  echo "WARNING: You are about to modify a production contract on MAINNET!"
-  echo "  Contract:          $CONTRACT ($CONTRACT_ID)"
-  echo "  Current WASM Hash: $CURRENT_WASM_HASH"
-  echo "  New WASM Hash:     $NEW_WASM_HASH"
-  echo "======================================================================"
-  read -r -p "Type 'yes' or 'CONFIRM' to proceed with the mainnet operation: " CONFIRMATION
-  if [[ "$CONFIRMATION" != "yes" && "$CONFIRMATION" != "CONFIRM" ]]; then
-    echo "==> Operation cancelled by user."
-    exit 1
-  fi
-}
 # Build only the target crate with -p and --locked via common build_contract helper
 WASM="$(wasm_path "$CONTRACT")"
 build_contract "$CONTRACT"
@@ -106,7 +86,7 @@ if [ "$EXECUTE" = true ]; then
   echo "    Current WASM Hash: $CURRENT_WASM_HASH"
   echo "    Pending action:    $PENDING_ACTION"
   echo ""
-  confirm_mainnet
+  confirm_mainnet "Contract: $CONTRACT ($CONTRACT_ID)" "Current WASM Hash: $CURRENT_WASM_HASH" "Pending action: $PENDING_ACTION"
   echo "==> Executing pending timelocked admin action on $CONTRACT_ID..."
   stellar contract invoke \
     --id "$CONTRACT_ID" \
@@ -143,7 +123,7 @@ echo "    Current WASM Hash: $CURRENT_WASM_HASH"
 echo "    New WASM Hash:     $NEW_WASM_HASH"
 echo ""
 
-confirm_mainnet
+confirm_mainnet "Contract: $CONTRACT ($CONTRACT_ID)" "Current WASM Hash: $CURRENT_WASM_HASH" "New WASM Hash: $NEW_WASM_HASH"
 
 # For watcher-registry, check if timelock is enabled if --propose is not explicitly set
 if [ "$PROPOSE" = false ] && [ "$CONTRACT" = "watcher-registry" ]; then
@@ -185,6 +165,21 @@ if [ "$PROPOSE" = true ]; then
   exit 0
 fi
 
+# Run an AlertRegistry function and strip quotes/whitespace from the result.
+alert_invoke() {
+  stellar contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$IDENTITY" \
+    --network "$NETWORK" \
+    --rpc-url "$RPC_URL" \
+    --network-passphrase "$NETWORK_PASSPHRASE" \
+    -- "$@" | tr -d '"[:space:]'
+}
+
+if [ "$CONTRACT" = "alert-registry" ]; then
+  OLD_SCHEMA=$(alert_invoke get_schema_version)
+fi
+
 echo "==> Upgrading contract $CONTRACT_ID directly..."
 stellar contract invoke \
   --id "$CONTRACT_ID" \
@@ -195,5 +190,27 @@ stellar contract invoke \
   -- upgrade \
   --admin "$ADMIN" \
   --new_wasm_hash "$NEW_WASM_HASH"
+
+echo "==> Verifying deployed WASM hash..."
+DEPLOYED_HASH=$(deployed_wasm_hash "$CONTRACT_ID")
+if [[ "$DEPLOYED_HASH" != "$NEW_WASM_HASH" ]]; then
+  echo "Error: deployed WASM hash $DEPLOYED_HASH does not match expected $NEW_WASM_HASH" >&2
+  exit 1
+fi
+
+if [ "$CONTRACT" = "alert-registry" ]; then
+  # The new code's target version, read from the source it was built from.
+  NEW_SCHEMA=$(sed -n 's/^pub const CURRENT_SCHEMA_VERSION: u32 = \([0-9]*\);/\1/p' contracts/alert-registry/src/lib.rs)
+  echo "==> Schema version: on-chain $OLD_SCHEMA, new code $NEW_SCHEMA"
+  if [[ "$OLD_SCHEMA" -lt "$NEW_SCHEMA" ]]; then
+    ALERT_COUNT=$(alert_invoke get_alert_count)
+    CURSOR=0
+    while [[ "$(alert_invoke get_schema_version)" -lt "$NEW_SCHEMA" ]]; do
+      CURSOR=$(alert_invoke migrate --caller "$ADMIN" --from "$OLD_SCHEMA" --to "$NEW_SCHEMA" --cursor "$CURSOR")
+      echo "==> migrate: cursor $CURSOR / $ALERT_COUNT"
+    done
+    echo "==> Migration complete: schema version $NEW_SCHEMA"
+  fi
+fi
 
 echo "==> Upgrade complete. Contract $CONTRACT_ID now runs WASM $NEW_WASM_HASH"

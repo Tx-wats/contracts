@@ -66,9 +66,9 @@ jobs:
         id: deploy
         env:
           STELLAR_IDENTITY: deployer
-        run: bash scripts/deploy.sh
+        run: bash scripts/deploy.sh --watcher "$(stellar keys address deployer)"
         run: |
-          OUTPUT=$(bash scripts/deploy.sh 2>&1)
+          OUTPUT=$(bash scripts/deploy.sh --watcher "$(stellar keys address deployer)" 2>&1)
           echo "$OUTPUT"
           python3 scripts/deployment_outputs.py <<< "$OUTPUT" >> "$GITHUB_OUTPUT"
 
