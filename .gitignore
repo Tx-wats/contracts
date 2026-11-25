@@ -33,3 +33,6 @@ abi/
 mutants.out/
 mutants.out.old/
 
+
+# spec-golden.sh temp files
+.tmp-spec-*

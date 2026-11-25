@@ -34,15 +34,23 @@ Understanding what an attacker can and cannot do with a compromised admin key de
   * Overwrite the entire admin set with a single key via `transfer_admin`.
   * Authorize watcher nodes via `register_watcher`.
   * Deauthorize watcher nodes via `remove_watcher`, `replace_watcher`, or `clear_all_watchers`.
+  * Pause and unpause the contract via `pause` / `unpause`.
+  * Appoint or rotate the pause-only guardian via `set_guardian`.
+* **Guardian capabilities (pause-only role):**
+  * Trip the circuit-breaker via `pause`.
+  * **Cannot** `unpause` — only the admin can resume the contract.
+  * **Cannot** upgrade the contract, change the admin set, or register/remove watchers.
+  * Intended for on-call responders and monitoring bots so they can halt operations without holding an upgrade-capable key.
 * **What an attacker CANNOT do:**
   * Remove the last remaining admin (prevented on-chain by `ContractError::LastAdmin`).
   * Forge cryptographic signatures of watcher nodes.
+  * Unpause the contract with a compromised guardian key (guardian is pause-only).
 
 ---
 
-## 1a. Guardian Role (AlertRegistry)
+## 1a. Guardian Role (AlertRegistry and WatcherRegistry)
 
-`AlertRegistry` supports an optional **guardian** role for on-call operators and monitoring automation that need to trip the circuit-breaker quickly without holding a full admin key.
+Both `AlertRegistry` and `WatcherRegistry` support an optional **guardian** role for on-call operators and monitoring automation that need to trip the circuit-breaker quickly without holding a full admin key. The role behaves identically on both contracts; substitute `<ALERT_REGISTRY_CONTRACT_ID>` with `<WATCHER_REGISTRY_CONTRACT_ID>` in the commands below to configure the `WatcherRegistry` guardian.
 
 ### What the guardian can do
 * Call `pause` — freeze all state-mutating operations immediately.
@@ -80,7 +88,7 @@ stellar contract invoke \
   --admin <ADMIN_ADDRESS>
 ```
 
-Both `set_guardian` and `clear_guardian` emit an `("admin", "guardian")` event whose data payload is `(admin: Address, guardian: Option<Address>)` — `Some(guardian)` on set and `None` on clear. Index these events to audit guardian rotations.
+Both `set_guardian` and `clear_guardian` emit an `("admin", "guardian")` event whose data payload is `(admin: Address, guardian: Option<Address>)` — `Some(guardian)` on set and `None` on clear. Index these events to audit guardian rotations. `WatcherRegistry` mirrors these events and errors exactly, so a single indexer can monitor both contracts.
 
 > **Important:** Both `transfer_admin` and `accept_admin_transfer` (the two-step admin proposal flow) **automatically clear the guardian** on successful admin handover. This is a security measure to prevent a compromised admin's chosen guardian from retaining pause authority after the admin key is rotated. An `("admin", "guardian")` event with `None` payload is emitted when this occurs. The new admin must explicitly reconfigure a guardian via `set_guardian` if one is still desired.
 
@@ -130,6 +138,9 @@ An admin key compromise may be detected through several signals:
       * `("admin", "guardian")` — emitted when the guardian is set or cleared (data: `(admin, Option<guardian>)`). Also emitted with `None` payload by `transfer_admin` and `accept_admin_transfer` when they clear the guardian on admin handover.
    * `WatcherRegistry`:
      * `("admin", "init")`, `("admin", "add")`, `("admin", "remove")`, `("admin", "transfer")`.
+     * `("admin", "pause")` — emitted when the contract is paused (data: caller address — admin or guardian).
+     * `("admin", "unpause")` — emitted when the contract is resumed (data: admin address only).
+     * `("admin", "guardian")` — emitted when the guardian is set or cleared (data: `(admin, Option<guardian>)`).
      * `("watcher", "register")`, `("watcher", "remove")`, `("watcher", "replace")`.
 2. **Off-Chain Telemetry Anomalies:**
    * Watcher nodes reporting unexpected deauthorization or inability to read gated alert queries (`ContractError::NotAWatcher`).
@@ -157,6 +168,8 @@ flowchart TD
     G --> H["Audit & Remediate Registry State"]
     H --> I["Notify Watchers & Alert Owners"]
     I --> J["Post-Mortem & Key Hardening"]
+    B -->|"Either Contract"| K["Guardian calls pause (pause-only)"]
+    K --> G
 ```
 
 ### Action 2.1: WatcherRegistry Containment (Multi-Admin Set)
@@ -209,6 +222,7 @@ stellar contract invoke \
 ```
 
 * `WatcherRegistry.pause` does **not** block `accept_admin_transfer`, so a pending proposal must be cancelled, not just paused against.
+* The `WatcherRegistry` guardian can trip `pause` during containment (see [Action 2.3](#action-23-trip-the-circuit-breaker-guardian)), but only the admin can `unpause` once rotation is verified.
 * Staged webhook rotations and per-alert transfers belong to the alert owner, not the admin. Owners cancel them with `cancel_webhook_proposal` and `cancel_alert_transfer`, and the owners of affected alerts should be told to check (see [Phase 5](#6-phase-5-stakeholder-communication--disclosure)).
 
 ### Action 2.2: AlertRegistry (or Sole Admin WatcherRegistry) Rotation
@@ -241,7 +255,7 @@ stellar contract invoke \
 > **Note:** Both `transfer_admin` and `accept_admin_transfer` (the two-step proposal flow) now **clear any configured guardian** on successful admin handover. This prevents a compromised admin's chosen guardian from retaining pause authority after the admin key is rotated. An `("admin", "guardian")` event with `None` payload is emitted when the guardian is cleared. The new admin must explicitly reconfigure a guardian via `set_guardian` if one is still desired.
 
 ### Action 2.3: Trip the Circuit-Breaker (Guardian)
-While admin rotation is in progress, the pause-only guardian (on-call operator or monitoring bot) can halt `AlertRegistry` operations without holding the admin key:
+While admin rotation is in progress, the pause-only guardian (on-call operator or monitoring bot) can halt `AlertRegistry` or `WatcherRegistry` operations without holding the admin key:
 
 ```bash
 # Guardian pauses AlertRegistry (pause-only; cannot unpause)
@@ -252,14 +266,32 @@ stellar contract invoke \
   -- \
   pause \
   --caller <GUARDIAN_ADDRESS>
+
+# Guardian pauses WatcherRegistry (pause-only; cannot unpause)
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source-account <GUARDIAN_SECRET> \
+  --network <NETWORK> \
+  -- \
+  pause \
+  --caller <GUARDIAN_ADDRESS>
 ```
 
-* The guardian **cannot** `unpause`; only the admin can resume the contract once rotation is verified.
-* The guardian **cannot** upgrade the contract, change limits, rotate the watcher registry, or remove alerts.
+* The guardian **cannot** `unpause` on either contract; only the admin can resume the contract once rotation is verified.
+* The guardian **cannot** upgrade the contract, change limits, rotate the watcher registry, remove alerts, or modify the `WatcherRegistry` admin set / watcher list.
 * If the guardian key itself is suspected, the admin rotates it via `set_guardian`:
   ```bash
   stellar contract invoke \
     --id <ALERT_REGISTRY_CONTRACT_ID> \
+    --source-account <NEW_ADMIN_SECRET> \
+    --network <NETWORK> \
+    -- \
+    set_guardian \
+    --admin <NEW_ADMIN_ADDRESS> \
+    --guardian <NEW_GUARDIAN_ADDRESS>
+
+  stellar contract invoke \
+    --id <WATCHER_REGISTRY_CONTRACT_ID> \
     --source-account <NEW_ADMIN_SECRET> \
     --network <NETWORK> \
     -- \
@@ -295,12 +327,22 @@ stellar contract invoke \
   --network <NETWORK> \
   -- \
   get_guardian
+
+# Check WatcherRegistry guardian
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --network <NETWORK> \
+  -- \
+  get_guardian
 ```
 
 * Ensure the compromised address is **not** present in either query result.
 * `transfer_admin` and `accept_admin_transfer` **automatically clear the guardian**; `get_guardian` will return `None` after a successful admin handover. The new admin must explicitly call `set_guardian` to configure a new guardian if one is still desired.
 * If the compromised key was the guardian (and admin was not rotated), rotate it via `set_guardian` (admin only) and confirm with `get_guardian`.
 * Only the admin can `unpause` the contract; resume operations after rotation is verified.
+* Ensure the compromised address is **not** present in any query result.
+* If the compromised key was the guardian on either contract, rotate it via `set_guardian` (admin only) and confirm with `get_guardian`.
+* Only the admin can `unpause` either contract; resume operations after rotation is verified.
 
 ---
 
@@ -321,7 +363,7 @@ Once administrative control is secured, audit the contracts for malicious modifi
     --admin <NEW_ADMIN_ADDRESS> \
     --watcher <ROGUE_WATCHER_ADDRESS>
   ```
-  *(Or execute `clear_all_watchers` and re-register legitimate nodes if extensive tampering occurred).*
+  *(If extensive tampering occurred, use `clear_all_watchers` to bulk-deauthorize every watcher except a kept set, then re-register legitimate nodes. The call takes the admin and the set of watchers to keep; watchers outside that set are removed. It cannot be used to empty the registry below `MIN_WATCHERS`.)*
 * **Restore Deauthorized Watchers:** Re-register any legitimate watcher nodes that were maliciously removed.
 
 ### 2. AlertRegistry Audit:
@@ -367,6 +409,6 @@ Once administrative control is secured, audit the contracts for malicious modifi
 2. **Key Management Hardening:**
    * Transition admin keys to hardware security modules (HSMs) or Soroban multisig contracts.
    * Establish threshold signer sets (e.g. 2-of-3 or 3-of-5 signers) for `WatcherRegistry`.
-   * Configure a **guardian** on `AlertRegistry` (see [Section 1a](#1a-guardian-role-alertregistry)) so on-call operators can pause without ever touching the admin key — reducing the frequency with which the admin key is used and the blast radius if a hot key is later compromised.
+   * Configure a **guardian** on both `AlertRegistry` and `WatcherRegistry` (see [Section 1a](#1a-guardian-role-alertregistry-and-watcherregistry)) so on-call operators can pause without ever touching the admin key — reducing the frequency with which the admin key is used and the blast radius if a hot key is later compromised.
 3. **Runbook Updates:**
    * Document lessons learned and update this runbook and `SECURITY.md` accordingly.

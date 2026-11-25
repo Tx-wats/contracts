@@ -16,9 +16,10 @@
     "lib"
   ],
   "scripts": {
-    "build": "CONTRACT_ID=$(python3 ../../scripts/deployment_address.py --network testnet --contract \"Alert Registry\") && stellar contract bindings typescript --wasm ../../target/wasm32-unknown-unknown/release/alert_registry.wasm --output-dir ./dist --contract-id \"$CONTRACT_ID\" --overwrite && tsc -p tsconfig.json && tsc -p tsconfig.entry.json",
+    "generate": "stellar contract bindings typescript --wasm ${WASM:-../../target/wasm32-unknown-unknown/release/alert_registry.wasm} --output-dir ./dist ${CONTRACT_ID:+--contract-id \"$CONTRACT_ID\"} --overwrite",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.entry.json",
     "test": "vitest run",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run generate && npm run build"
   },
   "keywords": [
     "stellar",

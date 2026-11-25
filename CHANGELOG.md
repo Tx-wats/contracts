@@ -7,19 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — alert-registry error-code collisions
+
+- `ContractError` codes that collided are reassigned: `AdminTransferExpired` 24 → 34, `NotAGuardian` 24 → 35, `TooManyTags` 30 → 36. `NotGuardian` keeps 24 and `RevisionMismatch` keeps 30.
+### Added
+
+- **Alert tags.** `set_alert_tags(caller, config_id, tags)` lets the owner attach
+  up to `MAX_TAGS_PER_ALERT` (8) tags to an alert, each 1 to `MAX_TAG_LEN` (32)
+  bytes. `get_alert_tags(config_id)` returns them, or an empty vec if none were set.
+- **Alert snooze.** `snooze_alert(caller, config_id, until_ledger)` (owner only)
+  hides an alert from the active-filtered getters until `until_ledger`, without
+  changing its stored `active` flag. A ledger at or before the current one clears
+  the snooze early.
+- **Alert expiry.** `set_alert_expiry(caller, config_id, active_until_ledger)`
+  (owner only; `None` clears it) makes an alert count as inactive from that ledger
+  onward, in the active getters and sync results. `get_alert_expiry` and
+  `is_alert_expired` report it. This is separate from storage TTL, which archives
+  a record rather than deactivating it.
+- **Guardian role.** The admin sets or clears a guardian with `set_guardian` and
+  `clear_guardian`, and reads it with `get_guardian`. The guardian may call `pause`
+  but never `unpause` or any other admin function. Callers that are neither admin
+  nor guardian get `NotAGuardian` from `pause`.
+- **Schema migration.** `migrate(caller, from, to, cursor)` (admin only) moves the
+  stored schema version from `from` to `to` in resumable steps of up to 50 alert
+  IDs. Call it again with the returned cursor until the version is committed, which
+  happens once the cursor reaches the alert count. `get_schema_version` reads the
+  current version (`CURRENT_SCHEMA_VERSION`, 1). The step does not rewrite any
+  records yet.
+- **Watcher scopes (`WatcherRegistry`).** `set_watcher_scope(admin, watcher, scope)`
+  restricts a watcher to a list of target contracts; an empty list, the default,
+  means unrestricted. `is_watcher_authorized_for(watcher, target)` applies the
+  scope and `set_watcher_scope` emits `watcher.scope`.
+
 ### Changed — npm package names
 
-- **TypeScript bindings renamed to `@tx-wats/<contract>-bindings`.** The scope now matches the GitHub org (`Tx-wats`) and both packages share the `-bindings` suffix: `@tx-wat/alert-registry-bindings` → `@tx-wats/alert-registry-bindings`, and `@tx-wat/watcher-registry` → `@tx-wats/watcher-registry-bindings`. Nothing was published under the old names.
+- **TypeScript bindings renamed to `@tx-wats/<contract>-bindings`.** The scope now matches the GitHub org (`Tx-wats`) and both packages share the `-bindings` suffix: `@tx-wat/alert-registry-bindings` → `@tx-wats/alert-registry-bindings`, and `@tx-wat/watcher-registry` → `@tx-wats/watcher-registry-bindings`. The 0.1.0 release recorded `@tx-wat/alert-registry-bindings` as published to npm, so consumers must update their package name and imports.
 
 ### Changed — BREAKING (alert-registry)
-
-- **List and sync getters now return `Vec<(u64, AlertConfig)>`.** Every getter
-  that returned `Vec<AlertConfig>` (`get_alerts_modified_since`,
-  `get_alerts_modified_since_ledger`, `get_alerts_by_owner`,
-  `get_alerts_for_contract`, `get_alerts_by_ids`, their paginated and active
-  variants) pairs each config with its alert ID, so callers can tell which
-  config belongs to which ID after removals leave gaps. Bindings and README
-  examples must destructure `[id, config]`. (issue #358)
 
 - **Alert ownership transfers now require the recipient's acceptance.**
   `transfer_alert_ownership` let an owner push alerts onto any address, which a
@@ -28,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `accept_alert_transfer` (recipient signs), plus `reject_alert_transfer`,
   `cancel_alert_transfer` and `get_pending_alert_transfer`. Proposals expire
   after `ALERT_TRANSFER_EXPIRY_LEDGERS` (≈ 7 days) and are cleared when the alert
-  is removed or retargeted. New errors: `NoPendingTransfer` (18),
+  is removed or retargeted. New errors: `NoPendingTransfer` (16),
   `TransferExpired` (19), `InvalidTransferRecipient` (20). (issue #201)
 
 ### Deprecated
@@ -42,8 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`webhook_hash`, `pending_webhook_hash`), `AlertInput`, and the
   `register_alert` / `update_webhook` / `propose_webhook` entry points all take
   `BytesN<32>`, and the length validation is removed because the type
-  guarantees it. `ContractError::InvalidWebhookHash` (6) is no longer returned
-  but is kept so its code is never reused. This is an ABI and storage-layout
+  guarantees it. `ContractError::InvalidWebhookHash` (6) is still returned for the
+  all-zero digest by `register_alert`, `update_webhook` and `propose_webhook`,
+  since it is never the SHA-256 of a URL. Wrong lengths can no longer occur. This is an ABI and storage-layout
   change: the contract version (`contractmeta` and crate) and the
   `@tx-wat/alert-registry-bindings` package are bumped to 0.2.0, and alerts
   stored by 0.1.0 cannot be read by 0.2.0 (testnet-only deployment; re-register
@@ -99,8 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constants in `alert_registry::instance_key`, so a mistyped key no longer
   compiles. The symbol values are byte-identical, so existing deployments need
   no migration (they are not `DataKey` variants, whose encoding would differ).
-  The dead `DataKey::NextId` variant, which never stored anything, is removed
-  and the docs that pointed at it are corrected. (issue #211)
+  (issue #211)
 - **Index TTL refresh in `deactivate_alert_by_admin`, `update_target_contract`
   and `transfer_alert_ownership`.** The code fix landed with the
   `persist_alert` / `touch_alert` refactor (#213); a regression test now also

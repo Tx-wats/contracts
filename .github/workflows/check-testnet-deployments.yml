@@ -56,7 +56,7 @@ jobs:
             if [[ -z "$issue_number" ]]; then
               gh issue create \
                 --title "$title" \
-                --body "The scheduled testnet liveness check failed. Review the [workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) logs, then follow the [testnet reset recovery guide](docs/deployment-guide.md)."
+                --body "The scheduled testnet liveness check failed. Review the [workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) logs, then follow the [testnet reset recovery guide]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/main/docs/deployment-guide.md#4-remediation-recovery-from-a-testnet-reset)."
             else
               echo "Existing liveness issue: #$issue_number"
             fi

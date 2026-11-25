@@ -5,6 +5,7 @@
 #   ./scripts/keeper.sh instance                          # bump_instance_ttl on both contracts
 #   ./scripts/keeper.sh alerts --ids-file ids.txt [--ttl 535680]
 #   ./scripts/keeper.sh prune --owners-file owners.txt
+#   ./scripts/keeper.sh prune-contracts --targets-file targets.txt
 #
 # Environment:
 #   NETWORK                 testnet (default) or mainnet
@@ -88,7 +89,9 @@ cmd_alerts() {
   fi
 }
 
-# Run prune_expired_alerts for each owner address in --owners-file.
+# Run prune_expired_alerts for each owner address in --owners-file. Each call
+# scans a bounded window of the owner index, so repeat it until
+# get_prune_cursor reports no scan in progress.
 cmd_prune() {
   local owners_file="" owner
   while [[ $# -gt 0 ]]; do
@@ -104,17 +107,54 @@ cmd_prune() {
     if [[ -z "$owner" || "$owner" == \#* ]]; then
       continue
     fi
-    echo "==> prune_expired_alerts: $owner"
-    invoke "$ALERT_REGISTRY_ID" prune_expired_alerts --owner "$owner"
+    local cursor pass=0
+    while :; do
+      pass=$((pass + 1))
+      echo "==> prune_expired_alerts: $owner (pass $pass)"
+      invoke "$ALERT_REGISTRY_ID" prune_expired_alerts --owner "$owner"
+      cursor=$(invoke "$ALERT_REGISTRY_ID" get_prune_cursor --owner "$owner" | tr -d '"[:space:]')
+      [[ -z "$cursor" || "$cursor" == "null" ]] && break
+    done
   done < "$owners_file"
+}
+
+# Run prune_contract_index for each target contract address in --targets-file,
+# releasing the per-contract quota held by expired alerts.
+cmd_prune_contracts() {
+  local targets_file="" target failures=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --targets-file) targets_file="${2:?--targets-file needs a value}"; shift 2 ;;
+      *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+  [[ -n "$targets_file" ]] || { echo "Error: --targets-file required" >&2; exit 1; }
+  require_env ALERT_REGISTRY_ID
+
+  while read -r target; do
+    if [[ -z "$target" || "$target" == \#* ]]; then
+      continue
+    fi
+    echo "==> prune_contract_index: $target"
+    if ! invoke "$ALERT_REGISTRY_ID" prune_contract_index --target "$target"; then
+      echo "==> FAILED prune_contract_index $target" >&2
+      failures=$((failures + 1))
+    fi
+  done < "$targets_file"
+
+  if [[ $failures -gt 0 ]]; then
+    echo "Error: $failures contract prune(s) failed" >&2
+    exit 1
+  fi
 }
 
 case "${1:-}" in
   instance) shift; cmd_instance "$@" ;;
   alerts)   shift; cmd_alerts "$@" ;;
   prune)    shift; cmd_prune "$@" ;;
+  prune-contracts) shift; cmd_prune_contracts "$@" ;;
   *)
-    sed -n '2,12p' "$0" >&2
+    sed -n '2,13p' "$0" >&2
     exit 1
     ;;
 esac

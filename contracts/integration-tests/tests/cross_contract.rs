@@ -678,3 +678,195 @@ fn test_alert_registry_pause_does_not_block_watcher_removal() {
     // After removal, watcher is no longer authorized
     assert!(!fixture.watcher_client.is_watcher_authorized(&fixture.watcher));
 }
+
+/// Register one alert on a fresh target and return `(owner, target, id)`.
+fn register_gated_alert(fixture: &test_utils::GatedFixture<'_>) -> (Address, Address, u64) {
+    let owner = Address::generate(&fixture.env);
+    let target = Address::generate(&fixture.env);
+    let id = fixture.alert_client.register_alert(
+        &owner,
+        &target,
+        &str(&fixture.env, "Alert"),
+        &hash64(&fixture.env),
+        &vec![&fixture.env],
+    );
+    (owner, target, id)
+}
+
+/// In gated mode, a snoozed alert is hidden from a registered watcher's active
+/// reads and reappears once the snooze lapses; non-watchers stay rejected.
+#[test]
+fn test_gated_mode_snoozed_alert_hidden_from_active_reads() {
+    let fixture = setup_gated();
+    let (owner, target, id) = register_gated_alert(&fixture);
+    let now = fixture.env.ledger().sequence();
+
+    fixture.alert_client.snooze_alert(&owner, &id, &(now + 10));
+
+    let active = fixture
+        .alert_client
+        .get_active_alerts_for_contract(&fixture.watcher, &target);
+    assert_eq!(active.len(), 0);
+    // Stored flag is untouched, so the unfiltered read still returns it.
+    assert_eq!(
+        fixture
+            .alert_client
+            .get_alerts_for_contract(&fixture.watcher, &target)
+            .len(),
+        1
+    );
+
+    let stranger = Address::generate(&fixture.env);
+    assert_eq!(
+        fixture
+            .alert_client
+            .try_get_active_alerts_for_contract(&stranger, &target)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+
+    test_utils::advance_ledger(&fixture.env, 10);
+    assert_eq!(
+        fixture
+            .alert_client
+            .get_active_alerts_for_contract(&fixture.watcher, &target)
+            .len(),
+        1
+    );
+}
+
+/// In gated mode, an alert past its expiry ledger is reported expired while its
+/// stored config stays readable by a registered watcher.
+#[test]
+fn test_gated_mode_expired_alert_reported_expired() {
+    let fixture = setup_gated();
+    let (owner, target, id) = register_gated_alert(&fixture);
+    let now = fixture.env.ledger().sequence();
+
+    fixture
+        .alert_client
+        .set_alert_expiry(&owner, &id, &Some(now + 5));
+    assert!(!fixture.alert_client.is_alert_expired(&id));
+
+    test_utils::advance_ledger(&fixture.env, 5);
+    assert!(fixture.alert_client.is_alert_expired(&id));
+
+    let cfg = fixture.alert_client.get_alert(&fixture.watcher, &id).unwrap();
+    assert!(cfg.active);
+    assert_eq!(
+        fixture
+            .alert_client
+            .get_alerts_for_contract(&fixture.watcher, &target)
+            .len(),
+        1
+    );
+}
+
+/// In gated mode, an admin-suspended alert is hidden from active reads and
+/// is flagged unsuspended again after the admin unlocks it.
+#[test]
+fn test_gated_mode_suspended_alert_hidden_until_unlocked() {
+    let fixture = setup_gated();
+    let (_owner, target, id) = register_gated_alert(&fixture);
+
+    fixture
+        .alert_client
+        .deactivate_alert_by_admin(&fixture.admin, &id);
+    assert!(fixture.alert_client.is_alert_suspended(&id));
+    assert_eq!(
+        fixture
+            .alert_client
+            .get_active_alerts_for_contract(&fixture.watcher, &target)
+            .len(),
+        0
+    );
+
+    fixture
+        .alert_client
+        .unlock_alert_by_admin(&fixture.admin, &id);
+    assert!(!fixture.alert_client.is_alert_suspended(&id));
+}
+
+/// A watcher scoped to one target is authorized for it (and can read it through
+/// the gated AlertRegistry) but not for other targets; clearing the scope
+/// restores unrestricted access.
+#[test]
+fn test_scoped_watcher_authorized_only_for_scoped_target() {
+    let fixture = setup_gated();
+    let (_owner, target, _id) = register_gated_alert(&fixture);
+    let other = Address::generate(&fixture.env);
+
+    fixture.watcher_client.set_watcher_scope(
+        &fixture.admin,
+        &fixture.watcher,
+        &vec![&fixture.env, target.clone()],
+    );
+
+    assert!(fixture
+        .watcher_client
+        .is_watcher_authorized_for(&fixture.watcher, &target));
+    assert!(!fixture
+        .watcher_client
+        .is_watcher_authorized_for(&fixture.watcher, &other));
+    assert_eq!(
+        fixture
+            .alert_client
+            .get_alerts_for_contract(&fixture.watcher, &target)
+            .len(),
+        1
+    );
+
+    fixture
+        .watcher_client
+        .set_watcher_scope(&fixture.admin, &fixture.watcher, &vec![&fixture.env]);
+    assert!(fixture
+        .watcher_client
+        .is_watcher_authorized_for(&fixture.watcher, &other));
+}
+
+/// A guardian can pause the gated AlertRegistry but cannot unpause it; gated
+/// reads keep working while paused and mutations are rejected.
+#[test]
+fn test_guardian_pause_gated_reads_still_work() {
+    let fixture = setup_gated();
+    let (owner, target, id) = register_gated_alert(&fixture);
+    let guardian = Address::generate(&fixture.env);
+
+    fixture.alert_client.set_guardian(&fixture.admin, &guardian);
+    fixture.alert_client.pause(&guardian);
+    assert!(fixture.alert_client.is_paused());
+
+    // Gated reads are unaffected by the pause.
+    assert_eq!(
+        fixture
+            .alert_client
+            .get_alerts_for_contract(&fixture.watcher, &target)
+            .len(),
+        1
+    );
+    let stranger = Address::generate(&fixture.env);
+    assert_eq!(
+        fixture
+            .alert_client
+            .try_get_alerts_for_contract(&stranger, &target)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::NotAWatcher
+    );
+
+    // Mutations are blocked while paused.
+    assert_eq!(
+        fixture
+            .alert_client
+            .try_snooze_alert(&owner, &id, &1_000)
+            .unwrap_err()
+            .unwrap(),
+        AlertError::Paused
+    );
+
+    // Guardian cannot unpause; the admin can.
+    assert!(fixture.alert_client.try_unpause(&guardian).is_err());
+    fixture.alert_client.unpause(&fixture.admin);
+    assert!(!fixture.alert_client.is_paused());
+}

@@ -58,11 +58,16 @@ Both `WatcherRegistry` and `AlertRegistry` expose an admin-gated `pause` / `unpa
 
 `WatcherRegistry` supports an optional delay on the admin actions that can take
 the registry over outright: `add_admin`, `transfer_admin`, `clear_all_watchers`,
-and lowering the delay itself.
+and `upgrade`.
 
 - `set_timelock_delay(caller, delay_ledgers)` configures the delay. It may be
-  **raised** directly; lowering or disabling it must go through the time-lock,
-  so a stolen key cannot switch the protection off.
+  **raised** directly.
+- **Lock-in (#64):** once the delay is above `0`, it cannot be lowered or
+  disabled by any path. `set_timelock_delay` rejects a lower value with
+  `TimelockRequired`, and `propose_admin_action(SetTimelockDelay(lower))` is
+  refused at proposal time with the same error, so a lower value is never
+  queued. The only remaining exit is a contract upgrade, which is itself
+  time-locked. Treat enabling the delay as permanent.
 - While a delay is set, the sensitive entrypoints return `TimelockRequired`.
   The action must be queued with `propose_admin_action` and run with
   `execute_admin_action` once `ready_at` is reached.
@@ -74,6 +79,53 @@ and lowering the delay itself.
 
 The delay bounds the blast radius of a single compromised key; it does not
 prevent a compromised admin from registering watchers, which stays immediate.
+
+Because the delay cannot be lowered (#64), an operator who sets it to a long
+value and later needs it shorter must upgrade the contract to change it. Pick
+the value deliberately before enabling it.
+
+---
+
+## Watcher scopes and metadata
+
+Each watcher has two optional, admin-written records, both keyed by watcher
+address and stored in instance storage:
+
+- **Scope** (`set_watcher_scope`, `DataKey::WatcherScope`): a list of target
+  contracts. An empty or absent scope means unrestricted. Only
+  `is_watcher_authorized_for` reads it.
+- **Metadata** (`set_watcher_info`, `DataKey::WatcherInfo`): free-text `label`
+  and `operator`. Informational only; it carries no authorization weight.
+
+### Attack surface
+
+- **Instance bloat.** Neither setter caps the size of the scope list or the
+  label/operator strings, and neither checks that the address is registered.
+  `remove_watcher` and `clear_all_watchers` do not delete the scope or metadata
+  entries, so records for removed watchers stay behind. `MAX_WATCHERS` bounds the
+  watcher list only, not these entries. All of this lives in one instance entry
+  that is read on every call, so growth raises the cost of every entrypoint and
+  can eventually exceed the network's ledger-entry size limit. Both setters are
+  also not blocked by `pause`, unlike `register_watcher`.
+- **Scope widening on replace (#61 context).** `replace_watcher` moves the
+  watcher slot only. Scope and metadata are keyed by address and do not follow
+  the replacement. A watcher scoped to `[A]` that is replaced by an address with
+  no scope becomes unrestricted under `is_watcher_authorized_for`. A stale scope
+  left on a previously removed address also re-applies if that address is
+  registered again.
+- **Scope not enforced by AlertRegistry (#61).** `AlertRegistry` gates reads
+  with `is_watcher_authorized`, not `is_watcher_authorized_for`. A scoped watcher
+  can read alerts for any target. Scope is only a guarantee for consumers that
+  call `is_watcher_authorized_for` themselves. See
+  [threat-model-alert-registry.md](threat-model-alert-registry.md).
+
+### Operator guidance
+
+- After `replace_watcher`, call `set_watcher_scope` on the new address in the
+  same operation, and clear the old address's scope with an empty vector.
+- After `remove_watcher`, clear the scope and metadata explicitly
+  (`set_watcher_scope` with an empty vector, `set_watcher_info` with `None`).
+- Do not rely on scope for isolation until #61 is fixed.
 
 ---
 
@@ -101,7 +153,7 @@ Two-step and queued admin operations keep authority in storage between transacti
 - The contract clears pending state on every transition listed in the table above.
 - `accept_admin_transfer` is rejected once the expiry ledger has passed, and when the proposer is no longer an admin.
 - Any admin can call `cancel_admin_transfer` or `cancel_admin_action` at any time, including during an incident.
-- **Gap:** `pause` does **not** block `accept_admin_transfer` on `WatcherRegistry`; the entrypoint has no pause check. During an incident, cancel the proposal rather than relying on the pause.
+- `pause` blocks `accept_admin_transfer` on `WatcherRegistry` (it returns `ContractError::Paused`), matching `AlertRegistry`, so a pending takeover cannot be completed while the registry is paused. `cancel_admin_transfer` remains callable while paused, so an admin can still clear a suspicious proposal during an incident.
 
 ### Operator checks
 
@@ -148,6 +200,14 @@ stellar contract invoke --id <WATCHER_REGISTRY_CONTRACT_ID> --network <NETWORK> 
 **Vector:** An admin observes suspicious registry activity and wants to stop further damage before finishing the investigation.  
 **Outcome:** Any admin can call `pause`, which immediately rejects all state-mutating calls (on both `WatcherRegistry` and `AlertRegistry`) with `ContractError::Paused` while leaving all reads available. Once the compromised admin is identified and removed, an admin calls `unpause` to resume normal operation.
 
+### 5b. Timelock enabled, then needed shorter
+**Vector:** An admin enables a long timelock delay, then wants to shorten it.
+**Outcome:** Both `set_timelock_delay` and `propose_admin_action(SetTimelockDelay)` return `TimelockRequired`. The delay stays locked in until a contract upgrade. See [Admin time-lock](#admin-time-lock).
+
+### 5c. Watcher replaced into a wider scope
+**Vector:** A watcher scoped to `[A]` is swapped for a new address via `replace_watcher`, and the new address was never scoped.
+**Outcome:** `is_watcher_authorized_for(new, B)` returns `true`. The scope did not move with the watcher. See [Watcher scopes and metadata](#watcher-scopes-and-metadata).
+
 ### 5. Admin transfers to a typo'd or unowned address
 **Vector:** Admin calls `propose_admin_transfer` with an address they mistyped or don't control.  
 **Outcome:** No state change to the admin set — the proposal only takes effect once the named `new_admin` signs `accept_admin_transfer`. An unowned or unaccepted proposal can be cancelled by any existing admin via `cancel_admin_transfer`, so the contract is never locked out.
@@ -165,6 +225,7 @@ stellar contract invoke --id <WATCHER_REGISTRY_CONTRACT_ID> --network <NETWORK> 
 | `transfer_admin` cannot strip other admins in a multi-admin set | ✅ |
 | Minimum watcher count enforced on removal | ✅ (`MIN_WATCHERS`) |
 | Emergency pause / circuit-breaker on mutations | ✅ |
+| Pause blocks `accept_admin_transfer` (cancel still allowed) | ✅ |
 | Replay protection | ✅ (Stellar protocol) |
 | Admin key compromise protection | ⚠️ partial (opt-in time-lock on sensitive actions) |
 | Admin key compromise protection | ❌ (mitigated via `pause` + `remove_admin`, not prevented) |
@@ -172,3 +233,7 @@ stellar contract invoke --id <WATCHER_REGISTRY_CONTRACT_ID> --network <NETWORK> 
 | Multi-sig / time-lock on admin actions | ❌ |
 | Bounded watcher/admin set size | ✅ (`MAX_WATCHERS`/`MAX_ADMINS`) |
 | Multi-sig / time-lock on admin actions | ⚠️ time-lock, opt-in and disabled by default |
+| Timelock can be shortened or disabled once set | ❌ never, lock-in until upgrade (#64) |
+| Watcher scope enforced by `AlertRegistry` | ❌ (#61) |
+| Watcher scope follows the watcher on `replace_watcher` | ❌ |
+| Scope and metadata bounded and cleared on removal | ❌ |
