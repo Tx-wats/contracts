@@ -35,6 +35,7 @@ Two rules set the cadence:
 | AlertRegistry instance | `bump_instance_ttl` | Every 12 hours | Also extended by every write; this covers quiet periods |
 | Each live alert | `bump_alert(id, 535680)` | Every 12 hours | Covers owner writes that reset alerts to ~24 hours |
 | Owner index cleanup | `prune_expired_alerts(owner)` | On demand, or weekly | Only needed to free per-owner quota; see the restore caveat below |
+| Contract index cleanup | `prune_contract_index(target)` | On demand, or weekly | Frees per-contract quota; `keeper.sh prune-contracts` |
 | Owner renewal | `renew_alert_ttl` | Not for keepers | Owner-only, and resets the alert to `DEFAULT_TTL` (~24 hours) |
 
 A 12-hour cadence is 8 640 ledgers, so each target gets at least two chances
@@ -100,10 +101,20 @@ record no longer exists. It is permissionless and emits `alert.pruned`
 when it removes anything. `register_alert` calls the same cleanup when an
 owner is at the per-owner limit.
 
-Use the script for owners whose index is full of dangling IDs:
+Each call scans a bounded window of the owner index and records its position
+in `get_prune_cursor`. The script repeats the call for each owner until the
+cursor is `None`, so large owners are fully pruned:
 
 ```bash
 ./scripts/keeper.sh prune --owners-file /etc/keeper/owners.txt
+```
+
+`prune_contract_index(target)` drops dangling IDs from a target contract's
+index and releases the per-contract quota they held. Run it for each target
+listed (one address per line, `#` comments allowed):
+
+```bash
+./scripts/keeper.sh prune-contracts --targets-file /etc/keeper/targets.txt
 ```
 
 **Caveat:** the contract cannot tell an expired alert from an archived one,

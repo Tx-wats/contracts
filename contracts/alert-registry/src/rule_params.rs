@@ -48,6 +48,25 @@ pub fn parse_min_param(rule: &[u8], bases: &[&str]) -> Option<i128> {
     None
 }
 
+/// If `rule` is `<base>:min=<amount>` for a recognized `base`, returns that
+/// `base` descriptor (#577). Used to treat `rule:<base>` and
+/// `rule:<base>:min=N` as the same rule for duplicate checking, regardless of
+/// `N`, including `N = 0`.
+pub fn base_descriptor<'a>(rule: &[u8], bases: &'a [&'a str]) -> Option<&'a str> {
+    for base in bases {
+        let b = base.as_bytes();
+        let suffix = b":min=";
+        if rule.len() > b.len() + suffix.len()
+            && &rule[..b.len()] == b
+            && &rule[b.len()..b.len() + suffix.len()] == suffix
+            && parse_amount(&rule[b.len() + suffix.len()..]).is_some()
+        {
+            return Some(base);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

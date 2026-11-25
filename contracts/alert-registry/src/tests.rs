@@ -390,10 +390,14 @@ fn test_set_per_owner_alert_limit_emits_event() {
         })
         .expect("admin.limit event must be emitted");
     let (_, _, data) = event;
-    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+    // #604: payload now carries the schema version plus old and new values.
+    let (version, emitted_admin, kind, old_limit, emitted_limit): (u32, Address, Symbol, u32, u32) =
         soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
     assert_eq!(emitted_admin, admin);
     assert_eq!(kind, symbol_short!("owner"));
+    // First change: the previous value is the default (unlimited = 0).
+    assert_eq!(old_limit, 0u32);
     assert_eq!(emitted_limit, 5u32);
 }
 
@@ -3197,10 +3201,14 @@ fn test_set_global_alert_limit_emits_admin_limit_event() {
         })
         .expect("admin.limit event must be emitted");
     let (_, _, data) = event;
-    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+    // #604: payload now carries the schema version plus old and new values.
+    let (version, emitted_admin, kind, old_limit, emitted_limit): (u32, Address, Symbol, u32, u32) =
         soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
     assert_eq!(emitted_admin, admin);
     assert_eq!(kind, symbol_short!("global"));
+    // First change: the previous value is the default (unlimited = 0).
+    assert_eq!(old_limit, 0u32);
     assert_eq!(emitted_limit, 11u32);
 }
 
@@ -3450,10 +3458,14 @@ fn test_set_per_contract_alert_limit_emits_admin_limit_event() {
         .expect("admin.limit event must be emitted");
 
     let (_, _, data) = limit_event;
-    let (emitted_admin, kind, emitted_limit): (Address, Symbol, u32) =
+    // #604: payload now carries the schema version plus old and new values.
+    let (version, emitted_admin, kind, old_limit, emitted_limit): (u32, Address, Symbol, u32, u32) =
         soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
     assert_eq!(emitted_admin, admin);
     assert_eq!(kind, symbol_short!("contract"));
+    // First change: the previous value is the default (unlimited = 0).
+    assert_eq!(old_limit, 0u32);
     assert_eq!(emitted_limit, 7u32);
 }
 
@@ -7718,6 +7730,122 @@ fn test_set_guardian_emits_event() {
     assert_eq!(emitted_guardian, Some(guardian));
 }
 
+// #604: a second limit change reports the previously stored value as `old`.
+#[test]
+fn test_admin_limit_event_carries_old_value_on_subsequent_change() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, admin, client) = setup();
+    client.set_per_owner_alert_limit(&admin, &5u32);
+    client.set_per_owner_alert_limit(&admin, &9u32);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("limit")
+        })
+        .expect("admin.limit event must be emitted");
+    let (_, _, data) = event;
+    let (version, emitted_admin, kind, old_limit, new_limit): (u32, Address, Symbol, u32, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(kind, symbol_short!("owner"));
+    assert_eq!(old_limit, 5u32);
+    assert_eq!(new_limit, 9u32);
+}
+
+// #604: admin.timelock carries the schema version plus old and new values.
+#[test]
+fn test_set_timelock_emits_event_with_old_and_new() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, admin, client) = setup();
+
+    client.set_timelock(&admin, &10u32);
+    let first = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("timelock")
+        })
+        .expect("admin.timelock event must be emitted");
+    let (_, _, data) = first;
+    let (version, emitted_admin, old_lock, new_lock): (u32, Address, u32, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_admin, admin);
+    // First change: the previous value is the default (no timelock = 0).
+    assert_eq!(old_lock, 0u32);
+    assert_eq!(new_lock, 10u32);
+
+    client.set_timelock(&admin, &25u32);
+    let second = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("timelock")
+        })
+        .expect("admin.timelock event must be emitted");
+    let (_, _, data) = second;
+    let (version, emitted_admin, old_lock, new_lock): (u32, Address, u32, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_admin, admin);
+    assert_eq!(old_lock, 10u32);
+    assert_eq!(new_lock, 25u32);
+}
+
+// #604: admin.watchreg carries the schema version plus old (None on the
+// first configuration) and new registry addresses.
+#[test]
+#[cfg(feature = "testutils")]
+fn test_set_watcher_registry_emits_event_with_old_and_new() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, admin, alert_client, watcher_client) = setup_with_watcher_registry();
+
+    let watcher_contract_id = watcher_client.address.clone();
+    alert_client.set_watcher_registry(&admin, &watcher_contract_id);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .rev()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("watchreg")
+        })
+        .expect("admin.watchreg event must be emitted");
+    let (_, _, data) = event;
+    let (version, emitted_admin, old_registry, new_registry): (
+        u32,
+        Address,
+        Option<Address>,
+        Option<Address>,
+    ) = soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_admin, admin);
+    // First configuration: there was no previous registry.
+    assert!(old_registry.is_none());
+    assert_eq!(new_registry, Some(watcher_contract_id));
+}
+
 // G-14. clear_guardian emits (admin, guardian) event with None payload.
 #[test]
 fn test_clear_guardian_emits_event() {
@@ -8093,6 +8221,161 @@ fn test_set_alert_tags_rejects_empty_or_overlong_tag() {
     let overlong = str_repeat(&env, 'x', (MAX_TAG_LEN + 1) as usize);
     let result = client.try_set_alert_tags(&owner, &id, &vec![&env, overlong]);
     assert_eq!(result, Err(Ok(ContractError::InvalidTag)));
+}
+
+// ── #605: alert.snooze / alert.tags / alert.renew carry the caller ─────────
+
+#[test]
+fn test_snooze_alert_event_carries_schema_version_and_caller() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    client.snooze_alert(&owner, &id, &200);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("snooze")
+        })
+        .expect("alert.snooze event must be emitted");
+    let (_, _, data) = event;
+    let (version, emitted_id, emitted_caller, emitted_until): (u32, u64, Address, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_id, id);
+    assert_eq!(emitted_caller, owner);
+    assert_eq!(emitted_until, 200u32);
+}
+
+#[test]
+fn test_set_alert_tags_event_carries_schema_version_and_caller() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let tags = vec![&env, str(&env, "prod"), str(&env, "treasury")];
+    client.set_alert_tags(&owner, &id, &tags);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("tags")
+        })
+        .expect("alert.tags event must be emitted");
+    let (_, _, data) = event;
+    let (version, emitted_id, emitted_caller, emitted_count): (u32, u64, Address, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_id, id);
+    assert_eq!(emitted_caller, owner);
+    assert_eq!(emitted_count, 2u32);
+}
+
+#[test]
+fn test_renew_alert_ttl_for_event_carries_requested_ttl() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let requested_ttl = 500u32;
+    client.renew_alert_ttl_for(&owner, &id, &requested_ttl);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("renew")
+        })
+        .expect("alert.renew event must be emitted");
+    let (_, _, data) = event;
+    let (version, emitted_id, emitted_caller, emitted_ttl): (u32, u64, Address, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_id, id);
+    assert_eq!(emitted_caller, owner);
+    assert_eq!(
+        emitted_ttl, requested_ttl,
+        "renew_alert_ttl_for must emit the requested TTL, not the default"
+    );
+}
+
+#[test]
+fn test_renew_alert_ttl_event_carries_requested_ttl() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, _admin, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let id = client.register_alert(
+        &owner,
+        &target,
+        &str(&env, "Alert"),
+        &hash64(&env),
+        &vec![&env, str(&env, "rule:transfer")],
+    );
+
+    let requested_ttl = 250u32;
+    client.renew_alert_ttl(&owner, &id, &requested_ttl);
+
+    let event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| {
+            topics.len() == 2
+                && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("renew")
+        })
+        .expect("alert.renew event must be emitted");
+    let (_, _, data) = event;
+    let (version, emitted_id, emitted_caller, emitted_ttl): (u32, u64, Address, u32) =
+        soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(version, EVENT_SCHEMA_VERSION);
+    assert_eq!(emitted_id, id);
+    assert_eq!(emitted_caller, owner);
+    assert_eq!(emitted_ttl, requested_ttl);
 }
 
 // ── #396: snooze-until-ledger for alerts ────────────────────────────────────

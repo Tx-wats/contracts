@@ -16,6 +16,7 @@ parse_args() {
   CONTRACT_ID="${CONTRACT_ID:-}"
   NO_GATING="${NO_GATING:-false}"
   ASSUME_YES="${ASSUME_YES:-false}"
+  WATCHERS=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -24,10 +25,46 @@ parse_args() {
       --contract-id) CONTRACT_ID="${2:?--contract-id needs a value}"; shift 2 ;;
       --no-gating)   NO_GATING=true;                                  shift 1 ;;
       --yes|-y)      ASSUME_YES=true;                                 shift 1 ;;
+      --watcher)     WATCHERS+=("${2:?--watcher needs a value}");      shift 2 ;;
       *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
   done
   export NETWORK CONTRACT CONTRACT_ID NO_GATING ASSUME_YES
+}
+
+# On mainnet, require interactive confirmation unless --yes was given.
+# Any arguments are printed as summary lines in the warning banner.
+confirm_mainnet() {
+  if [[ "$NETWORK" != "mainnet" ]]; then
+    return 0
+  fi
+  if [ "$ASSUME_YES" = true ]; then
+    echo "==> Mainnet operation confirmed via --yes flag."
+    return 0
+  fi
+  echo "======================================================================"
+  echo "WARNING: You are about to spend real XLM on MAINNET!"
+  local line
+  for line in "$@"; do
+    echo "  $line"
+  done
+  echo "======================================================================"
+  local confirmation
+  read -r -p "Type 'yes' or 'CONFIRM' to proceed with the mainnet operation: " confirmation
+  if [[ "$confirmation" != "yes" && "$confirmation" != "CONFIRM" ]]; then
+    echo "==> Operation cancelled by user."
+    exit 1
+  fi
+}
+
+# Print the WASM hash a deployed contract currently runs (needs RPC_URL etc.).
+deployed_wasm_hash() {
+  stellar contract info \
+    --id "$1" \
+    --network "$NETWORK" \
+    --rpc-url "$RPC_URL" \
+    --network-passphrase "$NETWORK_PASSPHRASE" \
+    | grep -i "wasm hash" | awk '{print $NF}' | tr -d '"'
 }
 
 # Exit unless --contract and --contract-id were both given, and --contract

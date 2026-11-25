@@ -2227,6 +2227,108 @@ fn test_regression_deactivate_all_alerts_does_not_return_zero_mid_scan() {
     assert_eq!(client.deactivate_all_alerts(&owner), total);
 }
 
+/// Regression test for #605: `alert.snooze` and `alert.tags` used to emit
+/// `(id, until_ledger)` / `(id, count)` without the caller, unlike every other
+/// owner mutation event. Both now carry the caller, and `renew_alert_ttl_for`
+/// emits the same `alert.renew` payload as `renew_alert_ttl` including the
+/// requested TTL. The payloads are versioned under `EVENT_SCHEMA_VERSION`.
+#[test]
+fn test_regression_snooze_tags_and_renew_events_include_caller_and_ttl() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let id = register(&env, &client, &owner, "A");
+
+    let last_alert_event = |name: Symbol| -> soroban_sdk::Val {
+        let events = env.events().all();
+        let (_, _, data) = events
+            .iter()
+            .rev()
+            .find(|(_, topics, _)| {
+                topics.len() == 2
+                    && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                    && Symbol::from_val(&env, &topics.get(1).unwrap()) == name
+            })
+            .expect("alert event must be emitted");
+        data
+    };
+
+    // alert.snooze carries (id, caller, until_ledger, version).
+    let until_ledger = env.ledger().sequence() + 100;
+    client.snooze(&owner, &id, &until_ledger);
+    let (event_id, caller, until, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("snooze")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(until, until_ledger);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+
+    // alert.tags carries (id, caller, count, version).
+    client.set_tags(&owner, &id, &vec![&env, str(&env, "tag-a"), str(&env, "tag-b")]);
+    let (event_id, caller, count, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("tags")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(count, 2);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+
+    // alert.renew from renew_alert_ttl_for carries the requested TTL.
+    client.renew_alert_ttl_for(&owner, &id, &crate::MAX_TTL);
+    let (event_id, caller, ttl, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("renew")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(ttl, crate::MAX_TTL);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+
+    // renew_alert_ttl emits the same shape with the default TTL.
+    client.renew_alert_ttl(&owner, &id);
+    let (event_id, caller, ttl, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("renew")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(ttl, crate::DEFAULT_TTL);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+/// Regression test for #604: config-change events carry the previous value
+/// alongside the new one (and a schema version), so auditors do not have to
+/// replay every earlier event to learn what changed. The exact payload shape
+/// is pinned here so a future change to the tuple is caught.
+#[test]
+fn test_regression_config_change_events_include_old_value() {
+    let (env, admin, client) = setup();
+    let registry = Address::generate(&env);
+
+    // admin.limit: (schema_version, old, new)
+    client.set_per_owner_alert_limit(&admin, &10);
+    client.set_per_owner_alert_limit(&admin, &25);
+    let (version, old, new): (u32, u32, u32) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("limit")));
+    assert_eq!((version, old, new), (crate::EVENT_SCHEMA_VERSION, 10, 25));
+
+    // admin.timelock: (schema_version, old, new)
+    client.set_timelock(&admin, &100);
+    client.set_timelock(&admin, &250);
+    let (version, old, new): (u32, u32, u32) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("timelock")));
+    assert_eq!((version, old, new), (crate::EVENT_SCHEMA_VERSION, 100, 250));
+
+    // admin.watchreg: (schema_version, old, new)
+    client.set_watcher_registry(&admin, &registry);
+    let (version, old, new): (u32, Option<Address>, Option<Address>) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("watchreg")));
+    assert_eq!(
+        (version, old, new),
+        (crate::EVENT_SCHEMA_VERSION, None, Some(registry.clone()))
+    );
+
+    client.clear_watcher_registry(&admin);
+    let (version, old, new): (u32, Option<Address>, Option<Address>) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("watchreg")));
+    assert_eq!(
+        (version, old, new),
+        (crate::EVENT_SCHEMA_VERSION, Some(registry), None)
+    );
+}
+
 /// Regression test for #363: removing an ID that is absent from the contract
 /// index must not decrement `ContractLiveCount`.
 #[test]

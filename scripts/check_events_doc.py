@@ -23,6 +23,16 @@ CONTRACTS = {
     "WatcherRegistry": os.path.join(REPO_ROOT, "contracts", "watcher-registry", "src", "lib.rs"),
 }
 
+# GH #604: config-change events must carry both the previous and the new value,
+# plus the current payload schema version.
+CONFIG_CHANGE_EVENTS = {
+    "AlertRegistry": ["admin.limit", "admin.timelock"],
+    "WatcherRegistry": ["admin.watchreg"],
+}
+
+# Current schema version for config-change event payloads (GH #604).
+CONFIG_EVENT_SCHEMA_VERSION = 2
+
 
 def extract_source_events(file_path: str) -> set:
     """Extract (category, action) pairs published in contract source (excluding tests)."""
@@ -73,6 +83,8 @@ def parse_doc_events(doc_path: str) -> dict:
         elif line_str.startswith("### ") and current_contract:
             # e.g., "### `alert.register`", "### alert.register" or "### `alert.xfer_rej` / `alert.xfer_can`"
             heading = line_str.replace("### ", "").replace("`", "").strip()
+            # Strip trailing parenthetical annotations, e.g. "alert.register (versioned)".
+            heading = re.sub(r"\s*\([^)]*\)\s*$", "", heading).strip()
             current_events = [name.strip() for name in heading.split("/") if "." in name]
             for event_name in current_events:
                 doc_data[current_contract][event_name] = {"status": "unknown"}
@@ -84,7 +96,37 @@ def parse_doc_events(doc_path: str) -> dict:
                 elif "🔲" in line_str or "planned" in line_str.lower():
                     doc_data[current_contract][event_name]["status"] = "planned"
 
+        elif current_contract and current_events and line_str.startswith("**Data:**"):
+            for event_name in current_events:
+                doc_data[current_contract][event_name]["data"] = line_str
+
     return doc_data
+
+
+def check_config_event_payloads(contract_name: str, doc_events: dict) -> bool:
+    """Verify config-change events document both `old` and `new` plus the schema version."""
+    ok = True
+    for event_name in CONFIG_CHANGE_EVENTS.get(contract_name, []):
+        entry = doc_events.get(event_name)
+        if entry is None:
+            # Undocumented events are already reported by the main checks.
+            continue
+
+        data_line = entry.get("data", "")
+        missing = []
+        if not re.search(r"\bold\b", data_line):
+            missing.append("old")
+        if not re.search(r"\bnew\b", data_line):
+            missing.append("new")
+        if not re.search(rf"\bschema(?:\s*version)?\s*[:=]?\s*{CONFIG_EVENT_SCHEMA_VERSION}\b", data_line, re.IGNORECASE):
+            missing.append(f"schema version {CONFIG_EVENT_SCHEMA_VERSION}")
+
+        if missing:
+            print(f"❌ ERROR: Config-change event {event_name} in docs/events.md is missing: {', '.join(missing)}")
+            print(f"   Found data line: {data_line or '<none>'}")
+            ok = False
+
+    return ok
 
 
 def main():
@@ -131,7 +173,12 @@ def main():
                 print(f"   - {e}")
             has_error = True
 
-        if not undocumented and not false_planned and not phantom_implemented:
+        # Check 4: Config-change events must document old + new values and schema version
+        payload_ok = check_config_event_payloads(contract_name, doc_events)
+        if not payload_ok:
+            has_error = True
+
+        if not undocumented and not false_planned and not phantom_implemented and payload_ok:
             print(f"✅ {contract_name} event documentation is in sync with source code.")
 
     if has_error:

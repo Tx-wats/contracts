@@ -33,6 +33,8 @@ WASM_DIR="${REPO_ROOT}/target/wasm32-unknown-unknown/release"
 SPEC_DIR="${REPO_ROOT}/contracts"
 
 FAIL=0
+TMP_FILES=()
+trap 'rm -f "${TMP_FILES[@]}" 2>/dev/null' EXIT
 
 for crate in "${ALL_CONTRACTS[@]}"; do
   wasm="${WASM_DIR}/${crate//-/_}.optimized.wasm"
@@ -43,7 +45,7 @@ for crate in "${ALL_CONTRACTS[@]}"; do
   fi
 
   tmp_spec="$(mktemp "${REPO_ROOT}/.tmp-spec-XXXXXXXX.json")"
-  trap 'rm -f "${tmp_spec}" 2>/dev/null' EXIT
+  TMP_FILES+=("${tmp_spec}" "${tmp_spec}.diff")
 
   stellar contract info interface --wasm "${wasm}" --output json > "${tmp_spec}"
 

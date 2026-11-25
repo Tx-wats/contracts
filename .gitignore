@@ -43,3 +43,6 @@ dist/
 
 # OS noise
 Thumbs.db
+
+# spec-golden.sh temp files
+.tmp-spec-*

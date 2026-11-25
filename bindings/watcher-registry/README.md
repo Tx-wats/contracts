@@ -73,6 +73,33 @@ class. The method signatures mirror the Soroban contract interface exactly.
 | `transfer_admin(admin, new_admin)` | `admin` | Replace the entire admin set |
 | `get_admins()` | — | Return all current admin addresses |
 | `get_admin()` | — | Return the primary admin address |
+| `set_guardian(caller, guardian)` | `caller` (admin) | Set the low-privilege guardian address (emits `guardian_set`) |
+| `get_guardian()` | — | Return the current guardian address, if any |
+| `pause(caller)` | `caller` (admin or guardian) | Pause the registry; the guardian may trip this without an admin key |
+| `unpause(caller)` | `caller` (admin) | Resume the registry; the guardian cannot unpause |
+| `clear_all_watchers(caller, keep)` | `caller` (admin) | Revoke every watcher except those in `keep`; the kept set must satisfy `MIN_WATCHERS` |
+| `set_timelock_delay(caller, delay)` | `caller` (admin) | Raise the timelock delay directly; lowering or disabling requires `propose_admin_action` |
+| `propose_admin_action(caller, action)` | `caller` (admin) | Queue a timelocked admin action, including `SetTimelockDelay` with a lower or zero delay |
+| `execute_admin_action(caller)` | `caller` (admin) | Execute a queued action once the timelock has elapsed |
+| `cancel_admin_action(caller)` | `caller` (admin) | Cancel a queued action |
+| `get_timelock_delay()` | — | Return the current timelock delay in seconds |
+| `get_pending_admin_action()` | — | Return the queued action and its executable-at ledger, if any |
+
+### Guardian and timelock notes
+
+- **Guardian:** mirrors `AlertRegistry`'s guardian role. `set_guardian` emits
+  `guardian_set`; pausing as the guardian emits the same `paused` event as an
+  admin pause. Guardian attempts to `unpause` fail with `Unauthorized`.
+- **Timelock delay:** `set_timelock_delay` is raise-only and rejects lower
+  values with `TimelockRequired`. To lower or disable the delay (including
+  setting it to `0`), queue `AdminAction::SetTimelockDelay` via
+  `propose_admin_action` and call `execute_admin_action` after the current
+  delay has elapsed.
+- **`clear_all_watchers`:** performs bulk deauthorization while keeping the
+  addresses passed in `keep`. The resulting watcher set must still contain at
+  least `MIN_WATCHERS` members, otherwise the call fails with
+  `BelowMinWatchers`.
+| `get_configuration()` | — | Return a one-shot snapshot of the registry configuration (admins, paused state, timelock delay, pending action, pending admin transfer, watcher count) |
 
 ## Network addresses
 
