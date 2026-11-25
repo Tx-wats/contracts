@@ -4019,6 +4019,40 @@ impl AlertRegistry {
     ///
     /// Keyed by target contract rather than owner. Deactivated alerts still
     /// count as live until they are removed.
+    /// Admin repair entrypoint: rescans `owner`'s registered alerts, recalculates
+    /// the accurate active alert count, and resets `DataKey::OwnerActiveCount`.
+    pub fn recount_owner_counters(
+        env: Env,
+        admin: Address,
+        owner: Address,
+    ) -> Result<u32, ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        let alerts = Self::get_alerts_by_owner(env.clone(), owner.clone(), 0, Self::get_alert_count(env.clone()) as u32);
+        let mut actual_active: u32 = 0;
+        let current_ledger = env.ledger().sequence();
+
+        for alert in alerts.iter() {
+            if alert.active {
+                if let Some(expiry) = Self::get_alert_expiry(env.clone(), alert.id) {
+                    if current_ledger <= expiry {
+                        actual_active = actual_active.saturating_add(1);
+                    }
+                } else {
+                    actual_active = actual_active.saturating_add(1);
+                }
+            }
+        }
+
+        Self::set_owner_active_count(&env, &owner, actual_active);
+        env.events().publish(
+            (symbol_short!("alert"), symbol_short!("recount")),
+            (owner, actual_active),
+        );
+        Ok(actual_active)
+    }
+
     ///
     /// See `docs/adr/0002-alert-activity-model.md` for how "active" combines the owner flag, admin suspension, snooze and expiry.
     pub fn get_active_contract_alert_count(env: Env, target_contract: Address) -> u32 {
