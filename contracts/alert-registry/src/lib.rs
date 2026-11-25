@@ -2279,6 +2279,9 @@ impl AlertRegistry {
             .get::<DataKey, AlertConfig>(&DataKey::Alert(config_id))
         else {
             if Self::owner_index(&env, &caller).contains(config_id) {
+                let ids = Self::owner_index(&env, &caller);
+                let mut kept = vec![&env];
+                for id in ids.iter() {
                 let full_index = Self::owner_index(&env, &caller);
                 let mut kept: Vec<u64> = Vec::new(&env);
                 for id in full_index.iter() {
@@ -4916,6 +4919,9 @@ impl AlertRegistry {
         let mut out: Vec<AlertConfig> = vec![env];
         let count = ids.len();
         let first = offset.min(count);
+        let last = offset
+            .saturating_add(limit.min(MAX_PAGE_SIZE))
+            .min(count);
         let last = offset.saturating_add(limit.min(MAX_PAGE_SIZE)).min(count);
         for i in first..last {
             let id = ids.get(i).unwrap();
@@ -4931,6 +4937,8 @@ impl AlertRegistry {
         }
         out
     }
+
+
 }
 
 impl AlertRegistry {
