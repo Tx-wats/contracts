@@ -79,9 +79,10 @@ pub enum ContractError {
     /// Returned when proposing [`AdminAction::AddAdmin`] for an address that
     /// is already an admin — queuing it would only waste the single pending
     /// action slot for the full timelock delay on a no-op.
-    AdminAlreadyExists = 17,
+    AdminAlreadyExists = 18,
     /// Returned by `remove_admin` when `target_admin` is not currently an
     /// admin, so there is nothing to remove.
+    AdminNotFound = 19,
     AdminNotFound = 17,
     /// Returned by batch query entry points such as
     /// [`WatcherRegistry::are_watchers_authorized`] when the input holds more
@@ -459,10 +460,10 @@ impl WatcherRegistry {
         // A pending admin transfer proposed by the just-removed admin is no
         // longer trustworthy: invalidate it so it cannot be accepted later by
         // an attacker the removed admin had proposed as the new admin set.
-        if let Some((proposer, _new_admin, _expires_at)) = env
-            .storage()
-            .instance()
-            .get::<_, (Address, Address, u32)>(&DataKey::PendingAdminTransfer)
+        if let Some((proposer, _new_admin, _expires_at)) =
+            env.storage()
+                .instance()
+                .get::<_, (Address, Address, u32)>(&DataKey::PendingAdminTransfer)
         {
             if proposer == target_admin {
                 env.storage()
@@ -649,10 +650,8 @@ impl WatcherRegistry {
             .instance()
             .remove(&DataKey::PendingAdminTransfer);
 
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("cancel")),
-            (admin,),
-        );
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("cancel")), (admin,));
 
         Ok(())
     }
@@ -827,8 +826,10 @@ impl WatcherRegistry {
         // watcher's trust has been revoked.
         if removed {
             Self::decrement_watcher_count(&env);
-            env.events()
-                .publish((symbol_short!("watcher"), symbol_short!("remove")), (watcher,));
+            env.events().publish(
+                (symbol_short!("watcher"), symbol_short!("remove")),
+                (watcher,),
+            );
         }
 
         Ok(())
@@ -1318,6 +1319,9 @@ impl WatcherRegistry {
     /// Emits `("admin", "pause")` with data `(caller: Address,)`.
     pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+        // Idempotent: a redundant pause is a no-op that emits no event, so a
+        // repeated pause call cannot duplicate or reshape the public event.
         Self::assert_admin_or_guardian(&env, &caller)?;
         if !Self::is_paused(env.clone()) {
             env.storage().instance().set(&DataKey::Paused, &true);
@@ -1384,14 +1388,16 @@ impl WatcherRegistry {
     pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+        // Idempotent: unpausing a contract that is not paused is a no-op.
         if Self::is_paused(env.clone()) {
             env.storage().instance().set(&DataKey::Paused, &false);
             env.events()
-                .publish((symbol_short!("admin"), symbol_short!("unpause")), caller);
+                .publish((symbol_short!("admin"), symbol_short!("unpause")), (caller,));
+            env.events().publish(
+                (symbol_short!("admin"), symbol_short!("unpause")),
+                (caller,),
+            );
         }
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("unpause")), (caller,));
         Ok(())
     }
 
@@ -1751,8 +1757,10 @@ impl WatcherRegistry {
             }
         }
 
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("execute")), (caller,));
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("execute")),
+            (caller,),
+        );
 
         Ok(())
     }
@@ -1821,11 +1829,7 @@ impl WatcherRegistry {
     }
 
     /// Add `new_admin` to the admin set, idempotently and within [`MAX_ADMINS`].
-    fn do_add_admin(
-        env: &Env,
-        caller: &Address,
-        new_admin: Address,
-    ) -> Result<(), ContractError> {
+    fn do_add_admin(env: &Env, caller: &Address, new_admin: Address) -> Result<(), ContractError> {
         let mut admins = Self::load_admins(env);
         for i in 0..admins.len() {
             if admins.get(i).unwrap() == new_admin {
@@ -1926,7 +1930,11 @@ impl WatcherRegistry {
 
     /// Return `Ok(())` if the contract is not paused, `Err(Paused)` otherwise.
     fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
-        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
         if paused {
             return Err(ContractError::Paused);
         }
@@ -1963,9 +1971,7 @@ mod error_codes;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _, testutils::Events as _, Env, FromVal, Symbol, Val,
-    };
+    use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env, FromVal, Symbol, Val};
 
     fn assert_last_event_data<T: FromVal<Env, Val>>(
         env: &Env,
@@ -2096,12 +2102,11 @@ mod tests {
     #[test]
     fn test_single_address_events_encode_singleton_tuples() {
         let (env, admin, client) = setup();
-        let admin_init: (Address,) =
-            assert_last_event_data(
-                &env,
-                soroban_sdk::symbol_short!("admin"),
-                soroban_sdk::symbol_short!("init"),
-            );
+        let admin_init: (Address,) = assert_last_event_data(
+            &env,
+            soroban_sdk::symbol_short!("admin"),
+            soroban_sdk::symbol_short!("init"),
+        );
         assert_eq!(admin_init, (admin.clone(),));
 
         let watcher = Address::generate(&env);
@@ -2297,10 +2302,7 @@ mod tests {
 
         // ...but removing the last remaining watcher is rejected.
         assert_eq!(
-            client
-                .try_remove_watcher(&admin, &w3)
-                .unwrap_err()
-                .unwrap(),
+            client.try_remove_watcher(&admin, &w3).unwrap_err().unwrap(),
             ContractError::BelowMinWatchers
         );
         assert_eq!(client.get_watchers().len(), 1);
@@ -2742,7 +2744,9 @@ mod tests {
 
         client.unpause(&admin);
         assert_eq!(
-            client.try_propose_admin_transfer(&admin, &new_admin).unwrap(),
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap(),
             Ok(())
         );
     }
@@ -2766,7 +2770,10 @@ mod tests {
         );
 
         client.unpause(&admin);
-        assert_eq!(client.try_transfer_admin(&admin, &new_admin).unwrap(), Ok(()));
+        assert_eq!(
+            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            Ok(())
+        );
     }
 
     // pause does not block read-only calls
@@ -3332,7 +3339,10 @@ mod tests {
         advance_ledgers(&env, TEST_DELAY);
 
         assert_eq!(
-            client.try_execute_admin_action(&admin).unwrap_err().unwrap(),
+            client
+                .try_execute_admin_action(&admin)
+                .unwrap_err()
+                .unwrap(),
             ContractError::MaxAdminsReached
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
@@ -3355,20 +3365,6 @@ mod tests {
         assert_eq!(
             client
                 .try_register_watcher(&admin, &overflow)
-                .unwrap_err()
-                .unwrap(),
-            ContractError::MaxWatchersReached
-        );
-        assert_eq!(client.get_watchers().len(), MAX_WATCHERS);
-    }
-
-        let overflow = Address::generate(&env);
-        assert_eq!(
-            client
-                .try_register_watcher(&admin, &overflow)
-        assert_eq!(
-            client
-                .try_register_watcher(&admin, &Address::generate(&env))
                 .unwrap_err()
                 .unwrap(),
             ContractError::MaxWatchersReached
@@ -3851,7 +3847,10 @@ mod tests {
 
         // The old proposal must no longer be acceptable.
         assert_eq!(
-            client.try_accept_admin_transfer(&proposed).unwrap_err().unwrap(),
+            client
+                .try_accept_admin_transfer(&proposed)
+                .unwrap_err()
+                .unwrap(),
             ContractError::NoPendingTransfer
         );
         assert_eq!(client.get_admins().len(), 1);
@@ -3869,12 +3868,18 @@ mod tests {
         client.propose_admin_transfer(&admin, &proposed);
 
         client.set_timelock_delay(&admin, &TEST_DELAY);
-        client.propose_admin_action(&admin, &AdminAction::TransferAdmin(queued_new_admin.clone()));
+        client.propose_admin_action(
+            &admin,
+            &AdminAction::TransferAdmin(queued_new_admin.clone()),
+        );
         advance_ledgers(&env, TEST_DELAY);
         client.execute_admin_action(&admin);
 
         assert_eq!(
-            client.try_accept_admin_transfer(&proposed).unwrap_err().unwrap(),
+            client
+                .try_accept_admin_transfer(&proposed)
+                .unwrap_err()
+                .unwrap(),
             ContractError::NoPendingTransfer
         );
         assert_eq!(client.get_admins().get(0).unwrap(), queued_new_admin);
@@ -3920,7 +3925,9 @@ mod tests {
         client.set_timelock_delay(&admin, &TEST_DELAY);
         // Raising is allowed directly.
         assert_eq!(
-            client.try_set_timelock_delay(&admin, &(TEST_DELAY * 2)).unwrap(),
+            client
+                .try_set_timelock_delay(&admin, &(TEST_DELAY * 2))
+                .unwrap(),
             Ok(())
         );
         // Lowering (including disabling) is not.

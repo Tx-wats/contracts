@@ -90,6 +90,8 @@ stellar contract invoke \
 
 Both `set_guardian` and `clear_guardian` emit an `("admin", "guardian")` event whose data payload is `(admin: Address, guardian: Option<Address>)` — `Some(guardian)` on set and `None` on clear. Index these events to audit guardian rotations. `WatcherRegistry` mirrors these events and errors exactly, so a single indexer can monitor both contracts.
 
+> **Important:** Both `transfer_admin` and `accept_admin_transfer` (the two-step admin proposal flow) **automatically clear the guardian** on successful admin handover. This is a security measure to prevent a compromised admin's chosen guardian from retaining pause authority after the admin key is rotated. An `("admin", "guardian")` event with `None` payload is emitted when this occurs. The new admin must explicitly reconfigure a guardian via `set_guardian` if one is still desired.
+
 ### Tripping the circuit-breaker as guardian
 
 ```bash
@@ -128,12 +130,12 @@ Rotate the guardian key regularly (e.g. monthly) or immediately after any suspec
 An admin key compromise may be detected through several signals:
 
 1. **On-Chain Event Alerts:**
-   * `AlertRegistry`:
-     * `("admin", "transfer")` — emitted whenever `transfer_admin` is executed.
-     * `("alert", "remove")` — emitted when `remove_alert_by_admin` deletes an alert.
-     * `("admin", "pause")` — emitted when the contract is paused (data: caller address — admin or guardian).
-     * `("admin", "unpause")` — emitted when the contract is resumed (data: admin address only).
-     * `("admin", "guardian")` — emitted when the guardian is set or cleared (data: `(admin, Option<guardian>)`).
+    * `AlertRegistry`:
+      * `("admin", "transfer")` — emitted whenever `transfer_admin` or `accept_admin_transfer` is executed.
+      * `("alert", "remove")` — emitted when `remove_alert_by_admin` deletes an alert.
+      * `("admin", "pause")` — emitted when the contract is paused (data: caller address — admin or guardian).
+      * `("admin", "unpause")` — emitted when the contract is resumed (data: admin address only).
+      * `("admin", "guardian")` — emitted when the guardian is set or cleared (data: `(admin, Option<guardian>)`). Also emitted with `None` payload by `transfer_admin` and `accept_admin_transfer` when they clear the guardian on admin handover.
    * `WatcherRegistry`:
      * `("admin", "init")`, `("admin", "add")`, `("admin", "remove")`, `("admin", "transfer")`.
      * `("admin", "pause")` — emitted when the contract is paused (data: caller address — admin or guardian).
@@ -250,6 +252,8 @@ stellar contract invoke \
   --new_admin <NEW_SECURE_ADMIN_ADDRESS>
 ```
 
+> **Note:** Both `transfer_admin` and `accept_admin_transfer` (the two-step proposal flow) now **clear any configured guardian** on successful admin handover. This prevents a compromised admin's chosen guardian from retaining pause authority after the admin key is rotated. An `("admin", "guardian")` event with `None` payload is emitted when the guardian is cleared. The new admin must explicitly reconfigure a guardian via `set_guardian` if one is still desired.
+
 ### Action 2.3: Trip the Circuit-Breaker (Guardian)
 While admin rotation is in progress, the pause-only guardian (on-call operator or monitoring bot) can halt `AlertRegistry` or `WatcherRegistry` operations without holding the admin key:
 
@@ -317,7 +321,7 @@ stellar contract invoke \
   -- \
   get_admins
 
-# Check AlertRegistry guardian
+# Check AlertRegistry guardian (cleared automatically on admin transfer)
 stellar contract invoke \
   --id <ALERT_REGISTRY_CONTRACT_ID> \
   --network <NETWORK> \
@@ -332,6 +336,10 @@ stellar contract invoke \
   get_guardian
 ```
 
+* Ensure the compromised address is **not** present in either query result.
+* `transfer_admin` and `accept_admin_transfer` **automatically clear the guardian**; `get_guardian` will return `None` after a successful admin handover. The new admin must explicitly call `set_guardian` to configure a new guardian if one is still desired.
+* If the compromised key was the guardian (and admin was not rotated), rotate it via `set_guardian` (admin only) and confirm with `get_guardian`.
+* Only the admin can `unpause` the contract; resume operations after rotation is verified.
 * Ensure the compromised address is **not** present in any query result.
 * If the compromised key was the guardian on either contract, rotate it via `set_guardian` (admin only) and confirm with `get_guardian`.
 * Only the admin can `unpause` either contract; resume operations after rotation is verified.

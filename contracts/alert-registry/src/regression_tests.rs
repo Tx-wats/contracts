@@ -185,7 +185,6 @@ fn test_regression_transfer_admin_emitted_no_event() {
     let (env, admin, client) = setup();
     let new_admin = Address::generate(&env);
 
-
     let events_before = env.events().all().len();
     assert_eq!(
         client.try_transfer_admin(&admin, &new_admin).unwrap(),
@@ -213,7 +212,6 @@ fn test_regression_remove_alert_by_admin_missing() {
     let (env, admin, client) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
-
 
     let id = client.register_alert(
         &owner,
@@ -1024,6 +1022,8 @@ fn test_regression_active_count_follows_transfer() {
 
     assert_eq!(client.get_active_alert_count(&owner), 0);
     assert_eq!(client.get_active_alert_count(&recipient), 1);
+}
+
 /// Regression test for #383: `get_alert_ids_by_owner` returned the raw owner
 /// index, so an ID whose record had already been removed was still reported as
 /// if the alert existed. It now filters out those dangling IDs.
@@ -1796,10 +1796,14 @@ fn test_regression_deactivate_alert_by_admin_is_idempotent() {
     assert_eq!(third.updated_at, 3_000);
     assert_eq!(third.updated_ledger, 30);
     assert_eq!(env.events().all().len(), 1);
+}
+
 fn alert_ttl(env: &Env, client: &AlertRegistryClient, id: u64) -> u32 {
     use soroban_sdk::testutils::storage::Persistent as _;
     env.as_contract(&client.address, || {
-        env.storage().persistent().get_ttl(&crate::DataKey::Alert(id))
+        env.storage()
+            .persistent()
+            .get_ttl(&crate::DataKey::Alert(id))
     })
 }
 
@@ -1888,7 +1892,10 @@ fn test_regression_prune_expired_alerts_is_bounded_and_resumable() {
     let mut passes = 0;
     loop {
         let removed = client.prune_expired_alerts(&owner);
-        assert!(removed <= crate::MAX_PRUNE_PER_CALL, "a pass must be bounded");
+        assert!(
+            removed <= crate::MAX_PRUNE_PER_CALL,
+            "a pass must be bounded"
+        );
         removed_total += removed;
         passes += 1;
         if client.get_prune_cursor(&owner).is_none() {
@@ -1899,6 +1906,8 @@ fn test_regression_prune_expired_alerts_is_bounded_and_resumable() {
     assert_eq!(passes, 4);
     assert_eq!(client.get_non_removed_alert_count(&owner), 0);
     assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+}
+
 /// Regression test for #378: `set_alert_active` to the current state is a
 /// no-op: no storage rewrite (`updated_ledger` unchanged) and no event.
 #[test]
@@ -2007,6 +2016,8 @@ fn test_regression_empty_rules_are_rejected() {
             .unwrap(),
         ContractError::EmptyRules
     );
+}
+
 fn last_admin_event(env: &Env, name: Symbol) -> soroban_sdk::Val {
     let events = env.events().all();
     let (_, _, data) = events
@@ -2064,13 +2075,19 @@ fn test_regression_constructor_and_admin_transfer_extend_instance_ttl() {
 
     let new_admin = Address::generate(&env);
     for step in 0..3 {
-        advance_ledgers(&env, crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1);
+        advance_ledgers(
+            &env,
+            crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1,
+        );
         match step {
             0 => client.propose_admin_transfer(&admin, &new_admin),
             1 => client.cancel_admin_transfer(&admin),
             _ => {
                 client.propose_admin_transfer(&admin, &new_admin);
-                advance_ledgers(&env, crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1);
+                advance_ledgers(
+                    &env,
+                    crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1,
+                );
                 client.accept_admin_transfer(&new_admin);
             }
         }
@@ -2092,7 +2109,10 @@ fn test_regression_pending_admin_transfer_is_exposed() {
 
     client.propose_admin_transfer(&admin, &new_admin);
     assert_eq!(client.get_pending_admin_transfer(), Some(new_admin.clone()));
-    assert_eq!(client.get_configuration().pending_admin, Some(new_admin.clone()));
+    assert_eq!(
+        client.get_configuration().pending_admin,
+        Some(new_admin.clone())
+    );
 
     client.accept_admin_transfer(&new_admin);
     assert_eq!(client.get_pending_admin_transfer(), None);
@@ -2128,6 +2148,8 @@ fn test_regression_admin_transfer_proposal_expires() {
     client.propose_admin_transfer(&admin, &new_admin);
     client.accept_admin_transfer(&new_admin);
     assert_eq!(client.get_admin(), new_admin);
+}
+
 /// Regression test for #366: `accept_admin_transfer` must be blocked while
 /// paused so a pending admin cannot complete a takeover during an incident,
 /// while `cancel_admin_transfer` stays available to revoke the proposal.
@@ -2370,5 +2392,8 @@ fn test_regression_remove_from_contract_index_keeps_count_when_id_absent() {
             .get(&crate::DataKey::ContractLiveCount(target.clone()))
             .unwrap()
     });
-    assert_eq!(before, after, "live count must not drift when the ID was absent");
+    assert_eq!(
+        before, after,
+        "live count must not drift when the ID was absent"
+    );
 }
