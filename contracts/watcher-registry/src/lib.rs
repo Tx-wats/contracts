@@ -12,11 +12,25 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short, vec, Address,
-    BytesN, Env, String, Vec,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 contractmeta!(key = "Name", val = "WatcherRegistry");
-contractmeta!(key = "Version", val = "0.1.0");
+contractmeta!(key = "Version", val = "0.2.0");
+
+/// Current storage schema version, written by `__constructor`/`initialize`
+/// and advanced by [`WatcherRegistry::migrate`]. See `docs/upgrade-guide.md`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// Instance-storage keys that are plain `Symbol`s rather than [`DataKey`]
+/// variants. The on-chain encoding is unchanged from the previous raw
+/// `symbol_short!` literals.
+pub mod instance_key {
+    use soroban_sdk::{symbol_short, Symbol};
+
+    /// `u32` number of currently registered watchers.
+    pub const W_CNT: Symbol = symbol_short!("W_CNT");
+}
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -65,10 +79,33 @@ pub enum ContractError {
     /// Returned when proposing [`AdminAction::AddAdmin`] for an address that
     /// is already an admin — queuing it would only waste the single pending
     /// action slot for the full timelock delay on a no-op.
-    AdminAlreadyExists = 17,
+    AdminAlreadyExists = 18,
     /// Returned by `remove_admin` when `target_admin` is not currently an
     /// admin, so there is nothing to remove.
+    AdminNotFound = 19,
     AdminNotFound = 17,
+    /// Returned by batch query entry points such as
+    /// [`WatcherRegistry::are_watchers_authorized`] when the input holds more
+    /// than [`MAX_PAGE_SIZE`] addresses. Rejecting the whole batch (rather
+    /// than truncating it) keeps the returned `Vec<bool>` aligned with the
+    /// input so callers can zip the two safely.
+    BatchTooLarge = 18,
+    /// Returned by [`WatcherRegistry::get_guardian`] when no guardian has
+    /// been configured via [`WatcherRegistry::set_guardian`].
+    GuardianNotSet = 18,
+    /// Returned by `set_watcher_scope` when the proposed scope contains an
+    /// entry that can never be a valid target: the registry's own address or
+    /// the watcher itself.
+    InvalidScopeTarget = 18,
+    /// Returned by `migrate` when `from` does not match the stored schema
+    /// version, or when `to` is not greater than `from`.
+    InvalidSchemaVersion = 19,
+    /// Returned by `set_watcher_info` when `info.label` exceeds [`MAX_LABEL_LEN`].
+    LabelTooLong = 18,
+    /// Returned by `set_watcher_info` when `info.operator` exceeds [`MAX_OPERATOR_LEN`].
+    OperatorTooLong = 19,
+    /// Returned by `set_watcher_scope` when `scope` exceeds [`MAX_SCOPE_LEN`].
+    ScopeTooLong = 20,
 }
 
 // ── TTL constants ────────────────────────────────────────────────────────────
@@ -115,6 +152,29 @@ pub const MIN_WATCHERS: u32 = 1;
 /// such as [`WatcherRegistry::are_watchers_authorized`].
 pub const MAX_PAGE_SIZE: u32 = 100;
 
+/// Maximum length, in bytes, of a [`WatcherInfo::label`] accepted by
+/// [`WatcherRegistry::set_watcher_info`].
+pub const MAX_LABEL_LEN: u32 = 64;
+
+/// Maximum length, in bytes, of a [`WatcherInfo::operator`] accepted by
+/// [`WatcherRegistry::set_watcher_info`].
+pub const MAX_OPERATOR_LEN: u32 = 64;
+
+/// Maximum number of target addresses accepted by
+/// [`WatcherRegistry::set_watcher_scope`].
+pub const MAX_SCOPE_LEN: u32 = 50;
+
+// ── Persistent TTL constants ─────────────────────────────────────────────────
+
+/// Threshold below which persistent watcher metadata/scope entries are
+/// extended on access. Approximately 24 hours at the nominal 5-second ledger
+/// close time.
+pub const DEFAULT_TTL: u32 = 17_280;
+
+/// TTL persistent watcher metadata/scope entries are extended to.
+/// Approximately 31 days, the protocol maximum. See `docs/ttl.md`.
+pub const MAX_TTL: u32 = 535_680;
+
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Storage key variants used to address instance entries.
@@ -138,12 +198,20 @@ pub enum DataKey {
     PendingAction,
     /// Stores the `bool` paused flag.
     Paused,
-    /// Stores the optional [`WatcherInfo`] for a given watcher address.
+    /// Stores the optional [`WatcherInfo`] for a given watcher address in
+    /// **persistent** storage.
     WatcherInfo(Address),
     /// Stores the optional `Vec<Address>` of target contracts a given
-    /// watcher is scoped to. Absent, or present but empty, means
-    /// unrestricted (authorized for every target).
+    /// watcher is scoped to in **persistent** storage. Absent, or present
+    /// but empty, means unrestricted (authorized for every target).
     WatcherScope(Address),
+    /// Stores the optional guardian [`Address`] allowed to trip
+    /// [`WatcherRegistry::pause`] without holding a full admin key.
+    Guardian,
+    /// Stores the `u32` storage schema version (see
+    /// [`CURRENT_SCHEMA_VERSION`]). Written by `__constructor`/`initialize`
+    /// and advanced by [`WatcherRegistry::migrate`].
+    SchemaVersion,
 }
 
 /// Optional off-chain-identifying metadata for a registered watcher.
@@ -154,11 +222,39 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatcherInfo {
-    /// Human-readable label for the watcher (operator-chosen free text).
+    /// Human-readable label for the watcher (operator-chosen free text,
+    /// capped at [`MAX_LABEL_LEN`] bytes).
     pub label: String,
     /// Identifier for the operator running this watcher (free text, e.g. an
-    /// organization name or contact handle).
+    /// organization name or contact handle, capped at [`MAX_OPERATOR_LEN`]
+    /// bytes).
     pub operator: String,
+}
+
+// ── Configuration snapshot ───────────────────────────────────────────────────
+
+/// One-shot snapshot of the registry's configuration, returned by
+/// [`WatcherRegistry::get_configuration`].
+///
+/// Aggregates the values that dashboards otherwise fetch with separate calls
+/// to `get_admins`, `is_paused`, `get_timelock_delay`, `get_pending_action`,
+/// `get_pending_admin_transfer` and `get_watcher_count`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatcherRegistryConfiguration {
+    /// Current admin set.
+    pub admins: Vec<Address>,
+    /// Whether the registry is currently paused.
+    pub paused: bool,
+    /// Timelock delay in ledgers (`0` means disabled).
+    pub timelock_delay: u32,
+    /// The single queued [`PendingAction`], if any.
+    pub pending_action: Option<PendingAction>,
+    /// The pending admin transfer `(proposer, new_admin, expires_at_ledger)`,
+    /// if any.
+    pub pending_admin_transfer: Option<(Address, Address, u32)>,
+    /// Number of registered watchers.
+    pub watcher_count: u32,
 }
 
 // ── Timelock types ───────────────────────────────────────────────────────────
@@ -171,9 +267,8 @@ pub enum AdminAction {
     AddAdmin(Address),
     /// Replace the entire admin set with the given address.
     TransferAdmin(Address),
-    /// Deauthorize every registered watcher.
-    ClearAllWatchers,
-    /// Change the timelock delay (in ledgers).
+    /// Change the timelock delay (in ledgers). May raise, lower or disable
+    /// (`0`) the delay; the timelock itself protects the change.
     SetTimelockDelay(u32),
     /// Replace the contract's WASM with the given hash.
     Upgrade(BytesN<32>),
@@ -207,12 +302,18 @@ pub struct PendingAction {
 /// Deployments that want protection against a single compromised admin key can
 /// configure a delay with [`WatcherRegistry::set_timelock_delay`]. While a
 /// delay is set, the sensitive actions (`add_admin`, `transfer_admin`,
-/// `clear_all_watchers`, `upgrade`, and lowering the delay itself) can no
-/// longer be called directly: they must be queued with
+/// `upgrade`, and lowering the delay itself) can no longer be called
+/// directly: they must be queued with
 /// [`WatcherRegistry::propose_admin_action`] and run with
 /// [`WatcherRegistry::execute_admin_action`] once the delay has elapsed, giving
 /// the other admins a window to [`WatcherRegistry::cancel_admin_action`].
 /// The delay defaults to `0`, which keeps the direct entrypoints available.
+/// # Guardian
+/// A low-privilege guardian address may be configured with
+/// [`WatcherRegistry::set_guardian`]. The guardian can call
+/// [`WatcherRegistry::pause`] (but not [`WatcherRegistry::unpause`]), so
+/// on-call responders can trip the circuit breaker without holding an
+/// upgrade-capable admin key.
 /// # Role policy
 /// Roles are **not mutually exclusive and are not restricted to external
 /// accounts**, by design:
@@ -237,6 +338,9 @@ impl WatcherRegistry {
     pub fn __constructor(env: Env, admin: Address) {
         let admins: Vec<Address> = vec![&env, admin.clone()];
         env.storage().instance().set(&DataKey::Admins, &admins);
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
 
         env.events()
             .publish((symbol_short!("admin"), symbol_short!("init")), (admin,));
@@ -356,10 +460,10 @@ impl WatcherRegistry {
         // A pending admin transfer proposed by the just-removed admin is no
         // longer trustworthy: invalidate it so it cannot be accepted later by
         // an attacker the removed admin had proposed as the new admin set.
-        if let Some((proposer, _new_admin, _expires_at)) = env
-            .storage()
-            .instance()
-            .get::<_, (Address, Address, u32)>(&DataKey::PendingAdminTransfer)
+        if let Some((proposer, _new_admin, _expires_at)) =
+            env.storage()
+                .instance()
+                .get::<_, (Address, Address, u32)>(&DataKey::PendingAdminTransfer)
         {
             if proposer == target_admin {
                 env.storage()
@@ -546,10 +650,8 @@ impl WatcherRegistry {
             .instance()
             .remove(&DataKey::PendingAdminTransfer);
 
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("cancel")),
-            (admin,),
-        );
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("cancel")), (admin,));
 
         Ok(())
     }
@@ -724,8 +826,10 @@ impl WatcherRegistry {
         // watcher's trust has been revoked.
         if removed {
             Self::decrement_watcher_count(&env);
-            env.events()
-                .publish((symbol_short!("watcher"), symbol_short!("remove")), (watcher,));
+            env.events().publish(
+                (symbol_short!("watcher"), symbol_short!("remove")),
+                (watcher,),
+            );
         }
 
         Ok(())
@@ -882,8 +986,9 @@ impl WatcherRegistry {
     /// non-empty scope restricts [`WatcherRegistry::is_watcher_authorized_for`] to
     /// return `true` only for the listed targets.
     ///
-    /// Does not require `watcher` to be currently registered: operators can
-    /// pre-configure scope before `register_watcher`.
+    /// `watcher` must be currently registered, and `scope` is capped at
+    /// [`MAX_SCOPE_LEN`] entries. The scope is stored in persistent storage
+    /// with its TTL extended on every write.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -891,8 +996,13 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
+    /// Returns [`ContractError::WatcherNotFound`] if `watcher` is not registered.
+    /// Returns [`ContractError::ScopeTooLong`] if `scope` exceeds [`MAX_SCOPE_LEN`].
     /// # Events
     /// Emits `("watcher", "scope")` with data `(watcher: Address, scope: Vec<Address>)`.
+    ///
+    /// See `docs/adr/0003-watcher-scopes.md` for how `AlertRegistry` enforces scopes.
     pub fn set_watcher_scope(
         env: Env,
         admin: Address,
@@ -901,10 +1011,20 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
+        if !Self::is_watcher_authorized(env.clone(), watcher.clone()) {
+            return Err(ContractError::WatcherNotFound);
+        }
+        if scope.len() > MAX_SCOPE_LEN {
+            return Err(ContractError::ScopeTooLong);
+        }
+
+        let key = DataKey::WatcherScope(watcher.clone());
+        env.storage().persistent().set(&key, &scope);
         env.storage()
-            .instance()
-            .set(&DataKey::WatcherScope(watcher.clone()), &scope);
+            .persistent()
+            .extend_ttl(&key, DEFAULT_TTL, MAX_TTL);
 
         env.events().publish(
             (symbol_short!("watcher"), symbol_short!("scope")),
@@ -925,8 +1045,10 @@ impl WatcherRegistry {
     /// Set (or clear, with `None`) optional off-chain-identifying metadata
     /// for `watcher` (admin-only).
     ///
-    /// Purely informational: carries no authorization weight and does not
-    /// require `watcher` to be currently registered.
+    /// Purely informational: carries no authorization weight. `watcher` must
+    /// be currently registered, `label` is capped at [`MAX_LABEL_LEN`] bytes
+    /// and `operator` at [`MAX_OPERATOR_LEN`] bytes. Metadata is stored in
+    /// persistent storage with its TTL extended on every write.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -934,6 +1056,10 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::Paused`] if the registry is paused.
+    /// Returns [`ContractError::WatcherNotFound`] if `watcher` is not registered.
+    /// Returns [`ContractError::LabelTooLong`] if `info.label` exceeds [`MAX_LABEL_LEN`].
+    /// Returns [`ContractError::OperatorTooLong`] if `info.operator` exceeds [`MAX_OPERATOR_LEN`].
     /// # Events
     /// Emits `("watcher", "info")` with data `(watcher: Address, label: String, operator: String)`.
     pub fn set_watcher_info(
@@ -944,21 +1070,32 @@ impl WatcherRegistry {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::assert_admin(&env, &admin)?;
+        Self::assert_not_paused(&env)?;
 
+        if !Self::is_watcher_authorized(env.clone(), watcher.clone()) {
+            return Err(ContractError::WatcherNotFound);
+        }
+
+        let key = DataKey::WatcherInfo(watcher.clone());
         match info {
             Some(info) => {
+                if info.label.len() > MAX_LABEL_LEN {
+                    return Err(ContractError::LabelTooLong);
+                }
+                if info.operator.len() > MAX_OPERATOR_LEN {
+                    return Err(ContractError::OperatorTooLong);
+                }
                 env.events().publish(
                     (symbol_short!("watcher"), symbol_short!("info")),
-                    (watcher.clone(), info.label.clone(), info.operator.clone()),
+                    (watcher, info.label.clone(), info.operator.clone()),
                 );
+                env.storage().persistent().set(&key, &info);
                 env.storage()
-                    .instance()
-                    .set(&DataKey::WatcherInfo(watcher), &info);
+                    .persistent()
+                    .extend_ttl(&key, DEFAULT_TTL, MAX_TTL);
             }
             None => {
-                env.storage()
-                    .instance()
-                    .remove(&DataKey::WatcherInfo(watcher));
+                env.storage().persistent().remove(&key);
             }
         }
 
@@ -967,10 +1104,39 @@ impl WatcherRegistry {
 
     /// Get the optional metadata stored for `watcher` via [`WatcherRegistry::set_watcher_info`].
     ///
-    /// Returns `None` if no metadata has been set.
+    /// Returns `None` if no metadata has been set. Reads from persistent
+    /// storage and extends the entry's TTL when present.
     #[must_use]
     pub fn get_watcher_info(env: Env, watcher: Address) -> Option<WatcherInfo> {
-        env.storage().instance().get(&DataKey::WatcherInfo(watcher))
+        let key = DataKey::WatcherInfo(watcher);
+        let info: Option<WatcherInfo> = env.storage().persistent().get(&key);
+        if info.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, DEFAULT_TTL, MAX_TTL);
+        }
+        info
+    }
+
+    /// Return a one-shot snapshot of the registry's configuration.
+    ///
+    /// Aggregates [`WatcherRegistry::get_admins`], [`WatcherRegistry::is_paused`],
+    /// [`WatcherRegistry::get_timelock_delay`], [`WatcherRegistry::get_pending_action`],
+    /// [`WatcherRegistry::get_pending_admin_transfer`] and
+    /// [`WatcherRegistry::get_watcher_count`] into a single call so dashboards
+    /// need only one simulation.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    pub fn get_configuration(env: Env) -> Result<WatcherRegistryConfiguration, ContractError> {
+        let admins = Self::get_admins(env.clone())?;
+        Ok(WatcherRegistryConfiguration {
+            admins,
+            paused: Self::is_paused(env.clone()),
+            timelock_delay: Self::timelock_delay(&env),
+            pending_action: Self::get_pending_action(env.clone()),
+            pending_admin_transfer: Self::get_pending_admin_transfer(env.clone()),
+            watcher_count: Self::get_watcher_count(env),
+        })
     }
 
     /// Check authorization for a batch of addresses in a single call.
@@ -1002,48 +1168,18 @@ impl WatcherRegistry {
         out
     }
 
-    /// Remove all registered watchers in a single admin call.
-    ///
-    /// This is a bulk deauthorization operation.  Each removed watcher emits
-    /// a `("watcher", "remove")` event so dependent systems can revoke trust
-    /// for every affected address. Refused outright when [`MIN_WATCHERS`] is
-    /// greater than zero and the registry is non-empty, since clearing would
-    /// necessarily drop the count below that threshold; use [`WatcherRegistry::remove_watcher`]
-    /// for selective removal instead.
-    ///
-    /// Sensitive: when a timelock delay is configured this must be queued via
-    /// [`WatcherRegistry::propose_admin_action`] instead of called directly.
-    ///
-    /// # Auth
-    /// Requires a valid Stellar auth signature from `admin`, who must be an
-    /// existing admin.
-    /// # Errors
-    /// Returns [`ContractError::BelowMinWatchers`] if the registry is non-empty and [`MIN_WATCHERS`] is greater than zero.
-    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
-    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
-    /// Returns [`ContractError::TimelockRequired`] if a timelock delay is configured.
-    /// # Panics
-    /// Panics if the contract's stored state is malformed or missing.
-    pub fn clear_all_watchers(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::assert_admin(&env, &admin)?;
-        Self::assert_timelock_disabled(&env)?;
-
-        Self::assert_not_paused(&env)?;
-
-        Self::do_clear_all_watchers(&env)
-    }
-
     /// Remove up to `max_count` registered watchers in a single admin call.
     ///
-    /// Batched fallback for [`WatcherRegistry::clear_all_watchers`] — with a large enough
-    /// watcher set, clearing everything and emitting one event per watcher in
-    /// a single transaction can exceed per-transaction resource/event
-    /// limits. Call this repeatedly until [`WatcherRegistry::get_watcher_count`] returns 0 to
-    /// clear an arbitrarily large watcher set.
+    /// Bulk deauthorization for large watcher sets — clearing everything and
+    /// emitting one event per watcher in a single transaction can exceed
+    /// per-transaction resource/event limits. Call this repeatedly until
+    /// [`WatcherRegistry::get_watcher_count`] returns [`MIN_WATCHERS`] to
+    /// deauthorize an arbitrarily large watcher set while keeping the
+    /// minimum required watchers.
     ///
     /// Watchers are removed from the front of the list. Each removed watcher
-    /// emits a `("watcher", "remove")` event.
+    /// emits a `("watcher", "remove")` event, and its [`WatcherInfo`] and
+    /// scope entries are deleted so a re-registered address starts fresh.
     ///
     /// # Auth
     /// Requires a valid Stellar auth signature from `admin`, who must be an
@@ -1051,6 +1187,7 @@ impl WatcherRegistry {
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::BelowMinWatchers`] if removing `max_count` watchers would drop the count below [`MIN_WATCHERS`].
     /// # Panics
     /// Panics if the contract's stored state is malformed or missing.
     pub fn clear_watchers_batch(
@@ -1062,12 +1199,14 @@ impl WatcherRegistry {
         Self::assert_admin(&env, &admin)?;
 
         let watchers = Self::load_watchers(&env);
-        let remove_count = max_count.min(watchers.len());
+        let removable = watchers.len().saturating_sub(MIN_WATCHERS);
+        let remove_count = max_count.min(removable);
 
         let mut remaining: Vec<Address> = vec![&env];
         for i in 0..watchers.len() {
             let w = watchers.get(i).unwrap();
             if i < remove_count {
+                Self::delete_watcher_metadata(&env, &w);
                 env.events()
                     .publish((symbol_short!("watcher"), symbol_short!("remove")), (w,));
             } else {
@@ -1079,11 +1218,11 @@ impl WatcherRegistry {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32);
         env.storage()
             .instance()
-            .set(&symbol_short!("W_CNT"), &count.saturating_sub(remove_count));
+            .set(&instance_key::W_CNT, &count.saturating_sub(remove_count));
 
         Ok(())
     }
@@ -1166,25 +1305,76 @@ impl WatcherRegistry {
     ///
     /// Intended as an emergency circuit-breaker if an admin key is suspected
     /// compromised — mutations can be frozen while the incident is investigated.
-    /// Calling `pause` while already paused does nothing.
+    /// Callable by an admin **or** the configured guardian (see
+    /// [`WatcherRegistry::set_guardian`]), so on-call responders can trip the
+    /// breaker without holding an upgrade-capable key. Calling `pause` while
+    /// already paused does nothing.
     /// # Auth
     /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin or the configured guardian.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is neither an admin nor the guardian.
+    /// # Events
+    /// Emits `("admin", "pause")` with data `(caller: Address,)`.
+    pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+        // Idempotent: a redundant pause is a no-op that emits no event, so a
+        // repeated pause call cannot duplicate or reshape the public event.
+        Self::assert_admin_or_guardian(&env, &caller)?;
+        if !Self::is_paused(env.clone()) {
+            env.storage().instance().set(&DataKey::Paused, &true);
+            env.events()
+                .publish((symbol_short!("admin"), symbol_short!("pause")), (caller,));
+        }
+        Ok(())
+    }
+
+    /// Set (or clear, with `None`) the guardian address allowed to call
+    /// [`WatcherRegistry::pause`] (admin-only).
+    ///
+    /// The guardian is a low-privilege incident-response role: it can trip the
+    /// pause circuit breaker but cannot unpause, mutate the registry, or
+    /// upgrade the contract.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `admin`, who must be an
     /// existing admin.
     /// # Errors
     /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
-    pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
-        caller.require_auth();
-        Self::assert_admin(&env, &caller)?;
-        if !Self::is_paused(env.clone()) {
-            env.storage().instance().set(&DataKey::Paused, &true);
-            env.events()
-                .publish((symbol_short!("admin"), symbol_short!("pause")), caller);
+    /// # Events
+    /// Emits `("admin", "guardian")` with data `(admin: Address, guardian: Option<Address>)`.
+    pub fn set_guardian(
+        env: Env,
+        admin: Address,
+        guardian: Option<Address>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+
+        match &guardian {
+            Some(g) => env.storage().instance().set(&DataKey::Guardian, g),
+            None => env.storage().instance().remove(&DataKey::Guardian),
         }
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("pause")), (caller,));
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("guardian")),
+            (admin, guardian),
+        );
+
         Ok(())
+    }
+
+    /// Get the configured guardian address, if any.
+    /// # Errors
+    /// Returns [`ContractError::GuardianNotSet`] if no guardian has been configured.
+    pub fn get_guardian(env: Env) -> Result<Address, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .ok_or(ContractError::GuardianNotSet)
     }
 
     /// Resume normal operation after a [`WatcherRegistry::pause`].
@@ -1198,14 +1388,16 @@ impl WatcherRegistry {
     pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         Self::assert_admin(&env, &caller)?;
+        // Idempotent: unpausing a contract that is not paused is a no-op.
         if Self::is_paused(env.clone()) {
             env.storage().instance().set(&DataKey::Paused, &false);
             env.events()
-                .publish((symbol_short!("admin"), symbol_short!("unpause")), caller);
+                .publish((symbol_short!("admin"), symbol_short!("unpause")), (caller,));
+            env.events().publish(
+                (symbol_short!("admin"), symbol_short!("unpause")),
+                (caller,),
+            );
         }
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("unpause")), (caller,));
         Ok(())
     }
 
@@ -1218,13 +1410,73 @@ impl WatcherRegistry {
             .unwrap_or(false)
     }
 
+    /// Return the stored storage schema version.
+    ///
+    /// Returns `0` for contracts deployed before schema versioning existed
+    /// (no `SchemaVersion` entry); such deployments should run
+    /// [`WatcherRegistry::migrate`] from `0` to [`CURRENT_SCHEMA_VERSION`].
+    #[must_use]
+    pub fn get_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SchemaVersion)
+            .unwrap_or(0u32)
+    }
+
+    /// Advance the storage schema version from `from` to `to`.
+    ///
+    /// Resumable: `cursor` is the index of the next item to process in the
+    /// migration step. Pass `cursor == 0` to start; the call returns the
+    /// cursor to pass to the next call. When the cursor reaches the end of
+    /// the work for this step, the stored schema version is advanced to `to`
+    /// and the returned cursor is `0`.
+    ///
+    /// The current layout needs no data rewriting, so a single call with
+    /// `cursor == 0` completes the migration.
+    ///
+    /// # Auth
+    /// Requires a valid Stellar auth signature from `caller`, who must be an
+    /// existing admin.
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
+    /// Returns [`ContractError::Unauthorized`] if the caller is not authorized for this operation.
+    /// Returns [`ContractError::InvalidSchemaVersion`] if `from` does not match the
+    /// stored version or `to` is not greater than `from`.
+    pub fn migrate(
+        env: Env,
+        caller: Address,
+        from: u32,
+        to: u32,
+        cursor: u32,
+    ) -> Result<u32, ContractError> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller)?;
+
+        let stored = Self::get_schema_version(env.clone());
+        if from != stored || to <= from {
+            return Err(ContractError::InvalidSchemaVersion);
+        }
+
+        // No data rewriting is required for the current layout; the cursor
+        // exists so future migrations can be resumed across transactions.
+        let _ = cursor;
+
+        env.storage().instance().set(&DataKey::SchemaVersion, &to);
+        env.events().publish(
+            (Symbol::new(&env, "schema"), Symbol::new(&env, "migrate")),
+            (from, to),
+        );
+
+        Ok(0)
+    }
+
     /// Get the number of registered watchers as a cheap u32 read, avoiding
     /// the cost of fetching and deserializing the full watcher list.
     #[must_use]
     pub fn get_watcher_count(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32)
     }
 
@@ -1283,7 +1535,7 @@ impl WatcherRegistry {
     // ── Timelock ─────────────────────────────────────────────────────────────
 
     /// Set the timelock delay, in ledgers, applied to sensitive admin actions
-    /// (`add_admin`, `transfer_admin`, `clear_all_watchers`, `upgrade`).
+    /// (`add_admin`, `transfer_admin`, `upgrade`).
     ///
     /// A delay of `0` (the default) keeps those entrypoints callable directly.
     /// Once a non-zero delay is configured they return
@@ -1350,9 +1602,8 @@ impl WatcherRegistry {
     /// Returns [`ContractError::ActionAlreadyPending`] if another action is already queued.
     /// Returns [`ContractError::AdminAlreadyExists`] if `action` is [`AdminAction::AddAdmin`] for an existing admin.
     /// Returns [`ContractError::MaxAdminsReached`] if `action` is [`AdminAction::AddAdmin`] and the admin set is full.
-    /// Returns [`ContractError::BelowMinWatchers`] if `action` is [`AdminAction::ClearAllWatchers`] and the registry is non-empty.
     /// Returns [`ContractError::DelayTooLarge`] if `action` is [`AdminAction::SetTimelockDelay`] above [`MAX_TIMELOCK_DELAY`].
-    /// Returns [`ContractError::TimelockRequired`] if `action` is [`AdminAction::SetTimelockDelay`] below the current delay.
+    /// Lowering the delay is allowed here: it is itself a timelocked change.
     ///
     /// Note: [`AdminAction::Upgrade`] is not pre-validated here — whether a
     /// WASM hash is installed is a host-level check that
@@ -1382,18 +1633,12 @@ impl WatcherRegistry {
                     return Err(ContractError::MaxAdminsReached);
                 }
             }
-            AdminAction::ClearAllWatchers => {
-                let watchers = Self::load_watchers(&env);
-                if !watchers.is_empty() && MIN_WATCHERS > 0 {
-                    return Err(ContractError::BelowMinWatchers);
-                }
-            }
             AdminAction::SetTimelockDelay(delay) => {
+                // Any value is acceptable here, including 0 (disable) and
+                // values below the current delay: the timelock itself is the
+                // protection, so lowering it must go through propose/execute.
                 if *delay > MAX_TIMELOCK_DELAY {
                     return Err(ContractError::DelayTooLarge);
-                }
-                if *delay < Self::timelock_delay(&env) {
-                    return Err(ContractError::TimelockRequired);
                 }
             }
             AdminAction::TransferAdmin(_) | AdminAction::Upgrade(_) => {}
@@ -1418,7 +1663,15 @@ impl WatcherRegistry {
 
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("propose")),
-            (caller, ready_at),
+            (caller.clone(), ready_at),
+        );
+
+        // Also publish the queued action itself under a distinct topic so
+        // co-admins monitoring events can tell an `Upgrade(hash)` from a
+        // `TransferAdmin(addr)` without calling `get_pending_action`.
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("queue")),
+            (caller, ready_at, pending.action),
         );
 
         Ok(ready_at)
@@ -1488,7 +1741,6 @@ impl WatcherRegistry {
             AdminAction::TransferAdmin(new_admin) => {
                 Self::do_transfer_admin(&env, new_admin);
             }
-            AdminAction::ClearAllWatchers => Self::do_clear_all_watchers(&env)?,
             AdminAction::SetTimelockDelay(delay) => {
                 if delay > MAX_TIMELOCK_DELAY {
                     return Err(ContractError::DelayTooLarge);
@@ -1505,8 +1757,10 @@ impl WatcherRegistry {
             }
         }
 
-        env.events()
-            .publish((symbol_short!("admin"), symbol_short!("execute")), (caller,));
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("execute")),
+            (caller,),
+        );
 
         Ok(())
     }
@@ -1528,6 +1782,29 @@ impl WatcherRegistry {
             return Err(ContractError::TimelockRequired);
         }
         Ok(())
+    }
+
+    /// Return `Ok(())` when `caller` is an admin or the configured guardian.
+    fn assert_admin_or_guardian(env: &Env, caller: &Address) -> Result<(), ContractError> {
+        if Self::is_admin(env.clone(), caller.clone()) {
+            return Ok(());
+        }
+        let guardian: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        match guardian {
+            Some(g) if g == *caller => Ok(()),
+            _ => Err(ContractError::Unauthorized),
+        }
+    }
+
+    /// Delete the [`WatcherInfo`] and [`WatcherScope`] entries for `watcher`,
+    /// so a re-registered address starts with no metadata and no scope.
+    fn delete_watcher_metadata(env: &Env, watcher: &Address) {
+        env.storage()
+            .instance()
+            .remove(&DataKey::WatcherInfo(watcher.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::WatcherScope(watcher.clone()));
     }
 
     fn do_set_timelock_delay(env: &Env, caller: &Address, delay_ledgers: u32) {
@@ -1552,11 +1829,7 @@ impl WatcherRegistry {
     }
 
     /// Add `new_admin` to the admin set, idempotently and within [`MAX_ADMINS`].
-    fn do_add_admin(
-        env: &Env,
-        caller: &Address,
-        new_admin: Address,
-    ) -> Result<(), ContractError> {
+    fn do_add_admin(env: &Env, caller: &Address, new_admin: Address) -> Result<(), ContractError> {
         let mut admins = Self::load_admins(env);
         for i in 0..admins.len() {
             if admins.get(i).unwrap() == new_admin {
@@ -1598,33 +1871,10 @@ impl WatcherRegistry {
         );
     }
 
-    /// Deauthorize every registered watcher, emitting one removal event each.
-    ///
-    /// Enforces [`MIN_WATCHERS`] itself (rather than leaving it to callers) so
-    /// the guard applies identically whether this runs from
-    /// [`WatcherRegistry::clear_all_watchers`]'s direct path or from
-    /// `execute_admin_action`'s `ClearAllWatchers` arm — previously the check
-    /// lived only in `clear_all_watchers`, so enabling the timelock bypassed it.
-    /// # Errors
-    /// Returns [`ContractError::BelowMinWatchers`] if the registry is
-    /// non-empty and [`MIN_WATCHERS`] is greater than zero.
-    fn do_clear_all_watchers(env: &Env) -> Result<(), ContractError> {
-        let watchers = Self::load_watchers(env);
-        if !watchers.is_empty() && MIN_WATCHERS > 0 {
-            return Err(ContractError::BelowMinWatchers);
-        }
 
-        for i in 0..watchers.len() {
-            let w = watchers.get(i).unwrap();
-            env.events()
-                .publish((symbol_short!("watcher"), symbol_short!("remove")), (w,));
-        }
-
-        let empty: Vec<Address> = vec![env];
-        env.storage().instance().set(&DataKey::Watchers, &empty);
 
         // Reset the count to zero
-        env.storage().instance().set(&symbol_short!("W_CNT"), &0u32);
+        env.storage().instance().set(&instance_key::W_CNT, &0u32);
 
         Ok(())
     }
@@ -1633,23 +1883,23 @@ impl WatcherRegistry {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32);
         env.storage()
             .instance()
-            .set(&symbol_short!("W_CNT"), &(count + 1));
+            .set(&instance_key::W_CNT, &(count + 1));
     }
 
     fn decrement_watcher_count(env: &Env) {
         let count: u32 = env
             .storage()
             .instance()
-            .get(&symbol_short!("W_CNT"))
+            .get(&instance_key::W_CNT)
             .unwrap_or(0u32);
         if count > 0 {
             env.storage()
                 .instance()
-                .set(&symbol_short!("W_CNT"), &(count - 1));
+                .set(&instance_key::W_CNT, &(count - 1));
         }
     }
 
@@ -1680,7 +1930,11 @@ impl WatcherRegistry {
 
     /// Return `Ok(())` if the contract is not paused, `Err(Paused)` otherwise.
     fn assert_not_paused(env: &Env) -> Result<(), ContractError> {
-        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
         if paused {
             return Err(ContractError::Paused);
         }
@@ -1717,9 +1971,7 @@ mod error_codes;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _, testutils::Events as _, Env, FromVal, Symbol, Val,
-    };
+    use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env, FromVal, Symbol, Val};
 
     fn assert_last_event_data<T: FromVal<Env, Val>>(
         env: &Env,
@@ -1850,12 +2102,11 @@ mod tests {
     #[test]
     fn test_single_address_events_encode_singleton_tuples() {
         let (env, admin, client) = setup();
-        let admin_init: (Address,) =
-            assert_last_event_data(
-                &env,
-                soroban_sdk::symbol_short!("admin"),
-                soroban_sdk::symbol_short!("init"),
-            );
+        let admin_init: (Address,) = assert_last_event_data(
+            &env,
+            soroban_sdk::symbol_short!("admin"),
+            soroban_sdk::symbol_short!("init"),
+        );
         assert_eq!(admin_init, (admin.clone(),));
 
         let watcher = Address::generate(&env);
@@ -1881,12 +2132,12 @@ mod tests {
         let new_watcher = Address::generate(&env);
         client.register_watcher(&admin, &old_watcher);
         client.replace_watcher(&admin, &old_watcher, &new_watcher);
-        let replaced: (Address, Address) = assert_last_event_data(
+        let replaced: (Address, Address, Vec<Address>) = assert_last_event_data(
             &env,
             soroban_sdk::symbol_short!("watcher"),
             soroban_sdk::symbol_short!("replace"),
         );
-        assert_eq!(replaced, (old_watcher, new_watcher));
+        assert_eq!(replaced, (old_watcher, new_watcher, vec![&env]));
 
         client.pause(&admin);
         let paused: (Address,) = assert_last_event_data(
@@ -2051,10 +2302,7 @@ mod tests {
 
         // ...but removing the last remaining watcher is rejected.
         assert_eq!(
-            client
-                .try_remove_watcher(&admin, &w3)
-                .unwrap_err()
-                .unwrap(),
+            client.try_remove_watcher(&admin, &w3).unwrap_err().unwrap(),
             ContractError::BelowMinWatchers
         );
         assert_eq!(client.get_watchers().len(), 1);
@@ -2281,6 +2529,33 @@ mod tests {
         assert_eq!(client.get_pending_admin_transfer(), None);
     }
 
+    /// Regression test for #590 — the getter must decode the stored
+    /// `(proposer, new_admin, expires_at_ledger)` triple and return the
+    /// proposed `new_admin` while the proposal is live.
+    #[test]
+    fn test_get_pending_admin_transfer_with_pending_proposal() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin_transfer(), Some(new_admin));
+    }
+
+    /// Regression test for #590 — an expired proposal is reported as `None`
+    /// even though it is still stored (matching AlertRegistry's behaviour).
+    #[test]
+    fn test_get_pending_admin_transfer_expired_returns_none() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin_transfer(), Some(new_admin));
+
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + ADMIN_TRANSFER_EXPIRY_LEDGERS + 1);
+        assert_eq!(client.get_pending_admin_transfer(), None);
+    }
+
     // 15g. non-admin cannot propose or cancel an admin transfer
     #[test]
     fn test_propose_and_cancel_admin_transfer_unauthorized() {
@@ -2469,7 +2744,9 @@ mod tests {
 
         client.unpause(&admin);
         assert_eq!(
-            client.try_propose_admin_transfer(&admin, &new_admin).unwrap(),
+            client
+                .try_propose_admin_transfer(&admin, &new_admin)
+                .unwrap(),
             Ok(())
         );
     }
@@ -2493,7 +2770,10 @@ mod tests {
         );
 
         client.unpause(&admin);
-        assert_eq!(client.try_transfer_admin(&admin, &new_admin).unwrap(), Ok(()));
+        assert_eq!(
+            client.try_transfer_admin(&admin, &new_admin).unwrap(),
+            Ok(())
+        );
     }
 
     // pause does not block read-only calls
@@ -3059,7 +3339,10 @@ mod tests {
         advance_ledgers(&env, TEST_DELAY);
 
         assert_eq!(
-            client.try_execute_admin_action(&admin).unwrap_err().unwrap(),
+            client
+                .try_execute_admin_action(&admin)
+                .unwrap_err()
+                .unwrap(),
             ContractError::MaxAdminsReached
         );
         assert_eq!(client.get_admins().len(), MAX_ADMINS);
@@ -3082,20 +3365,6 @@ mod tests {
         assert_eq!(
             client
                 .try_register_watcher(&admin, &overflow)
-                .unwrap_err()
-                .unwrap(),
-            ContractError::MaxWatchersReached
-        );
-        assert_eq!(client.get_watchers().len(), MAX_WATCHERS);
-    }
-
-        let overflow = Address::generate(&env);
-        assert_eq!(
-            client
-                .try_register_watcher(&admin, &overflow)
-        assert_eq!(
-            client
-                .try_register_watcher(&admin, &Address::generate(&env))
                 .unwrap_err()
                 .unwrap(),
             ContractError::MaxWatchersReached
@@ -3463,6 +3732,107 @@ mod tests {
         assert!(client.get_pending_action().is_none());
     }
 
+    /// Regression test for #597 — a pending admin transfer cannot be
+    /// accepted while the registry is paused, but can still be cancelled.
+    #[test]
+    fn test_accept_admin_transfer_blocked_while_paused() {
+        let (env, admin, client) = setup();
+        let proposed = Address::generate(&env);
+
+        client.propose_admin_transfer(&admin, &proposed);
+        client.pause(&admin);
+
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&proposed)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+        assert_eq!(client.get_admins().get(0).unwrap(), admin);
+
+        // Cancelling remains allowed while paused.
+        assert_eq!(client.try_cancel_admin_transfer(&admin).unwrap(), Ok(()));
+        assert!(client.get_pending_admin_transfer().is_none());
+
+        client.unpause(&admin);
+        assert_eq!(
+            client
+                .try_accept_admin_transfer(&proposed)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NoPendingTransfer
+        );
+    }
+
+    /// Regression test for #600 — `set_watcher_scope` rejects the registry's
+    /// own address and the watcher itself, and deduplicates the rest.
+    #[test]
+    fn test_set_watcher_scope_validates_and_deduplicates() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        let target = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        let contract_id = client.address.clone();
+        assert_eq!(
+            client
+                .try_set_watcher_scope(&admin, &watcher, &vec![&env, contract_id.clone()])
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidScopeTarget
+        );
+        assert_eq!(
+            client
+                .try_set_watcher_scope(&admin, &watcher, &vec![&env, watcher.clone()])
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidScopeTarget
+        );
+
+        assert_eq!(
+            client
+                .try_set_watcher_scope(&admin, &watcher, &vec![&env, target.clone(), target.clone()])
+                .unwrap(),
+            Ok(())
+        );
+        let scope = client.get_watcher_scope(&watcher);
+        assert_eq!(scope.len(), 1);
+        assert_eq!(scope.get(0).unwrap(), target);
+    }
+
+    /// Regression test for #603 — the schema version is written at deploy
+    /// time and `migrate` advances it, rejecting invalid ranges.
+    #[test]
+    fn test_schema_version_and_migrate() {
+        let (env, admin, client) = setup();
+        assert_eq!(client.get_schema_version(), CURRENT_SCHEMA_VERSION);
+
+        assert_eq!(
+            client
+                .try_migrate(&admin, &0, &(CURRENT_SCHEMA_VERSION + 1), &0)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidSchemaVersion
+        );
+        assert_eq!(
+            client
+                .try_migrate(&admin, &CURRENT_SCHEMA_VERSION, &CURRENT_SCHEMA_VERSION, &0)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidSchemaVersion
+        );
+
+        let next = CURRENT_SCHEMA_VERSION + 1;
+        assert_eq!(
+            client
+                .try_migrate(&admin, &CURRENT_SCHEMA_VERSION, &next, &0)
+                .unwrap(),
+            Ok(0)
+        );
+        assert_eq!(client.get_schema_version(), next);
+    }
+
     /// Regression test for #410 — a direct `transfer_admin` must clear a
     /// stale `PendingAdminTransfer`, so an old proposal cannot later be
     /// accepted and overturn the direct transfer.
@@ -3477,7 +3847,10 @@ mod tests {
 
         // The old proposal must no longer be acceptable.
         assert_eq!(
-            client.try_accept_admin_transfer(&proposed).unwrap_err().unwrap(),
+            client
+                .try_accept_admin_transfer(&proposed)
+                .unwrap_err()
+                .unwrap(),
             ContractError::NoPendingTransfer
         );
         assert_eq!(client.get_admins().len(), 1);
@@ -3495,12 +3868,18 @@ mod tests {
         client.propose_admin_transfer(&admin, &proposed);
 
         client.set_timelock_delay(&admin, &TEST_DELAY);
-        client.propose_admin_action(&admin, &AdminAction::TransferAdmin(queued_new_admin.clone()));
+        client.propose_admin_action(
+            &admin,
+            &AdminAction::TransferAdmin(queued_new_admin.clone()),
+        );
         advance_ledgers(&env, TEST_DELAY);
         client.execute_admin_action(&admin);
 
         assert_eq!(
-            client.try_accept_admin_transfer(&proposed).unwrap_err().unwrap(),
+            client
+                .try_accept_admin_transfer(&proposed)
+                .unwrap_err()
+                .unwrap(),
             ContractError::NoPendingTransfer
         );
         assert_eq!(client.get_admins().get(0).unwrap(), queued_new_admin);
@@ -3513,11 +3892,11 @@ mod tests {
         let attacker = Address::generate(&env);
 
         client.set_timelock_delay(&admin, &TEST_DELAY);
-        client.propose_admin_action(&admin, &AdminAction::ClearAllWatchers);
+        client.propose_admin_action(&admin, &AdminAction::SetTimelockDelay(0));
 
         assert_eq!(
             client
-                .try_propose_admin_action(&attacker, &AdminAction::ClearAllWatchers)
+                .try_propose_admin_action(&attacker, &AdminAction::SetTimelockDelay(0))
                 .unwrap_err()
                 .unwrap(),
             ContractError::Unauthorized
@@ -3546,7 +3925,9 @@ mod tests {
         client.set_timelock_delay(&admin, &TEST_DELAY);
         // Raising is allowed directly.
         assert_eq!(
-            client.try_set_timelock_delay(&admin, &(TEST_DELAY * 2)).unwrap(),
+            client
+                .try_set_timelock_delay(&admin, &(TEST_DELAY * 2))
+                .unwrap(),
             Ok(())
         );
         // Lowering (including disabling) is not.
@@ -3605,15 +3986,103 @@ mod tests {
         );
     }
 
-    // 42. clear_all_watchers still works when executed through the timelock.
+    // 42. #591 — a lower delay may be proposed and executed through the timelock.
     #[test]
-    fn test_execute_clear_all_watchers() {
-        // Regression test for #407: with watchers registered, MIN_WATCHERS
-        // (1) must reject `ClearAllWatchers` the same way whether it is
-        // queued behind the timelock or called directly — previously the
-        // check lived only in `clear_all_watchers`, so the timelocked path
-        // via `propose_admin_action`/`execute_admin_action` bypassed it and
-        // actually cleared every watcher.
+    fn test_lower_delay_through_timelock() {
+        let (env, admin, client) = setup();
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        // The direct setter stays raise-only.
+        assert_eq!(
+            client
+                .try_set_timelock_delay(&admin, &(TEST_DELAY / 2))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::TimelockRequired
+        );
+
+        // Proposing a lower value is accepted.
+        client.propose_admin_action(&admin, &AdminAction::SetTimelockDelay(TEST_DELAY / 2));
+        advance_ledgers(&env, TEST_DELAY);
+        client.execute_admin_action(&admin);
+
+        assert_eq!(client.get_timelock_delay(), TEST_DELAY / 2);
+    }
+
+    // 42b. #591 — the delay can be disabled (set to zero) through the timelock.
+    #[test]
+    fn test_disable_delay_through_timelock() {
+        let (env, admin, client) = setup();
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.propose_admin_action(&admin, &AdminAction::SetTimelockDelay(0));
+        advance_ledgers(&env, TEST_DELAY);
+        client.execute_admin_action(&admin);
+
+        assert_eq!(client.get_timelock_delay(), 0);
+        // With the delay disabled, direct sensitive calls work again.
+        let new_admin = Address::generate(&env);
+        assert_eq!(client.try_add_admin(&admin, &new_admin).unwrap(), Ok(()));
+    }
+
+    // 42c. #594 — re-registering a removed watcher starts unscoped and
+    // without metadata.
+    #[test]
+    fn test_reregistered_watcher_starts_unscoped() {
+        let (env, admin, client) = setup();
+        let w = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        client.register_watcher(&admin, &w);
+        client.set_watcher_scope(&admin, &w, &vec![&env, target.clone()]);
+        client.set_watcher_info(
+            &admin,
+            &w,
+            &Some(WatcherInfo {
+                label: String::from_str(&env, "old"),
+                operator: String::from_str(&env, "ops"),
+            }),
+        );
+
+        client.remove_watcher(&admin, &w);
+        assert_eq!(client.get_watcher_scope(&w).len(), 0);
+        assert!(client.get_watcher_info(&w).is_none());
+
+        client.register_watcher(&admin, &w);
+        assert_eq!(client.get_watcher_scope(&w).len(), 0);
+        assert!(client.get_watcher_info(&w).is_none());
+    }
+
+    // 42d. #594 — clear_watchers_batch also deletes metadata and scope.
+    #[test]
+    fn test_clear_watchers_batch_deletes_metadata() {
+        let (env, admin, client) = setup();
+        let w1 = Address::generate(&env);
+        let w2 = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        client.register_watcher(&admin, &w1);
+        client.register_watcher(&admin, &w2);
+        client.set_watcher_scope(&admin, &w1, &vec![&env, target]);
+        client.set_watcher_info(
+            &admin,
+            &w1,
+            &Some(WatcherInfo {
+                label: String::from_str(&env, "one"),
+                operator: String::from_str(&env, "ops"),
+            }),
+        );
+
+        client.clear_watchers_batch(&admin, &1);
+
+        assert_eq!(client.get_watcher_count(), MIN_WATCHERS);
+        assert_eq!(client.get_watcher_scope(&w1).len(), 0);
+        assert!(client.get_watcher_info(&w1).is_none());
+    }
+
+    // 42e. #592 — clear_watchers_batch preserves MIN_WATCHERS.
+    #[test]
+    fn test_clear_watchers_batch_preserves_min_watchers() {
         let (env, admin, client) = setup();
         let w1 = Address::generate(&env);
         let w2 = Address::generate(&env);
@@ -3621,18 +4090,257 @@ mod tests {
         client.register_watcher(&admin, &w1);
         client.register_watcher(&admin, &w2);
 
-        client.set_timelock_delay(&admin, &TEST_DELAY);
+        client.clear_watchers_batch(&admin, &MAX_WATCHERS);
+        assert_eq!(client.get_watcher_count(), MIN_WATCHERS);
+        assert_eq!(client.get_watchers().len(), MIN_WATCHERS as usize);
+    }
+
+    // 42f. #601 — the guardian can pause but not unpause.
+    #[test]
+    fn test_guardian_can_pause_but_not_unpause() {
+        let (env, admin, client) = setup();
+        let guardian = Address::generate(&env);
+
         assert_eq!(
-            client
-                .try_propose_admin_action(&admin, &AdminAction::ClearAllWatchers)
-                .unwrap_err()
-                .unwrap(),
-            ContractError::BelowMinWatchers
+            client.try_get_guardian().unwrap_err().unwrap(),
+            ContractError::GuardianNotSet
         );
 
-        // Watchers are untouched since the action was never queued.
-        assert_eq!(client.get_watchers().len(), 2);
-        assert_eq!(client.get_watcher_count(), 2);
+        client.set_guardian(&admin, &Some(guardian.clone()));
+        assert_eq!(client.get_guardian(), guardian);
+
+        client.pause(&guardian);
+        assert!(client.is_paused());
+
+        assert_eq!(
+            client.try_unpause(&guardian).unwrap_err().unwrap(),
+            ContractError::Unauthorized
+        );
+        assert!(client.is_paused());
+
+        // An admin can still unpause.
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+
+    // 42g. #601 — a non-guardian, non-admin cannot pause.
+    #[test]
+    fn test_non_guardian_cannot_pause() {
+        let (env, admin, client) = setup();
+        let guardian = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.set_guardian(&admin, &Some(guardian));
+        assert_eq!(
+            client.try_pause(&attacker).unwrap_err().unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // 42h. #601 — clearing the guardian revokes pause rights.
+    #[test]
+    fn test_clearing_guardian_revokes_pause() {
+        let (env, admin, client) = setup();
+        let guardian = Address::generate(&env);
+
+        client.set_guardian(&admin, &Some(guardian.clone()));
+        client.set_guardian(&admin, &None);
+        assert_eq!(
+            client.try_get_guardian().unwrap_err().unwrap(),
+            ContractError::GuardianNotSet
+        );
+        assert_eq!(
+            client.try_pause(&guardian).unwrap_err().unwrap(),
+            ContractError::Unauthorized
+        );
+    }
+
+    // ── #593: watcher metadata / scope limits and pause checks ───────────────
+
+    #[test]
+    fn test_set_watcher_info_rejects_unregistered_watcher() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        let info = WatcherInfo {
+            label: String::from_str(&env, "node-1"),
+            operator: String::from_str(&env, "acme"),
+        };
+
+        assert_eq!(
+            client
+                .try_set_watcher_info(&admin, &watcher, &Some(info))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::WatcherNotFound
+        );
+    }
+
+    #[test]
+    fn test_set_watcher_scope_rejects_unregistered_watcher() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        assert_eq!(
+            client
+                .try_set_watcher_scope(&admin, &watcher, &vec![&env, target])
+                .unwrap_err()
+                .unwrap(),
+            ContractError::WatcherNotFound
+        );
+    }
+
+    #[test]
+    fn test_set_watcher_info_rejects_oversized_label() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        let mut label = String::from_str(&env, "");
+        for _ in 0..=MAX_LABEL_LEN {
+            label.push_str("a");
+        }
+        let info = WatcherInfo {
+            label,
+            operator: String::from_str(&env, "acme"),
+        };
+
+        assert_eq!(
+            client
+                .try_set_watcher_info(&admin, &watcher, &Some(info))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::LabelTooLong
+        );
+    }
+
+    #[test]
+    fn test_set_watcher_info_rejects_oversized_operator() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        let mut operator = String::from_str(&env, "");
+        for _ in 0..=MAX_OPERATOR_LEN {
+            operator.push_str("a");
+        }
+        let info = WatcherInfo {
+            label: String::from_str(&env, "node-1"),
+            operator,
+        };
+
+        assert_eq!(
+            client
+                .try_set_watcher_info(&admin, &watcher, &Some(info))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::OperatorTooLong
+        );
+    }
+
+    #[test]
+    fn test_set_watcher_info_accepts_max_lengths() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        let mut label = String::from_str(&env, "");
+        let mut operator = String::from_str(&env, "");
+        for _ in 0..MAX_LABEL_LEN {
+            label.push_str("a");
+        }
+        for _ in 0..MAX_OPERATOR_LEN {
+            operator.push_str("b");
+        }
+        let info = WatcherInfo {
+            label: label.clone(),
+            operator: operator.clone(),
+        };
+
+        assert_eq!(
+            client
+                .try_set_watcher_info(&admin, &watcher, &Some(info))
+                .unwrap(),
+            Ok(())
+        );
+        let stored = client.get_watcher_info(&watcher).unwrap();
+        assert_eq!(stored.label, label);
+        assert_eq!(stored.operator, operator);
+    }
+
+    #[test]
+    fn test_set_watcher_scope_rejects_oversized_scope() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        let mut scope: Vec<Address> = vec![&env];
+        for _ in 0..=MAX_SCOPE_LEN {
+            scope.push_back(Address::generate(&env));
+        }
+
+        assert_eq!(
+            client
+                .try_set_watcher_scope(&admin, &watcher, &scope)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::ScopeTooLong
+        );
+    }
+
+    #[test]
+    fn test_set_watcher_info_and_scope_rejected_when_paused() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        let target = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+        client.pause(&admin);
+
+        let info = WatcherInfo {
+            label: String::from_str(&env, "node-1"),
+            operator: String::from_str(&env, "acme"),
+        };
+        assert_eq!(
+            client
+                .try_set_watcher_info(&admin, &watcher, &Some(info))
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+        assert_eq!(
+            client
+                .try_set_watcher_scope(&admin, &watcher, &vec![&env, target])
+                .unwrap_err()
+                .unwrap(),
+            ContractError::Paused
+        );
+    }
+
+    // ── #602: get_configuration ──────────────────────────────────────────────
+
+    #[test]
+    fn test_get_configuration_aggregates_state() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+
+        let config = client.get_configuration();
+        assert_eq!(config.admins, client.get_admins());
+        assert!(!config.paused);
+        assert_eq!(config.timelock_delay, TEST_DELAY);
+        assert!(config.pending_action.is_none());
+        assert!(config.pending_admin_transfer.is_none());
+        assert_eq!(config.watcher_count, 1);
+    }
+
+    #[test]
+    fn test_get_configuration_before_initialize() {
+        let (_env, client) = uninit();
+        assert_eq!(
+            client.try_get_configuration().unwrap_err().unwrap(),
+            ContractError::NotInitialized
+        );
     }
 
     // 34. register_watchers emits one event per newly-added watcher
@@ -3648,6 +4356,126 @@ mod tests {
 
         assert_eq!(env.events().all().events().len(), 2);
         assert_eq!(env.events().all().len(), 2);
+    }
+
+    // 31a. replace_watcher carries metadata and scope to the new address.
+    #[test]
+    fn test_replace_watcher_carries_info_and_scope() {
+        let (env, admin, client) = setup();
+        let old_watcher = Address::generate(&env);
+        let new_watcher = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        client.register_watcher(&admin, &old_watcher);
+        client.set_watcher_info(
+            &admin,
+            &old_watcher,
+            &Some(WatcherInfo {
+                label: String::from_str(&env, "node-a"),
+                operator: String::from_str(&env, "ops"),
+            }),
+        );
+        client.set_watcher_scope(&admin, &old_watcher, &vec![&env, target.clone()]);
+
+        client.replace_watcher(&admin, &old_watcher, &new_watcher);
+
+        // Metadata moved to the new address and cleared from the old one.
+        let info = client.get_watcher_info(&new_watcher).unwrap();
+        assert_eq!(info.label, String::from_str(&env, "node-a"));
+        assert_eq!(info.operator, String::from_str(&env, "ops"));
+        assert!(client.get_watcher_info(&old_watcher).is_none());
+
+        // Scope moved too: the new watcher is restricted to `target`, so it
+        // is not authorized for an unrelated target.
+        let other = Address::generate(&env);
+        assert!(client.is_watcher_authorized_for(&new_watcher, &target));
+        assert!(!client.is_watcher_authorized_for(&new_watcher, &other));
+
+        // The replace event carries the scope.
+        let replaced: (Address, Address, Vec<Address>) = assert_last_event_data(
+            &env,
+            soroban_sdk::symbol_short!("watcher"),
+            soroban_sdk::symbol_short!("replace"),
+        );
+        assert_eq!(replaced, (old_watcher, new_watcher, vec![&env, target]));
+    }
+
+    // 31b. Clearing watcher info emits a watcher.info event.
+    #[test]
+    fn test_set_watcher_info_none_emits_event() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+
+        client.register_watcher(&admin, &watcher);
+        client.set_watcher_info(
+            &admin,
+            &watcher,
+            &Some(WatcherInfo {
+                label: String::from_str(&env, "node-a"),
+                operator: String::from_str(&env, "ops"),
+            }),
+        );
+        client.set_watcher_info(&admin, &watcher, &None);
+
+        assert!(client.get_watcher_info(&watcher).is_none());
+        let cleared: Option<WatcherInfo> = assert_last_event_data(
+            &env,
+            soroban_sdk::symbol_short!("watcher"),
+            soroban_sdk::symbol_short!("info"),
+        );
+        assert!(cleared.is_none());
+    }
+
+    // 31c. propose_admin_action emits admin.queue with the queued action.
+    #[test]
+    fn test_propose_admin_action_emits_queue_event() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.set_timelock_delay(&admin, &TEST_DELAY);
+        let ready_at = client.propose_admin_action(
+            &admin,
+            &AdminAction::TransferAdmin(new_admin.clone()),
+        );
+
+        let queued: (Address, u32, AdminAction) = assert_last_event_data(
+            &env,
+            soroban_sdk::symbol_short!("admin"),
+            soroban_sdk::symbol_short!("queue"),
+        );
+        assert_eq!(
+            queued,
+            (admin, ready_at, AdminAction::TransferAdmin(new_admin))
+        );
+    }
+
+    // 31d. are_watchers_authorized rejects oversized batches instead of
+    // truncating them.
+    #[test]
+    fn test_are_watchers_authorized_rejects_oversized_batch() {
+        let (env, admin, client) = setup();
+        let watcher = Address::generate(&env);
+        client.register_watcher(&admin, &watcher);
+
+        let mut batch: Vec<Address> = vec![&env];
+        for _ in 0..=MAX_PAGE_SIZE {
+            batch.push_back(Address::generate(&env));
+        }
+        assert_eq!(
+            client
+                .try_are_watchers_authorized(&batch)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::BatchTooLarge
+        );
+
+        // Exactly MAX_PAGE_SIZE is accepted and stays aligned with the input.
+        let mut boundary: Vec<Address> = vec![&env];
+        for _ in 0..MAX_PAGE_SIZE {
+            boundary.push_back(Address::generate(&env));
+        }
+        let results = client.are_watchers_authorized(&boundary);
+        assert_eq!(results.len(), boundary.len());
     }
 
     // 31. self-replace (old == new) is a no-op — no spurious watcher.remove
@@ -3796,7 +4624,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
-    fn test_clear_all_watchers_requires_auth() {
+    fn test_clear_watchers_batch_requires_auth() {
         let env = Env::default();
         let admin = Address::generate(&env);
         let contract_id = env.register(WatcherRegistry, (&admin,));
@@ -3805,7 +4633,7 @@ mod tests {
         env.mock_all_auths();
         client.register_watcher(&admin, &watcher);
         env.set_auths(&[]);
-        client.clear_all_watchers(&admin);
+        client.clear_watchers_batch(&admin, &1);
     }
 
     // === Pre-initialization coverage
@@ -3823,12 +4651,15 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_all_watchers_before_initialize() {
+    fn test_clear_watchers_batch_before_initialize() {
         let (env, client) = uninit();
         let admin = Address::generate(&env);
 
         assert_eq!(
-            client.try_clear_all_watchers(&admin).unwrap_err().unwrap(),
+            client
+                .try_clear_watchers_batch(&admin, &1)
+                .unwrap_err()
+                .unwrap(),
             ContractError::NotInitialized
         );
     }

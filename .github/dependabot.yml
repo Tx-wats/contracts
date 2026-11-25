@@ -47,3 +47,11 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # Pinned stellar/quickstart image used by the e2e workflows
+  - package-ecosystem: "docker"
+    directory: "/.github/quickstart"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5

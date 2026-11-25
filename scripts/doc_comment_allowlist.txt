@@ -1,0 +1,10 @@
+# Known doc-comment merge leftovers accepted for now (read by scripts/check_doc_comments.py).
+# Format: <path> <item> <rule>. Remove a line once the item is fixed; the check fails
+# on entries that no longer match, so this list cannot go stale silently.
+#
+# Each of these items stacks two `since`/`note` pairs (or two #[deprecated]
+# attributes) on one function left behind by the merge waves.
+contracts/alert-registry/src/lib.rs get_alerts_for_contract duplicate-deprecated
+contracts/alert-registry/src/lib.rs get_active_alerts_for_contract duplicate-deprecated
+contracts/alert-registry/src/lib.rs get_alerts_by_owner duplicate-deprecated
+contracts/alert-registry/src/lib.rs get_active_alert_count duplicate-deprecated

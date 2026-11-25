@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # scripts/deploy.sh — Deploy both contracts to Stellar (testnet or mainnet)
-# Usage: ./scripts/deploy.sh [--network testnet|mainnet] [--no-gating]
-#        NETWORK=mainnet ./scripts/deploy.sh
+# Usage: ./scripts/deploy.sh [--network testnet|mainnet] [--watcher <address>]... [--no-gating] [--yes]
+#        NETWORK=mainnet ./scripts/deploy.sh --watcher G...
+# Gating (the default) needs at least one --watcher: set_watcher_registry
+# rejects a registry with no watchers. Mainnet prompts unless --yes is given.
 set -euo pipefail
 
 # shellcheck source=scripts/lib/common.sh
@@ -10,9 +12,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 parse_args "$@"
 resolve_network
 
+if [ "$NO_GATING" != true ] && [ ${#WATCHERS[@]} -eq 0 ]; then
+  echo "Error: watcher gating needs at least one --watcher <address> (or pass --no-gating)" >&2
+  exit 1
+fi
+
 IDENTITY="${STELLAR_IDENTITY:-deployer}"
 
 echo "==> Network: $NETWORK"
+confirm_mainnet "Deploying AlertRegistry and WatcherRegistry" "Identity: $IDENTITY"
 echo "==> Checking Stellar CLI..."
 stellar --version
 
@@ -42,7 +50,7 @@ ALERT_ID=$(stellar contract deploy \
   --network "$NETWORK" \
   --rpc-url "$RPC_URL" \
   --network-passphrase "$NETWORK_PASSPHRASE" \
-  -- --admin "$ADMIN_ADDRESS"
+  -- --admin "$ADMIN_ADDRESS")
 echo "Alert Registry deployed: $ALERT_ID"
 
 echo "==> Deploying Watcher Registry..."
@@ -55,21 +63,22 @@ WATCHER_ID=$(stellar contract deploy \
   -- --admin "$ADMIN_ADDRESS")
 echo "Watcher Registry deployed: $WATCHER_ID"
 
-ADMIN_ADDRESS="${ADMIN_ADDRESS:-$(stellar keys address "$IDENTITY")}"
-
-echo "==> Initializing Alert Registry..."
-stellar contract invoke \
-  --id "$ALERT_ID" \
-  --source "$IDENTITY" \
-  --network "$NETWORK" \
-  --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE" \
-  -- initialize \
-  --admin "$ADMIN_ADDRESS"
-
 if [ "$NO_GATING" = true ]; then
   echo "==> Skipping WatcherRegistry gating (--no-gating specified)."
 else
+  for WATCHER in "${WATCHERS[@]}"; do
+    echo "==> Registering watcher $WATCHER..."
+    stellar contract invoke \
+      --id "$WATCHER_ID" \
+      --source "$IDENTITY" \
+      --network "$NETWORK" \
+      --rpc-url "$RPC_URL" \
+      --network-passphrase "$NETWORK_PASSPHRASE" \
+      -- register_watcher \
+      --admin "$ADMIN_ADDRESS" \
+      --watcher "$WATCHER"
+  done
+
   echo "==> Configuring Watcher Registry gating on Alert Registry..."
   stellar contract invoke \
     --id "$ALERT_ID" \

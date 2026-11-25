@@ -2,6 +2,8 @@
 
 Contract that stores alert configurations on-chain, keyed by contract address.
 
+Watcher scope enforcement is decided in [ADR 0003](adr/0003-watcher-scopes.md); the meaning of "active" is decided in [ADR 0002](adr/0002-alert-activity-model.md).
+
 ---
 
 ## Data Types
@@ -20,6 +22,7 @@ Contract that stores alert configurations on-chain, keyed by contract address.
 | `updated_ledger` | `u32` | Monotonic ledger sequence number of last update |
 | `active` | `bool` | Whether the alert is active |
 | `pending_webhook_hash` | `Option<BytesN<32>>` | Pending webhook hash proposed via `propose_webhook`, not yet confirmed. `None` when no rotation is in progress. |
+| `revision` | `u32` | Optimistic-concurrency counter, incremented on each mutation. Checked by `update_alert_checked` and `set_alert_active_checked`. |
 
 > **Expiry:** an alert may also carry an optional expiry ledger, stored separately from `AlertConfig` (see [`get_alert_expiry`](#get_alert_expiry)). Once the current ledger passes it, the alert is treated as inactive by the active getters and sync results even though its stored `active` flag is still `true`.
 
@@ -947,6 +950,426 @@ Convenience boolean getter returning `true` if watcher-gating is currently activ
 
 ---
 
+### `snooze_alert`
+
+Snoozes an alert until a ledger sequence. While the current ledger is below `until_ledger`, the alert is treated as inactive by the active-filtered getters (for example [`get_active_alerts_for_contract`](#get_active_alerts_for_contract) and [`get_active_contract_alerts_paged`](#get_active_contract_alerts_paged)). The stored `active` flag is not changed. Pass an `until_ledger` at or before the current ledger to clear a snooze early.
+
+**Requires auth:** `caller` (must be the alert owner)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert to snooze |
+| `until_ledger` | `u32` | Ledger sequence until which the alert is snoozed |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `AlertNotFound` if `config_id` does not exist; `Unauthorized` if `caller` is not the owner; `Paused` while the contract is paused.
+
+**Events:** `(Symbol("alert"), Symbol("snooze"))` with data `(id: u64, until_ledger: u32)`. The event is also emitted when a snooze is cleared.
+
+---
+
+### `set_alert_tags`
+
+Replaces the owner-defined tags on an alert. Tags are stored separately from `AlertConfig`. Limits: at most `MAX_TAGS_PER_ALERT` (8) tags, each non-empty and at most `MAX_TAG_LEN` (32) bytes.
+
+**Requires auth:** `caller` (must be the alert owner)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert |
+| `tags` | `Vec<String>` | Tags to store; replaces any previous tags |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `AlertNotFound` if `config_id` does not exist; `Unauthorized` if `caller` is not the owner; `TooManyTags` (code 30) if more than 8 tags are supplied; `InvalidTag` (code 31) if a tag is empty or longer than 32 bytes; `Paused` while the contract is paused.
+
+**Events:** `(Symbol("alert"), Symbol("tags"))` with data `(id: u64, count: u32)`.
+
+---
+
+### `get_alert_tags`
+
+Returns the tags stored for an alert. Returns an empty vec if no tags were set or if `config_id` does not identify an existing alert. Takes no `querier`, so it is not subject to watcher-gating.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `config_id` | `u64` | Alert config ID |
+
+**Returns:** `Vec<String>`
+
+---
+
+### `set_alert_expiry`
+
+Sets or clears the optional expiry ledger (`active_until_ledger`) of an alert without modifying its `AlertConfig`. Semantics are described under [`get_alert_expiry`](#get_alert_expiry). Passing `None` removes the expiry.
+
+**Requires auth:** `caller` (must be the alert owner)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert |
+| `active_until_ledger` | `Option<u32>` | Ledger sequence after which the alert is treated as inactive, or `None` to clear the expiry |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `AlertNotFound` if `config_id` does not exist; `Unauthorized` if `caller` is not the owner; `Paused` while the contract is paused.
+
+**Events:** `(Symbol("alert"), Symbol("expiry"))` with data `(id: u64, caller: Address, active_until_ledger: Option<u32>)`.
+
+---
+
+### `is_alert_expired`
+
+Returns `true` when the alert has an expiry ledger and the current ledger sequence is at or past it. Returns `false` when no expiry is set, and also when the alert does not exist (no expiry is stored for it). Does not check the stored `active` flag and does not require auth.
+
+> **Boundary note:** this function returns `true` when `active_until_ledger == current ledger`. The expiry prose in [`register_alert`](#register_alert) and [`get_alert_expiry`](#get_alert_expiry) says an alert is expired once the current ledger is *greater than* `active_until_ledger`. The two differ by one ledger.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `config_id` | `u64` | Alert config ID |
+
+**Returns:** `bool`
+
+---
+
+### `remove_all_alerts`
+
+Permanently removes the caller's alerts, in bounded batches. Each call processes at most `MAX_REMOVALS_PER_CALL` (50) entries from the owner index. Dangling index entries (alerts whose record expired) are dropped and counted. Call again until the return value is `0`.
+
+**Requires auth:** `caller`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Owner whose alerts are removed |
+
+**Returns:** `Result<u32, ContractError>` — the number of index entries processed in this pass (removed alerts plus dropped dangling IDs). `0` means the caller has no alerts left.
+
+**Errors:** `Paused` while the contract is paused.
+
+**Events:** `(Symbol("alert"), Symbol("rm_all"))` with data `(caller: Address, count: u32)`, emitted only when `count > 0`.
+
+---
+
+### `update_alert_checked`
+
+Optimistic-concurrency variant of [`update_alert`](#update_alert). If `expected_revision` is `Some(r)` and the alert's current `revision` is not `r`, the call fails and nothing is written. Otherwise it behaves exactly like `update_alert`. `revision` is an `AlertConfig` counter that increments on each mutation, so two editors can detect that their read is stale.
+
+**Requires auth:** `caller` (must be the alert owner)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert to update |
+| `rules` | `Vec<String>` | New rule descriptors |
+| `active` | `bool` | New active status |
+| `expected_revision` | `Option<u32>` | Revision the caller last read; `None` skips the check |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `RevisionMismatch` (code 30) if `expected_revision` does not match; plus every error from [`update_alert`](#update_alert).
+
+**Events:** Same as `update_alert`: `(Symbol("alert"), Symbol("update"))`.
+
+---
+
+### `set_alert_active_checked`
+
+Optimistic-concurrency variant of [`set_alert_active`](#set_alert_active). The revision is checked before the toggle is applied, using the same rule as [`update_alert_checked`](#update_alert_checked).
+
+**Requires auth:** `caller` (must be the alert owner)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert |
+| `active` | `bool` | New active status |
+| `expected_revision` | `Option<u32>` | Revision the caller last read; `None` skips the check |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `RevisionMismatch` (code 30) if `expected_revision` does not match; plus every error from [`set_alert_active`](#set_alert_active).
+
+**Events:** Same as `set_alert_active`. No event and no write when the alert is already in the requested state.
+
+---
+
+### `cancel_webhook_proposal`
+
+Clears a staged webhook rotation from [`propose_webhook`](#propose_webhook) without touching the live `webhook_hash`.
+
+**Requires auth:** `caller` (must be the alert owner)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `caller` | `Address` | Must be the alert owner |
+| `config_id` | `u64` | ID of the alert |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `AlertNotFound` if `config_id` does not exist; `Unauthorized` if `caller` is not the owner; `NoPendingWebhook` if no rotation is in progress; `Paused` while the contract is paused.
+
+**Events:** `(Symbol("alert"), Symbol("wh_cancel"))` with data `(id: u64, caller: Address)`.
+
+---
+
+### `propose_admin_transfer`
+
+Step 1 of the two-step admin handover. Stores a pending transfer to `new_admin`, which expires `ADMIN_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers, about 7 days) after it is made. Admin authority does not move until `new_admin` calls `accept_admin_transfer`. Calling this again replaces the pending proposal. Use `cancel_admin_transfer` to withdraw it.
+
+**Requires auth:** `admin` (must be the current admin)
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+| `new_admin` | `Address` | Address proposed as the new admin |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `NotInitialized` if the contract has not been initialized; `Unauthorized` if `admin` is not the current admin; `Paused` while the contract is paused.
+
+**Events:** `(Symbol("admin"), Symbol("propose"))` with data `(admin: Address, new_admin: Address)`.
+
+---
+
+### `clear_guardian`
+
+Removes the pause-only guardian set by [`set_guardian`](#set_guardian--get_guardian). After this call, [`get_guardian`](#set_guardian--get_guardian) returns `None`.
+
+Unlike most admin setters, this does not check the paused state, so it can be called during an incident.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `NotInitialized` if the contract has not been initialized; `Unauthorized` if `admin` is not the current admin.
+
+**Events:** `(Symbol("admin"), Symbol("guardian"))` with data `(admin: Address, None)`.
+
+---
+
+### `get_schema_version`
+
+Returns the storage schema version recorded in instance storage. Returns `0` if no version has been recorded, which includes contracts that have never been migrated. The version is advanced by `migrate`.
+
+**Parameters:** none
+
+**Returns:** `u32`
+
+---
+
+### `set_global_alert_limit`
+
+Sets a ceiling on the total number of **live** (non-removed) alerts across the whole registry. Removing an alert frees its slot. A value of `0` disables the limit. Once the ceiling is reached, `register_alert` fails with `GlobalAlertLimitExceeded` (code 13).
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+| `limit` | `u32` | New global ceiling; `0` means no limit |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `NotInitialized` if the contract has not been initialized; `Unauthorized` if `admin` is not the current admin; `Paused` while the contract is paused.
+
+**Events:** `(Symbol("admin"), Symbol("limit"))` with data `(admin: Address, Symbol("global"), limit: u32)`.
+
+---
+
+### `get_global_alert_limit`
+
+Returns the global live-alert ceiling, or `0` if none is set.
+
+**Parameters:** none
+
+**Returns:** `u32`
+
+---
+
+### `set_per_contract_alert_limit`
+
+Sets a ceiling on how many live alerts may target a single `target_contract`, summed over all owners. A value of `0` disables the limit. Registering an alert, or retargeting one with [`update_target_contract`](#update_target_contract), fails with `ContractAlertLimitExceeded` (code 14) when the target is full.
+
+**Requires auth:** `admin`
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Current admin address |
+| `limit` | `u32` | New per-contract ceiling; `0` means no limit |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `NotInitialized` if the contract has not been initialized; `Unauthorized` if `admin` is not the current admin; `Paused` while the contract is paused.
+
+**Events:** `(Symbol("admin"), Symbol("limit"))` with data `(admin: Address, Symbol("contract"), limit: u32)`.
+
+---
+
+### `get_per_contract_alert_limit`
+
+Returns the per-contract alert ceiling, or `0` if none is set.
+
+**Parameters:** none
+
+**Returns:** `u32`
+
+---
+
+### `get_active_contract_alert_count`
+
+Returns the number of **live** (non-removed) alerts that target `target_contract`, summed over all owners. The name says "active", but deactivated alerts still count until they are removed. Read from a stored counter, so the cost does not grow with the number of alerts.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `target_contract` | `Address` | Contract whose alerts are counted |
+
+**Returns:** `u32`
+
+---
+
+### `get_active_contract_alerts_paginated`
+
+> **Status:** in the current source this name has no function body. Its signature is followed directly by the doc comment of [`get_active_contract_alerts_paged`](#get_active_contract_alerts_paged), so the crate does not parse as committed. The description below follows that doc comment and is unverified until the source compiles.
+
+Intended as a page of **active** alerts for `target_contract`, with the same parameters and behaviour as [`get_active_contract_alerts_paged`](#get_active_contract_alerts_paged). Use that function until this one is fixed.
+
+---
+
+### `get_alerts_by_owner_for_contract`
+
+Returns a page of the alerts `owner` has that watch `target_contract`. It walks the `[offset, offset + limit)` window of the owner's index and keeps only the entries whose target matches. `offset` and `limit` count owner-index slots, not matches, so the page can be shorter than `limit` (or empty) before the end of the index. Advance `offset` by `limit` until a page comes back shorter than `limit`. `limit` is clamped to `MAX_PAGE_SIZE` (100).
+
+If a `WatcherRegistry` is configured, `querier` must be a registered watcher.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `querier` | `Address` | Address performing the query (checked against watcher registry if configured) |
+| `owner` | `Address` | Owner whose alerts are scanned |
+| `target_contract` | `Address` | Only alerts watching this contract are kept |
+| `offset` | `u32` | Number of owner-index slots to skip |
+| `limit` | `u32` | Maximum number of owner-index slots to scan (clamped) |
+
+**Returns:** `Result<Vec<AlertConfig>, ContractError>` — may be empty.
+
+**Errors:** `NotAWatcher` if watcher-gating is enabled and `querier` is not a registered watcher.
+
+---
+
+### `get_alert_owner`
+
+Returns the owner of an alert without deserializing the rest of the config.
+
+If a `WatcherRegistry` is configured, `querier` must be a registered watcher.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `querier` | `Address` | Address performing the query (checked against watcher registry if configured) |
+| `config_id` | `u64` | Alert config ID |
+
+**Returns:** `Result<Option<Address>, ContractError>` — `Ok(Some(owner))` if the alert exists, `Ok(None)` if it does not exist or has expired.
+
+**Errors:** `NotAWatcher` if watcher-gating is enabled and `querier` is not a registered watcher.
+
+---
+
+### `get_active_alert_count`
+
+> **Deprecated since 0.2.0, removal in 0.4.0.** Prefer `get_non_removed_alert_count(owner)` for live alerts (it counts deactivated ones too), or a paginated read filtered on `active`.
+
+Returns the number of the owner's alerts whose stored `active` flag is `true`. Read from a per-owner counter, so it does not scan the owner's index. Deactivated alerts are excluded. Not subject to watcher-gating.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `owner` | `Address` | Owner address to count |
+
+**Returns:** `u32`
+
+---
+
+### `bump_instance_ttl`
+
+Extends the TTL of the contract's instance storage, which holds the admin, pause flag, limits and watcher registry address. Every write to instance storage already extends it, so this is only needed for deployments that receive no writes. Intended to be called periodically by a keeper; see [`docs/ttl.md`](ttl.md).
+
+Callable by anyone, requires no auth, returns nothing, emits no event and is not blocked by the pause.
+
+**Parameters:** none
+
+**Returns:** nothing
+
+---
+
+### `is_paused`
+
+Returns whether the contract is currently paused. Defaults to `false` when no pause has been recorded. No auth required. See [Pause](#pause).
+
+**Parameters:** none
+
+**Returns:** `bool`
+
+---
+
+### `validate_rules`
+
+Validates a rule-descriptor list before it is stored. **This is not an on-chain entrypoint.** It is defined in a plain `impl AlertRegistry` block outside the `#[contractimpl]` block, so it cannot be invoked with `stellar contract invoke`. It is exposed for Rust tests and fuzzing (see [Fuzzing Findings](fuzzing-findings.md)).
+
+Checks, in order: the list is not empty; it has at most `MAX_RULES_PER_ALERT` entries (5, the length of `VALID_RULE_DESCRIPTORS`); each entry passes `validate_rule` (a recognised descriptor, or a parameterized `rule:<base>:min=<amount>`); and no descriptor appears twice.
+
+> **Source note:** the function as currently committed is malformed. Its first `if` checks `rules.len() > MAX_RULES_PER_ALERT` and never closes. Later in the body it checks `rules.len() > 50`, which does not match the documented limit.
+
+**Parameters**
+
+| Name | Type | Description |
+|---|---|---|
+| `rules` | `Vec<String>` | Rule descriptors to validate |
+
+**Returns:** `Result<(), ContractError>`
+
+**Errors:** `EmptyRules` (code 25) if `rules` is empty; `TooManyRules` (code 8) if there are more than `MAX_RULES_PER_ALERT`; `InvalidRuleDescriptor` (code 9) if any entry is not recognised; `DuplicateRule` (code 15) if an entry appears more than once.
+
+---
+
 ## Pause
 
 `pause(caller)` freezes the registry during an incident: **every state-mutating entry point returns `ContractError::Paused`** until `unpause(admin)`. Reads keep working.
@@ -994,7 +1417,7 @@ This includes admin moderation (`deactivate_alert_by_admin`, `unlock_alert_by_ad
 | `EmptyRules` | 25 | `register_alert`, `update_alert` or `batch_register_alert` called with an empty `rules` list |
 | `NoopWebhookRotation` | 23 | `propose_webhook` called with a hash that is already live or already pending |
 | `InvalidTtl` | 26 | `bump_alert` called with a TTL below `DEFAULT_TTL`, or `renew_alert_ttl_for` called with a TTL outside `DEFAULT_TTL..=MAX_TTL` |
-| `AdminTransferExpired` | 24 | `accept_admin_transfer` called after the proposal's `ADMIN_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers) have elapsed |
+| `AdminTransferExpired` | 34 | `accept_admin_transfer` called after the proposal's `ADMIN_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers) have elapsed |
 
 ---
 

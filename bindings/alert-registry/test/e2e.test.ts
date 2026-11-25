@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { networks, Client } from "../dist/index.js";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, basicNodeSigner } from "@stellar/stellar-sdk";
+import { createHash } from "node:crypto";
 
 // End-to-end tests against a live Soroban network.
 //
@@ -28,15 +29,16 @@ const runIfReady = () =>
   contractId &&
   /^C[A-Z2-7]{55}$/.test(contractId);
 
-describe.skipIf(!runIfReady)("AlertRegistry e2e", () => {
-  const keypair = Keypair.fromSecret(secretKey);
-  const networkConfig = {
-    contractId,
+describe.skipIf(!runIfReady())("AlertRegistry e2e", () => {
+  const keypair = Keypair.fromSecret(secretKey as string);
+  const client = new Client({
+    contractId: contractId as string,
     networkPassphrase,
-    rpcUrl,
-  };
-
-  const client = new Client(networkConfig);
+    rpcUrl: rpcUrl as string,
+    publicKey: keypair.publicKey(),
+    ...basicNodeSigner(keypair, networkPassphrase),
+    allowHttp: true,
+  });
 
   // BytesN<32> webhook hash: the raw 32-byte SHA-256 digest of the webhook URL.
   // In the bindings the webhook_hash field is BytesN<32>, so we pass the digest
@@ -44,30 +46,33 @@ describe.skipIf(!runIfReady)("AlertRegistry e2e", () => {
   it("round-trips a register_alert -> get_alert and verifies BytesN<32> webhook_hash", async () => {
     const label = `e2e-${Date.now()}`;
     const webhookUrl = `https://example.invalid/hook/${label}`;
-    const webhookHash = crypto
-      .createHash("sha256")
+    const webhookHash = createHash("sha256")
       .update(webhookUrl)
       .digest(); // 32 bytes, Uint8Array
 
     expect(webhookHash).toHaveLength(32);
 
-    const targetContract = Keypair.random().publicKey();
+    const targetContract = contractId as string;
     const owner = keypair.publicKey();
     const rules = ["rule:transfer"];
 
-    const alertId = await client.register_alert(
+    const tx = await client.register_alert({
       owner,
-      targetContract,
+      target_contract: targetContract,
       label,
-      webhookHash,
-      rules
-    );
+      webhook_hash: webhookHash,
+      rules,
+    });
+    const sent = await tx.signAndSend();
+    const alertId = sent.result.unwrap();
 
-    expect(alertId).toBeDefined();
-    expect(typeof alertId).toBe("string");
-    expect(/^C[A-Z2-7]{55}$/.test(alertId)).toBe(true);
+    expect(typeof alertId).toBe("bigint");
 
-    const alertConfig = await client.get_alert(owner, alertId);
+    const { result } = await client.get_alert({
+      querier: owner,
+      config_id: alertId,
+    });
+    const alertConfig = result.unwrap();
 
     expect(alertConfig).toBeDefined();
     expect(alertConfig?.label).toBe(label);
@@ -82,13 +87,14 @@ describe.skipIf(!runIfReady)("AlertRegistry e2e", () => {
 
   it("decodes an error for a nonexistent alert", async () => {
     const owner = keypair.publicKey();
-    const missingId = "0".repeat(56);
+    const missingId = BigInt(Number.MAX_SAFE_INTEGER);
 
-    // get_alert of a nonexistent id should return null / a sentinel rather than
-    // crashing. The contract returns None for a missing alert.
-    const result = await client.get_alert(owner, missingId);
+    // The contract returns Ok(None) for a missing alert.
+    const { result } = await client.get_alert({
+      querier: owner,
+      config_id: missingId,
+    });
 
-    // The generated client should either return null or a clearly-sentinel value.
-    expect(result).toBeNull();
+    expect(result.unwrap() ?? null).toBeNull();
   });
 });
