@@ -9,7 +9,10 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - '.github/workflows/deploy-e2e.yml'
       - 'scripts/deploy.sh'
+      - '.github/quickstart/Dockerfile'
+      - 'scripts/deployment_outputs.py'
       - 'scripts/upgrade.sh'
       - 'scripts/lib/common.sh'
       - 'scripts/spec-golden.sh'
@@ -67,7 +70,8 @@ jobs:
       - name: Start Stellar quickstart (local mode)
         run: |
           docker rm -f quickstart-local 2>/dev/null || true
-          docker run -d -p 8000:8000 --name quickstart-local stellar/quickstart --local --core-log-level error
+          QUICKSTART_IMAGE=$(awk '/^FROM /{print $2}' .github/quickstart/Dockerfile)
+          docker run -d -p 8000:8000 --name quickstart-local "$QUICKSTART_IMAGE" --local --core-log-level error
           # wait for Horizon + Soroban RPC to be healthy
           for i in $(seq 1 80); do
             if curl -s http://localhost:8000/ >/dev/null && curl -s http://localhost:8000/soroban-rpc >/dev/null; then
@@ -105,7 +109,13 @@ jobs:
           IDENTITY: deployer
         run: |
           set -o pipefail
-          bash scripts/deploy.sh
+          bash scripts/deploy.sh --watcher "$(stellar keys address deployer)"
+          bash scripts/deploy.sh | tee "$RUNNER_TEMP/deploy.log"
+
+      - name: Capture deployed contract IDs from deploy.sh output
+        id: deployed
+        run: |
+          python3 -I scripts/deployment_outputs.py < "$RUNNER_TEMP/deploy.log" >> "$GITHUB_OUTPUT"
 
       - name: Verify deployed contracts via get_configuration + get_watchers
         env:
@@ -114,42 +124,68 @@ jobs:
           NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
           STELLAR_IDENTITY: deployer
           IDENTITY: deployer
+          ALERT_ID: ${{ steps.deployed.outputs.alert_id }}
+          WATCHER_ID: ${{ steps.deployed.outputs.watcher_id }}
         run: |
           set -o pipefail
-          ALERT_ID=$(stellar keys address deployer 2>/dev/null || true)
-          # re-read the deployed alert id from the deploy step output (derive via horizon)
-          echo "Verifying deployed alert registry + watcher registry on local quickstart..."
-          # The deploy step above printed the contract IDs; re-derive them from horizon
-          ALERT_ID=$(curl -s "http://localhost:8000/accounts/$(stellar keys address deployer)" | \
-            python3 -c "import sys,json; a=json.load(sys.stdin); print([b for b in a['balances'] if b.get('contract_version')][0]['asset_type'])" 2>/dev/null || true)
-          echo "alert contract id lookup: $ALERT_ID"
-          # Simpler: re-derive via the scpt invoked in deploy.sh (the IDs are in deploy log)
-          # We'll re-run deploy.sh with a marker contract id file to capture IDs.
-          exit 0
+          ADMIN_ADDR=$(stellar keys address deployer)
+          invoke() {
+            stellar contract invoke --id "$1" --source deployer --network local \
+              --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE" -- "${@:2}"
+          }
 
-      - name: Run upgrade.sh against the deployed alert registry
+          ALERT_CONFIG=$(invoke "$ALERT_ID" get_configuration)
+          echo "alert get_configuration: $ALERT_CONFIG"
+          echo "$ALERT_CONFIG" | ADMIN_ADDR="$ADMIN_ADDR" WATCHER_ID="$WATCHER_ID" python3 -I -c '
+          import json, os, sys
+          config = json.load(sys.stdin)
+          assert config["admin"] == os.environ["ADMIN_ADDR"], f"admin mismatch: {config}"
+          assert config["paused"] is False, f"alert registry paused: {config}"
+          assert config["watcher_registry"] == os.environ["WATCHER_ID"], f"watcher registry not gated: {config}"
+          '
+
+          WATCHERS=$(invoke "$WATCHER_ID" get_watchers)
+          echo "watcher get_watchers: $WATCHERS"
+          echo "$WATCHERS" | python3 -I -c '
+          import json, sys
+          watchers = json.load(sys.stdin)
+          assert isinstance(watchers, list), f"get_watchers did not return a list: {watchers}"
+          '
+
+          WATCHER_ADMIN=$(invoke "$WATCHER_ID" get_admin)
+          [[ "$WATCHER_ADMIN" == *"$ADMIN_ADDR"* ]] || { echo "watcher admin mismatch: expected $ADMIN_ADDR, got $WATCHER_ADMIN" >&2; exit 1; }
+          echo "verify OK"
+
+      - name: Upgrade deployed alert registry and verify on-chain WASM hash
         env:
           NETWORK: local
           RPC_URL: http://localhost:8000/soroban-rpc
           NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
           STELLAR_IDENTITY: deployer
           IDENTITY: deployer
+          ALERT_ID: ${{ steps.deployed.outputs.alert_id }}
         run: |
           set -o pipefail
+          ADMIN_ADDR=$(stellar keys address deployer)
           # upgrade the already-deployed alert registry to the same WASM hash (idempotent smoke)
-          ALERT_ID=$(curl -s "http://localhost:8000/accounts/$(stellar keys address deployer)" | python3 -c "import sys,json; a=json.load(sys.stdin); print([c for c in a.get('signers',[]) if c.get('weight',0)>0][0]['key'])" 2>/dev/null || true)
-          echo "upgrading alert id=$ALERT_ID"
           NEW_HASH=$(sha256sum target/wasm32-unknown-unknown/release/alert_registry.optimized.wasm | awk '{print $1}')
+          echo "upgrading alert id=$ALERT_ID to wasm=$NEW_HASH"
           stellar contract invoke \
             --id "$ALERT_ID" \
             --source deployer \
             --network local \
-            --rpc-url http://localhost:8000/soroban-rpc \
-            --network-passphrase "Standalone Network ; February 2017" \
+            --rpc-url "$RPC_URL" \
+            --network-passphrase "$NETWORK_PASSPHRASE" \
             -- upgrade \
-            --admin "$(stellar keys address deployer)" \
+            --admin "$ADMIN_ADDR" \
             --new_wasm_hash "$NEW_HASH"
-          echo "upgrade OK"
+          # fetch the code the contract now runs and check it matches the expected hash
+          stellar contract fetch --id "$ALERT_ID" --network local \
+            --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE" \
+            --out-file "$RUNNER_TEMP/alert_after_upgrade.wasm"
+          ON_CHAIN_HASH=$(sha256sum "$RUNNER_TEMP/alert_after_upgrade.wasm" | awk '{print $1}')
+          [[ "$ON_CHAIN_HASH" == "$NEW_HASH" ]] || { echo "on-chain hash $ON_CHAIN_HASH != expected $NEW_HASH" >&2; exit 1; }
+          echo "upgrade OK: on-chain wasm hash $ON_CHAIN_HASH"
 
       - name: Tear down quickstart
         if: always()

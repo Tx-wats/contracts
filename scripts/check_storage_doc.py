@@ -8,6 +8,11 @@ Checks:
    in that contract's section of docs/storage.md.
 2. Every `DataKey` variant appears by name in a row of that contract's
    "Storage Tier Summary" entry.
+3. Every `instance_key` constant (e.g. `GUARDIAN`, `SCHEMAV`) declared in a
+   contract appears as `instance_key::<NAME>` in that contract's section of
+   docs/storage.md.
+4. Every `instance_key` constant appears by name in a row of that contract's
+   "Storage Tier Summary" entry.
 """
 
 import os
@@ -41,6 +46,20 @@ def extract_data_keys(file_path: str) -> set:
     body = re.sub(r"///[^\n]*", "", match.group(1))
     body = re.sub(r"\([^()]*\)", "", body)
     return set(re.findall(r"^\s*([A-Z][A-Za-z0-9]*)\s*,", body, re.MULTILINE))
+
+
+def extract_instance_keys(file_path: str) -> set:
+    """Extract the names of `instance_key` constants in contract source."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Matches e.g. `const GUARDIAN: Symbol = instance_key("GUARDIAN");`
+    return set(
+        re.findall(
+            r"const\s+([A-Z][A-Za-z0-9_]*)\s*:[^=]*=\s*instance_key\s*\(",
+            content,
+        )
+    )
 
 
 def parse_doc_sections(doc_path: str) -> tuple:
@@ -104,14 +123,35 @@ def main():
                 print(f"   - {v}")
             has_error = True
 
-        if not undocumented and not unsummarised:
-            print(f"✅ {contract_name} storage documentation is in sync with DataKey.")
+        # Check 3: instance_key constant missing from the contract's key table
+        instance_keys = extract_instance_keys(source_file)
+        print(f"instance_key constants: {sorted(instance_keys)}")
+
+        undocumented_keys = {
+            k for k in instance_keys if f"instance_key::{k}" not in sections[contract_name]
+        }
+        if undocumented_keys:
+            print(f"❌ ERROR: instance_key constants in {contract_name} missing from docs/storage.md key table:")
+            for k in sorted(undocumented_keys):
+                print(f"   - instance_key::{k}")
+            has_error = True
+
+        # Check 4: instance_key constant missing from the tier summary
+        unsummarised_keys = {k for k in instance_keys if f"`{k}`" not in summary}
+        if unsummarised_keys:
+            print(f"❌ ERROR: instance_key constants in {contract_name} missing from the Storage Tier Summary:")
+            for k in sorted(unsummarised_keys):
+                print(f"   - {k}")
+            has_error = True
+
+        if not undocumented and not unsummarised and not undocumented_keys and not unsummarised_keys:
+            print(f"✅ {contract_name} storage documentation is in sync with DataKey and instance_key.")
 
     if has_error:
-        print("\n❌ Storage documentation check failed! Please update docs/storage.md to match DataKey.")
+        print("\n❌ Storage documentation check failed! Please update docs/storage.md to match DataKey and instance_key.")
         sys.exit(1)
     else:
-        print("\n✅ All DataKey variants are documented in docs/storage.md.")
+        print("\n✅ All DataKey variants and instance_key constants are documented in docs/storage.md.")
         sys.exit(0)
 
 

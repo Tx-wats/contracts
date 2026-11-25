@@ -11,8 +11,53 @@ permissions:
   contents: read
 
 jobs:
+  # Fast gate: formatting and parse/type errors surface here in seconds, before
+  # the WASM builds and test jobs (which `needs: syntax`) start.
+  syntax:
+    name: Syntax (rustfmt + cargo check)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve pinned toolchain
+        id: rust
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772115f6ec1 # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-syntax-${{ steps.rust.outputs.channel }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-syntax-${{ steps.rust.outputs.channel }}-
+
+      # One rustfmt run per file: the first failing file stops the job and is
+      # named in the log, instead of a single workspace-wide diff.
+      - name: rustfmt --check (per file)
+        run: |
+          for f in $(git ls-files '*.rs'); do
+            echo "rustfmt --check $f"
+            rustfmt --check --edition 2021 "$f"
+          done
+
+      # Type-checks every target, including #[cfg(test)] modules, on the host.
+      - name: cargo check (all targets)
+        run: cargo check --workspace --all-targets --locked
+
   ci:
     runs-on: ubuntu-latest
+    needs: syntax
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,6 +146,7 @@ jobs:
   bindings-check:
     name: Check TypeScript bindings
     runs-on: ubuntu-latest
+    needs: syntax
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -144,8 +190,10 @@ jobs:
 
       - name: Build and test Alert Registry bindings
         run: |
+          export CONTRACT_ID=$(python3 scripts/deployment_address.py --network testnet --contract "Alert Registry")
           cd bindings/alert-registry
           npm install
+          npm run generate
           npm run build
           npm test
 
@@ -199,6 +247,11 @@ jobs:
         run: bash scripts/check-events-doc.sh
       - name: Check storage documentation
         run: python3 scripts/check_storage_doc.py
+      - name: Check function documentation
+        run: python3 scripts/check_function_docs.py
+      # Merge-splice leftovers: duplicated doc paragraphs, repeated # Events/# Errors, stacked #[deprecated]
+      - name: Check doc comments for merge leftovers
+        run: python3 scripts/check_doc_comments.py
 
   # Issue #103, #282 — Code coverage reporting on pinned toolchain with llvm-tools-preview
   coverage:
@@ -223,6 +276,13 @@ jobs:
 
       - name: Generate code coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+      # Per-crate line-coverage floors (threshold not yet calibrated; see docs/testing.md)
+      - name: Enforce alert-registry coverage floor
+        run: cargo llvm-cov -p alert-registry --locked --fail-under-lines 60
+
+      - name: Enforce watcher-registry coverage floor
+        run: cargo llvm-cov -p watcher-registry --locked --fail-under-lines 60
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -292,9 +352,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run actionlint
-        run: |
-          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
-          ./actionlint -color
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          version: 1.7.7
 
   # Issue #102 — PR-time dependency diffing and review
   dependency-review:

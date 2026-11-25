@@ -24,7 +24,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.release_tag }}
 
@@ -93,9 +93,9 @@ jobs:
         env:
           STELLAR_IDENTITY: deployer
           NETWORK: mainnet
-        run: bash scripts/deploy.sh --network mainnet
+        run: bash scripts/deploy.sh --network mainnet --yes --watcher "${{ vars.MAINNET_WATCHER_ADDRESS }}"
         run: |
-          OUTPUT=$(bash scripts/deploy.sh --network mainnet 2>&1)
+          OUTPUT=$(bash scripts/deploy.sh --network mainnet --yes --watcher "${{ vars.MAINNET_WATCHER_ADDRESS }}" 2>&1)
           echo "$OUTPUT"
           python3 scripts/deployment_outputs.py <<< "$OUTPUT" >> "$GITHUB_OUTPUT"
 
@@ -111,7 +111,6 @@ jobs:
             --alert-hash "${{ steps.deploy.outputs.alert_hash }}" \
             --watcher-hash "${{ steps.deploy.outputs.watcher_hash }}" \
             --tag "$RELEASE_TAG" \
-            --tag "${{ github.event.inputs.release_tag }}" \
             --notes "Production mainnet release"
 
       # Issue #290 — Include WASM hashes in PR body

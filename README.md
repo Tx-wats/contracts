@@ -89,6 +89,99 @@ The system is centered around three data-flow steps:
 
 This keeps alert configuration on-chain while letting watcher nodes perform off-chain polling and delivery.
 
+## Feature overview
+
+One CLI example per feature beyond basic register/update/remove. Full function lists are in the [Invoking Contracts](#invoking-contracts-stellar-cli) cheatsheet below.
+
+**Snooze an alert** until a ledger sequence. The alert stays active, but active-filtered reads skip it until then. Pass a past or current ledger to end the snooze early:
+
+```bash
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- snooze_alert \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --until_ledger 1234567
+```
+
+**Tag an alert** (e.g. `prod`, `treasury`). Replaces all existing tags; pass `[]` to clear:
+
+```bash
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- set_alert_tags \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --tags '["prod","treasury"]'
+```
+
+**Expire an alert** automatically at a ledger. Omit `--active_until_ledger` to clear the expiry:
+
+```bash
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- set_alert_expiry \
+  --caller <OWNER_ADDRESS> \
+  --config_id 1 \
+  --active_until_ledger 1234567
+```
+
+**Remove all of your alerts.** Each call removes a bounded batch and returns the number processed; call again until it returns `0`:
+
+```bash
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> \
+  --network testnet \
+  -- remove_all_alerts \
+  --caller <OWNER_ADDRESS>
+```
+
+**Set the pause-only guardian** (admin only). The guardian can call `pause` but never `unpause`:
+
+```bash
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- set_guardian \
+  --admin <ADMIN_ADDRESS> \
+  --guardian <GUARDIAN_ADDRESS>
+```
+
+**Migrate the schema** (admin only). Pass `from` as the current version from `get_schema_version`, and feed the returned cursor back in until the version reads `to`:
+
+```bash
+stellar contract invoke \
+  --id <ALERT_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- migrate \
+  --caller <ADMIN_ADDRESS> \
+  --from 1 \
+  --to 2 \
+  --cursor 0
+```
+
+**Scope a watcher** (admin only) to specific target contracts. An empty list removes the restriction:
+
+```bash
+stellar contract invoke \
+  --id <WATCHER_REGISTRY_CONTRACT_ID> \
+  --source <ADMIN_IDENTITY> \
+  --network testnet \
+  -- set_watcher_scope \
+  --admin <ADMIN_ADDRESS> \
+  --watcher <WATCHER_ADDRESS> \
+  --scope '["<WATCHED_CONTRACT_ADDRESS>"]'
+```
+
 ## Stellar Integration
 
 ### Network Configuration
@@ -108,6 +201,8 @@ horizon_url   = "https://horizon.stellar.org"
 ### Invoking Contracts (Stellar CLI)
 
 Below is a consolidated cheatsheet with copy-pasteable `stellar contract invoke` examples for every public function across both contracts, grouped to mirror the reference documentation in [docs/alert-registry.md](docs/alert-registry.md) and [docs/watcher-registry.md](docs/watcher-registry.md).
+
+Alert Registry functions that have no example above have reference sections in [docs/alert-registry.md](docs/alert-registry.md): [`snooze_alert`](docs/alert-registry.md#snooze_alert), [`set_alert_tags`](docs/alert-registry.md#set_alert_tags), [`get_alert_tags`](docs/alert-registry.md#get_alert_tags), [`set_alert_expiry`](docs/alert-registry.md#set_alert_expiry), [`is_alert_expired`](docs/alert-registry.md#is_alert_expired), [`remove_all_alerts`](docs/alert-registry.md#remove_all_alerts), [`update_alert_checked`](docs/alert-registry.md#update_alert_checked), [`set_alert_active_checked`](docs/alert-registry.md#set_alert_active_checked), [`get_alerts_by_owner_for_contract`](docs/alert-registry.md#get_alerts_by_owner_for_contract), [`cancel_webhook_proposal`](docs/alert-registry.md#cancel_webhook_proposal), [`propose_admin_transfer`](docs/alert-registry.md#propose_admin_transfer), [`clear_guardian`](docs/alert-registry.md#clear_guardian), [`get_schema_version`](docs/alert-registry.md#get_schema_version), [`set_global_alert_limit`](docs/alert-registry.md#set_global_alert_limit), [`get_global_alert_limit`](docs/alert-registry.md#get_global_alert_limit), [`set_per_contract_alert_limit`](docs/alert-registry.md#set_per_contract_alert_limit), [`get_per_contract_alert_limit`](docs/alert-registry.md#get_per_contract_alert_limit), [`get_active_contract_alert_count`](docs/alert-registry.md#get_active_contract_alert_count), [`get_active_contract_alerts_paginated`](docs/alert-registry.md#get_active_contract_alerts_paginated), [`get_alert_owner`](docs/alert-registry.md#get_alert_owner), [`get_active_alert_count`](docs/alert-registry.md#get_active_alert_count), [`bump_instance_ttl`](docs/alert-registry.md#bump_instance_ttl), [`is_paused`](docs/alert-registry.md#is_paused), and [`validate_rules`](docs/alert-registry.md#validate_rules).
 
 #### Alert Registry (`ALERT_REGISTRY_CONTRACT_ID`)
 

@@ -20,12 +20,7 @@ LOCAL_HASH=$(sha256sum "$WASM" | awk '{print $1}')
 echo "==> Local WASM hash:    $LOCAL_HASH"
 
 # Fetch deployed WASM hash via Stellar CLI
-DEPLOYED_HASH=$(stellar contract info \
-  --id "$CONTRACT_ID" \
-  --network "$NETWORK" \
-  --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE" \
-  | grep -i "wasm hash" | awk '{print $NF}' | tr -d '"')
+DEPLOYED_HASH=$(deployed_wasm_hash "$CONTRACT_ID")
 echo "==> Deployed WASM hash: $DEPLOYED_HASH"
 
 if [[ "$LOCAL_HASH" == "$DEPLOYED_HASH" ]]; then

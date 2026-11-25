@@ -9,6 +9,17 @@ The contract supports:
 - **Admin-controlled system parameters**: Initialization, administrative handover, per-owner active alert limits, administrative alert deletion, and configuration of an optional `WatcherRegistry` contract for read access gating.
 - **Optional timelock governance**: A configurable `TimelockDelay` that gates WASM upgrades and admin transfers behind a `propose`/`execute`/`cancel` flow.
 - **Read-access queries**: Direct lookup by ID, active status queries, queries by target contract or owner, paginated query variants, and optional cross-contract watcher-gating.
+- **Optional pause-only guardian**: An admin-appointed `guardian` (`set_guardian`) may trip the circuit-breaker with `pause` but can never `unpause` or perform any other admin action. The guardian survives admin handover.
+
+---
+
+## Actors
+
+| Actor | Authority |
+|---|---|
+| **Admin** | Full administrative control: limits, watcher registry, guardian assignment, `pause` / `unpause`, timelocked `upgrade` and admin transfer. Only the admin can `unpause`. |
+| **Guardian** (optional) | May call `pause` only. Cannot `unpause`, upgrade, change limits, rotate the watcher registry, remove or modify alerts, or transfer admin. |
+| **Alert Owner** | Mutates its own alerts only, subject to the pause (see Pending State). |
 
 ---
 
@@ -16,6 +27,7 @@ The contract supports:
 
 | Asset | Description |
 |---|---|
+| **Guardian Address & Pause State** | The optional `GUARDIAN` address (`get_guardian`) and the `PAUSED` flag (`is_paused`). While `PAUSED` is set, every state-mutating entry point except the documented exemptions returns `ContractError::Paused`. Both live in instance storage. |
 | **Alert Configurations** | The on-chain `AlertConfig` records (target contracts, rules, labels, active status, and owner associations) stored under `DataKey::Alert(id)`. |
 | **Webhook Endpoints & Hashes** | SHA-256 hex digests (`webhook_hash` and staged `pending_webhook_hash`) that off-chain watcher nodes use to authenticate destination webhook URLs. |
 | **Owner & Contract Indices** | The lookup indexes mapping owners to alert IDs (`DataKey::OwnerIndex`) and watched contracts to alert IDs (`DataKey::ContractIndex`). |
@@ -37,6 +49,7 @@ The contract supports:
 - **WatcherRegistry Trust (when configured)**: If a `WatcherRegistry` address is configured via `set_watcher_registry`, `AlertRegistry` trusts `WatcherRegistryClient::is_watcher_authorized` to accurately report whether a querying address is an authorized watcher node.
 - **Off-Chain Watcher Node Fidelity**: Watcher nodes are assumed to faithfully read on-chain alert configs, match event triggers against registered rule descriptors, and dispatch HTTP notifications only to endpoints whose SHA-256 hash matches the on-chain record.
 - **Ledger Time Progression**: The timelock relies on the ledger timestamp advancing monotonically; the delay is measured against the ledger time recorded at proposal time.
+- **Guardian Key Scope**: The guardian key is trusted only to pause. It is expected to be a low-trust on-call or monitoring key that can be rotated often. A guardian that pauses maliciously is contained by the admin's `unpause`, not prevented from pausing.
 
 ---
 
@@ -66,6 +79,10 @@ The contract supports:
 - **Gated Query Access**: When `WatcherRegistry` is configured, read queries (`get_alerts_for_contract`, `get_alerts_by_owner`, `get_active_alerts_for_contract`, `get_alerts_by_ids`, `get_alert`, `get_alert_active`, and paginated variants) cross-call `WatcherRegistry::is_watcher_authorized` with the `querier` address. Unauthorized queriers are rejected with `ContractError::NotAWatcher`.
 - **Fail-Closed Verification**: If watcher-gating is enabled and the querying address is not registered, alert data is withheld.
 - **Configuration-Time Address Validation**: `set_watcher_registry` probes the candidate address with a read-only `is_watcher_authorized` call *before* persisting it, rejecting a non-contract address or a contract that does not implement the `WatcherRegistry` interface with `InvalidWatcherRegistry`. This prevents a misconfigured address from being stored and later panicking inside `assert_watcher_if_configured` on every gated read — previously the failure surfaced only at query time rather than at configuration time.
+- **Public Registration Event Exposure (#585)**: `alert.register` emits a public `("alert", "register")` event, and events are visible to every indexer. An event that carries the full alert configuration (label, webhook hash and rules — see #402) therefore defeats watcher-gating as a privacy mechanism for alert *contents*. The contract now branches on `is_watcher_gating_enabled`:
+  - **Ungated deployments** (no `WatcherRegistry` configured) emit the full-config event `(EVENT_SCHEMA_VERSION, id, owner, target_contract, label, webhook_hash, rules)`. When gating is not the privacy mechanism this lets an indexer populate its view from the event alone, instead of making a follow-up `get_alert` call that would itself fail in gated mode unless the indexer is a registered watcher.
+  - **Gated deployments** emit only `(EVENT_SCHEMA_VERSION_REDACTED, id)`, so an indexer learns that an alert was registered and its `id`, but not its contents. A registered watcher still reads the full configuration through `get_alert`.
+- **Residual Exposure**: Watcher-gating controls read access to alert *contents*; it does not conceal the *existence* of a registration. Even when gated, the public `alert.register` event reveals that an alert was created, its `id`, the registration ledger, and any metadata derivable from the event sequence (e.g. registration cadence). Indexers can distinguish the two payloads by the leading schema version (`EVENT_SCHEMA_VERSION` vs `EVENT_SCHEMA_VERSION_REDACTED`). Deployments that enable gating after operating ungated have already published historical full-config events, which cannot be retroactively redacted. Treat watcher-gating as access control over alert contents, not as a privacy guarantee over the public event stream.
 
 ### 6. Storage Expiry & Sync Drift
 - **Automatic TTL Extension**: Every state-modifying call automatically extends persistent storage TTLs by `DEFAULT_TTL` (~24 hours).
@@ -91,13 +108,16 @@ The contract supports:
 - **Off-Chain Watcher Misbehavior or Collusion**: Once an address is registered as an authorized watcher in `WatcherRegistry`, `AlertRegistry` cannot detect if that watcher fails to dispatch alerts, alters event payloads, or leaks subscription data off-chain.
 - **Mempool Front-Running & Observation**: Proposed webhook hashes, rule updates, and admin transactions are visible in the public mempool before transaction inclusion.
 - **Storage Expiry from Prolonged Inactivity**: If an alert is neither written to, renewed, nor bumped for more than its remaining TTL ledgers, Stellar will archive the persistent storage entry. Archival recovery requires off-chain state restoration.
+- **Guardian Key Compromise (Pause Only)**: A compromised guardian key can freeze the registry at will. It cannot unpause, upgrade, or touch alerts, so the harm is a denial of service that lasts until the admin unpauses. See Attack Scenario 10.
+- **Pause Outlasting Alert TTL**: While paused, `renew_alert_ttl` and `bump_alert` are blocked. A pause longer than an alert's remaining persistent TTL can archive that alert, and restoring it requires off-chain state restoration. See Attack Scenario 9.
+- **Pause With No Reachable Admin**: `unpause` and `upgrade` both require the admin key. If the admin key is lost while the registry is paused, no in-contract path exists to resume operation.
 - **Multi-Sig Governance**: The admin role is a single address. The optional `TimelockDelay` provides a time-based safety window for `upgrade` and `TransferAdmin`, but it is not a multi-signature scheme; external multi-sig accounts must still be used where multiple approvers are required. When no `TimelockDelay` is configured (delay of zero), `upgrade` and `TransferAdmin` execute immediately.
 
 ---
 
 ## Pending State
 
-`AlertRegistry` holds three kinds of staged state between transactions. Each is authority or routing that can be exercised after the situation it was proposed in has changed, so each is checked against that change.
+`AlertRegistry` holds three kinds of staged state between transactions, plus the guardian's standing authority. Each is authority or routing that can be exercised after the situation it was proposed in has changed, so each is checked against that change.
 
 ### Stale proposals
 
@@ -106,6 +126,13 @@ The contract supports:
 | `PendingAdminTransfer` | `propose_admin_transfer` | `ADMIN_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers, about 7 days) | `accept_admin_transfer`, `cancel_admin_transfer`, or `transfer_admin` |
 | `PendingTransfer(alert_id)` | `propose_alert_transfer` | `ALERT_TRANSFER_EXPIRY_LEDGERS` (120,960 ledgers) | `accept_alert_transfer`, `reject_alert_transfer`, or `cancel_alert_transfer` |
 | `pending_webhook_hash` on each `AlertConfig` | `propose_webhook` | `WEBHOOK_PROPOSAL_EXPIRY_LEDGERS` (120,960 ledgers) | `confirm_webhook`, `cancel_webhook_proposal`, a re-proposal, or `update_webhook` |
+
+### Guardian state (no expiry)
+
+| State | Created by | Expiry | Cleared when |
+|---|---|---|---|
+| `GUARDIAN` address | `set_guardian` (admin) | None. It persists until removed. | `clear_guardian` or `set_guardian` with a new address. **Not** cleared by `transfer_admin` or `accept_admin_transfer`. |
+| `PAUSED` flag | `pause` (admin or guardian) | None. The pause lasts until lifted. | `unpause` (admin only). Pending proposals expire on their normal schedule while paused, but cannot be accepted until the pause lifts. |
 
 ### Attack scenarios
 
@@ -121,6 +148,8 @@ The contract supports:
 - `pause` blocks `propose_admin_transfer` and `accept_admin_transfer`. `cancel_admin_transfer` remains available while paused, so an admin can revoke a pending proposal during an incident.
 - `update_webhook` supersedes any staged rotation.
 - Owners can cancel their own proposals with `cancel_webhook_proposal` and `cancel_alert_transfer`.
+- `clear_guardian` is not blocked by the pause, so the admin can remove a compromised guardian while the registry is paused. Clear the guardian before calling `unpause`; otherwise the guardian can re-pause immediately after the unpause.
+- After any admin handover, the new admin should confirm `get_guardian` and clear any guardian it did not appoint, because the guardian survives `transfer_admin`.
 
 ### Operator checks
 
@@ -133,11 +162,17 @@ stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> --
 
 # Staged webhook rotation: pending_webhook_hash should be null unless you are mid-rotation
 stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_alert --querier <QUERIER_ADDRESS> --config_id <CONFIG_ID>
+
+# Guardian: should be the address you appointed, or None; check it after every admin handover
+stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> -- get_guardian
+
+# Pause state: false unless an incident is in progress
+stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> -- is_paused
 ```
 
 - None of the getters return the expiry ledger for a pending webhook rotation. Use the `alert.wh_prop` event ledger, and treat a rotation older than 120,960 ledgers as stale.
 - Stale admin proposals are cleared with `cancel_admin_transfer`. Stale alert transfers and webhook rotations are cleared by the owner with `cancel_alert_transfer` and `cancel_webhook_proposal`.
-- Audit `("admin", "transfer")`, `("admin", "pause")`, `("alert", "xfer_prop")`, `("alert", "wh_prop")`, and `("alert", "wh_conf")` for the period since the last check.
+- Audit `("admin", "transfer")`, `("admin", "pause")`, `("admin", "guardian")`, `("alert", "xfer_prop")`, `("alert", "wh_prop")`, and `("alert", "wh_conf")` for the period since the last check.
 
 ---
 
@@ -176,6 +211,16 @@ stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> --
 - **Vector**: Attacker (or a compromised admin) pauses the contract and then attempts to `upgrade` or `TransferAdmin` immediately, hoping the paused state provides a shortcut.
 - **Outcome**: The timelock gating is enforced regardless of paused state. The change still requires a prior `propose` and must wait for the delay to elapse; early execution fails with `ContractError::TimelockNotElapsed`.
 
+### 9. Guardian Griefing via Pause
+- **Vector**: A guardian key, or a monitoring bot holding it, pauses the registry and keeps it paused. Only the admin can lift the pause, so the guardian can keep the registry frozen for as long as it likes.
+- **Outcome**: While paused, every owner mutator (`register_alert`, `update_alert`, `set_alert_active`, `update_webhook`, `remove_alert`, and others) returns `ContractError::Paused`. Owners cannot respond to an incident on their own alerts. Pending proposals keep expiring on their normal schedule but cannot be accepted. `renew_alert_ttl` and `bump_alert` are also blocked, so persistent entries age toward archival with no way to extend them during the pause. A pause longer than an alert's remaining TTL can archive that alert.
+- **Mitigation**: The admin calls `unpause`. The guardian cannot lift its own pause, and `pause` is idempotent, so repeated calls add no new power. Operators should treat any pause as a clock and unpause before the shortest remaining alert TTL expires. Monitor `("admin", "pause")` events and page the admin when one is emitted.
+
+### 10. Compromised Guardian Key
+- **Vector**: An attacker obtains the guardian key and calls `pause`, then re-pauses after the admin unpauses.
+- **Outcome**: The attacker can freeze the registry (as in Scenario 9). It cannot `unpause`, upgrade, change limits, rotate the watcher registry, remove alerts, or transfer admin. The attacker has no path to alert data or to control of the admin role.
+- **Mitigation**: The admin calls `clear_guardian` first, then `unpause`. `clear_guardian` is not blocked while paused, and clearing first means the attacker's key can no longer call `pause` when the admin lifts the pause. Soroban transactions carry one contract invocation each, so these two calls cannot be made atomic. Confirm the removal with `get_guardian` and the pause state with `is_paused`.
+
 ---
 
 ## Security Properties Summary
@@ -192,6 +237,7 @@ stellar contract invoke --id <ALERT_REGISTRY_CONTRACT_ID> --network <NETWORK> --
 | **Rule Descriptor Validation** | Bounded list (<= 50) + recognized prefix check | ✅ Enforced |
 | **Safe TTL Extension & Clamping** | `bump_alert` clamped to `MAX_TTL`; write-time `DEFAULT_TTL` | ✅ Enforced |
 | **Timelocked Upgrade & Admin Transfer** | Optional `TimelockDelay` with `propose`/`execute`/`cancel`; raise-only delay; enforced even while paused | ✅ Enforced (when configured) |
+| **Guardian Pause-Only Scope** | `assert_admin_or_guardian` on `pause`; `unpause` requires admin auth | ✅ Enforced (when configured) |
 | **Re-entrancy Protection** | Soroban atomic execution model + synchronous updates | ✅ Protocol Guarantee |
 | **Replay Protection** | Stellar transaction sequence numbers | ✅ Protocol Guarantee |
 | **Off-Chain Watcher Fidelity** | Off-chain node integrity | ❌ External / Out of Scope |

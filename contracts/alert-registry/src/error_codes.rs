@@ -47,8 +47,10 @@ mod tests {
         assert_eq!(ContractError::TimelockRequired as u32, 28);
         assert_eq!(ContractError::InvalidTtl as u32, 26);
         assert_eq!(ContractError::EmptyRules as u32, 25);
-        assert_eq!(ContractError::AdminTransferExpired as u32, 24);
-        assert_eq!(ContractError::NotAGuardian as u32, 24);
+        assert_eq!(ContractError::AdminTransferExpired as u32, 34);
+        assert_eq!(ContractError::NotAGuardian as u32, 35);
         assert_eq!(ContractError::WebhookProposalExpired as u32, 29);
+        assert_eq!(ContractError::RevisionMismatch as u32, 30);
+        assert_eq!(ContractError::TooManyTags as u32, 36);
     }
 }

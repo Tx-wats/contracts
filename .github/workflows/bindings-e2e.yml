@@ -11,6 +11,7 @@ on:
     paths:
       - 'bindings/**'
       - 'scripts/deploy.sh'
+      - '.github/quickstart/Dockerfile'
       - 'scripts/lib/common.sh'
       - 'scripts/update-spec-golden.sh'
       - 'scripts/spec-golden.sh'
@@ -67,7 +68,8 @@ jobs:
       - name: Start Stellar quickstart (local mode)
         run: |
           docker rm -f quickstart-local 2>/dev/null || true
-          docker run -d -p 8000:8000 --name quickstart-local stellar/quickstart --local --core-log-level error
+          QUICKSTART_IMAGE=$(awk '/^FROM /{print $2}' .github/quickstart/Dockerfile)
+          docker run -d -p 8000:8000 --name quickstart-local "$QUICKSTART_IMAGE" --local --core-log-level error
           for i in $(seq 1 80); do
             if curl -s http://localhost:8000/ >/dev/null && curl -s http://localhost:8000/soroban-rpc >/dev/null; then
               echo "quickstart ready after ${i}s"
@@ -93,6 +95,7 @@ jobs:
           curl -s "http://localhost:8000/friendbot?addr=${ADMIN_ADDR}" > /dev/null
 
       - name: Deploy alert registry to local quickstart
+        id: deploy
         env:
           NETWORK: local
           RPC_URL: http://localhost:8000/soroban-rpc
@@ -102,7 +105,7 @@ jobs:
           IDENTITY: deployer
         run: |
           set -o pipefail
-          bash scripts/deploy.sh
+          bash scripts/deploy.sh --watcher "$(stellar keys address deployer)"
 
       - name: Install Node + run bindings e2e
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -112,13 +115,18 @@ jobs:
         working-directory: bindings/alert-registry
         run: |
           npm ci || npm install
+          export CONTRACT_ID=$(python3 ../../scripts/deployment_address.py --network testnet --contract "Alert Registry")
+          npm run generate
           npm run build
       - name: Run bindings e2e test
         working-directory: bindings/alert-registry
         env:
           SOROBAN_RPC_URL: http://localhost:8000/soroban-rpc
-          NETWORKS_TESTNET_RPC_URL: http://localhost:8000/soroban-rpc
+          SOROBAN_CONTRACT_ID: ${{ steps.deploy.outputs.alert_id }}
         run: |
+          # Fail rather than let the suite skip silently (same gate as e2e.test.ts).
+          [[ "$SOROBAN_CONTRACT_ID" =~ ^C[A-Z2-7]{55}$ ]] || { echo "bad contract id: '$SOROBAN_CONTRACT_ID'"; exit 1; }
+          export SOROBAN_SECRET_KEY="$(stellar keys show deployer)"
           npm test
 
       - name: Tear down quickstart

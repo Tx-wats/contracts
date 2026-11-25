@@ -185,7 +185,6 @@ fn test_regression_transfer_admin_emitted_no_event() {
     let (env, admin, client) = setup();
     let new_admin = Address::generate(&env);
 
-
     let events_before = env.events().all().len();
     assert_eq!(
         client.try_transfer_admin(&admin, &new_admin).unwrap(),
@@ -213,7 +212,6 @@ fn test_regression_remove_alert_by_admin_missing() {
     let (env, admin, client) = setup();
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
-
 
     let id = client.register_alert(
         &owner,
@@ -1024,6 +1022,8 @@ fn test_regression_active_count_follows_transfer() {
 
     assert_eq!(client.get_active_alert_count(&owner), 0);
     assert_eq!(client.get_active_alert_count(&recipient), 1);
+}
+
 /// Regression test for #383: `get_alert_ids_by_owner` returned the raw owner
 /// index, so an ID whose record had already been removed was still reported as
 /// if the alert existed. It now filters out those dangling IDs.
@@ -1796,10 +1796,14 @@ fn test_regression_deactivate_alert_by_admin_is_idempotent() {
     assert_eq!(third.updated_at, 3_000);
     assert_eq!(third.updated_ledger, 30);
     assert_eq!(env.events().all().len(), 1);
+}
+
 fn alert_ttl(env: &Env, client: &AlertRegistryClient, id: u64) -> u32 {
     use soroban_sdk::testutils::storage::Persistent as _;
     env.as_contract(&client.address, || {
-        env.storage().persistent().get_ttl(&crate::DataKey::Alert(id))
+        env.storage()
+            .persistent()
+            .get_ttl(&crate::DataKey::Alert(id))
     })
 }
 
@@ -1888,7 +1892,10 @@ fn test_regression_prune_expired_alerts_is_bounded_and_resumable() {
     let mut passes = 0;
     loop {
         let removed = client.prune_expired_alerts(&owner);
-        assert!(removed <= crate::MAX_PRUNE_PER_CALL, "a pass must be bounded");
+        assert!(
+            removed <= crate::MAX_PRUNE_PER_CALL,
+            "a pass must be bounded"
+        );
         removed_total += removed;
         passes += 1;
         if client.get_prune_cursor(&owner).is_none() {
@@ -1899,6 +1906,8 @@ fn test_regression_prune_expired_alerts_is_bounded_and_resumable() {
     assert_eq!(passes, 4);
     assert_eq!(client.get_non_removed_alert_count(&owner), 0);
     assert_eq!(client.get_alert_ids_by_owner(&owner).len(), 0);
+}
+
 /// Regression test for #378: `set_alert_active` to the current state is a
 /// no-op: no storage rewrite (`updated_ledger` unchanged) and no event.
 #[test]
@@ -2007,6 +2016,8 @@ fn test_regression_empty_rules_are_rejected() {
             .unwrap(),
         ContractError::EmptyRules
     );
+}
+
 fn last_admin_event(env: &Env, name: Symbol) -> soroban_sdk::Val {
     let events = env.events().all();
     let (_, _, data) = events
@@ -2064,13 +2075,19 @@ fn test_regression_constructor_and_admin_transfer_extend_instance_ttl() {
 
     let new_admin = Address::generate(&env);
     for step in 0..3 {
-        advance_ledgers(&env, crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1);
+        advance_ledgers(
+            &env,
+            crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1,
+        );
         match step {
             0 => client.propose_admin_transfer(&admin, &new_admin),
             1 => client.cancel_admin_transfer(&admin),
             _ => {
                 client.propose_admin_transfer(&admin, &new_admin);
-                advance_ledgers(&env, crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1);
+                advance_ledgers(
+                    &env,
+                    crate::INSTANCE_BUMP_AMOUNT - crate::INSTANCE_BUMP_THRESHOLD + 1,
+                );
                 client.accept_admin_transfer(&new_admin);
             }
         }
@@ -2092,7 +2109,10 @@ fn test_regression_pending_admin_transfer_is_exposed() {
 
     client.propose_admin_transfer(&admin, &new_admin);
     assert_eq!(client.get_pending_admin_transfer(), Some(new_admin.clone()));
-    assert_eq!(client.get_configuration().pending_admin, Some(new_admin.clone()));
+    assert_eq!(
+        client.get_configuration().pending_admin,
+        Some(new_admin.clone())
+    );
 
     client.accept_admin_transfer(&new_admin);
     assert_eq!(client.get_pending_admin_transfer(), None);
@@ -2128,6 +2148,8 @@ fn test_regression_admin_transfer_proposal_expires() {
     client.propose_admin_transfer(&admin, &new_admin);
     client.accept_admin_transfer(&new_admin);
     assert_eq!(client.get_admin(), new_admin);
+}
+
 /// Regression test for #366: `accept_admin_transfer` must be blocked while
 /// paused so a pending admin cannot complete a takeover during an incident,
 /// while `cancel_admin_transfer` stays available to revoke the proposal.
@@ -2205,6 +2227,108 @@ fn test_regression_deactivate_all_alerts_does_not_return_zero_mid_scan() {
     assert_eq!(client.deactivate_all_alerts(&owner), 0);
 }
 
+/// Regression test for #605: `alert.snooze` and `alert.tags` used to emit
+/// `(id, until_ledger)` / `(id, count)` without the caller, unlike every other
+/// owner mutation event. Both now carry the caller, and `renew_alert_ttl_for`
+/// emits the same `alert.renew` payload as `renew_alert_ttl` including the
+/// requested TTL. The payloads are versioned under `EVENT_SCHEMA_VERSION`.
+#[test]
+fn test_regression_snooze_tags_and_renew_events_include_caller_and_ttl() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let id = register(&env, &client, &owner, "A");
+
+    let last_alert_event = |name: Symbol| -> soroban_sdk::Val {
+        let events = env.events().all();
+        let (_, _, data) = events
+            .iter()
+            .rev()
+            .find(|(_, topics, _)| {
+                topics.len() == 2
+                    && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("alert")
+                    && Symbol::from_val(&env, &topics.get(1).unwrap()) == name
+            })
+            .expect("alert event must be emitted");
+        data
+    };
+
+    // alert.snooze carries (id, caller, until_ledger, version).
+    let until_ledger = env.ledger().sequence() + 100;
+    client.snooze(&owner, &id, &until_ledger);
+    let (event_id, caller, until, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("snooze")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(until, until_ledger);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+
+    // alert.tags carries (id, caller, count, version).
+    client.set_tags(&owner, &id, &vec![&env, str(&env, "tag-a"), str(&env, "tag-b")]);
+    let (event_id, caller, count, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("tags")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(count, 2);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+
+    // alert.renew from renew_alert_ttl_for carries the requested TTL.
+    client.renew_alert_ttl_for(&owner, &id, &crate::MAX_TTL);
+    let (event_id, caller, ttl, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("renew")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(ttl, crate::MAX_TTL);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+
+    // renew_alert_ttl emits the same shape with the default TTL.
+    client.renew_alert_ttl(&owner, &id);
+    let (event_id, caller, ttl, version): (u64, Address, u32, u32) =
+        FromVal::from_val(&env, &last_alert_event(symbol_short!("renew")));
+    assert_eq!(event_id, id);
+    assert_eq!(caller, owner);
+    assert_eq!(ttl, crate::DEFAULT_TTL);
+    assert_eq!(version, crate::EVENT_SCHEMA_VERSION);
+/// Regression test for #604: config-change events carry the previous value
+/// alongside the new one (and a schema version), so auditors do not have to
+/// replay every earlier event to learn what changed. The exact payload shape
+/// is pinned here so a future change to the tuple is caught.
+#[test]
+fn test_regression_config_change_events_include_old_value() {
+    let (env, admin, client) = setup();
+    let registry = Address::generate(&env);
+
+    // admin.limit: (schema_version, old, new)
+    client.set_per_owner_alert_limit(&admin, &10);
+    client.set_per_owner_alert_limit(&admin, &25);
+    let (version, old, new): (u32, u32, u32) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("limit")));
+    assert_eq!((version, old, new), (crate::EVENT_SCHEMA_VERSION, 10, 25));
+
+    // admin.timelock: (schema_version, old, new)
+    client.set_timelock(&admin, &100);
+    client.set_timelock(&admin, &250);
+    let (version, old, new): (u32, u32, u32) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("timelock")));
+    assert_eq!((version, old, new), (crate::EVENT_SCHEMA_VERSION, 100, 250));
+
+    // admin.watchreg: (schema_version, old, new)
+    client.set_watcher_registry(&admin, &registry);
+    let (version, old, new): (u32, Option<Address>, Option<Address>) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("watchreg")));
+    assert_eq!(
+        (version, old, new),
+        (crate::EVENT_SCHEMA_VERSION, None, Some(registry.clone()))
+    );
+
+    client.clear_watcher_registry(&admin);
+    let (version, old, new): (u32, Option<Address>, Option<Address>) =
+        FromVal::from_val(&env, &last_admin_event(&env, symbol_short!("watchreg")));
+    assert_eq!(
+        (version, old, new),
+        (crate::EVENT_SCHEMA_VERSION, Some(registry), None)
+    );
+}
+
 /// Regression test for #363: removing an ID that is absent from the contract
 /// index must not decrement `ContractLiveCount`.
 #[test]
@@ -2246,5 +2370,8 @@ fn test_regression_remove_from_contract_index_keeps_count_when_id_absent() {
             .get(&crate::DataKey::ContractLiveCount(target.clone()))
             .unwrap()
     });
-    assert_eq!(before, after, "live count must not drift when the ID was absent");
+    assert_eq!(
+        before, after,
+        "live count must not drift when the ID was absent"
+    );
 }
