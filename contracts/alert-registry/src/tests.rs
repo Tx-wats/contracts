@@ -4727,6 +4727,175 @@ fn test_old_admin_rejected_for_remove_alert_by_admin() {
     );
 }
 
+// transfer_admin clears the guardian and emits admin.guardian event with None
+#[test]
+fn test_transfer_admin_clears_guardian() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    // Set up a guardian
+    client.set_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardian(), Some(guardian));
+
+    // Transfer admin - should clear the guardian
+    client.transfer_admin(&admin, &new_admin);
+
+    // Guardian should be cleared
+    assert!(client.get_guardian().is_none());
+
+    // Verify admin.guardian event was emitted with None
+    let events = env.events().all();
+    let mut found_clear_event = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        if topics.len() == 2
+            && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+            && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("guardian")
+        {
+            let (emitted_admin, emitted_guardian): (Address, Option<Address>) =
+                soroban_sdk::FromVal::from_val(&env, &data);
+            assert_eq!(emitted_admin, admin);
+            if emitted_guardian.is_none() {
+                found_clear_event = true;
+            }
+        }
+    }
+    assert!(found_clear_event, "admin.guardian clear event must be emitted");
+}
+
+// accept_admin_transfer clears the guardian and emits admin.guardian event with None
+#[test]
+fn test_accept_admin_transfer_clears_guardian() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    // Set up a guardian
+    client.set_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardian(), Some(guardian));
+
+    // Propose and accept admin transfer
+    client.propose_admin_transfer(&admin, &new_admin);
+    client.accept_admin_transfer(&new_admin);
+
+    // Guardian should be cleared
+    assert!(client.get_guardian().is_none());
+
+    // Verify admin.guardian event was emitted with None
+    let events = env.events().all();
+    let mut found_clear_event = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        if topics.len() == 2
+            && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+            && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("guardian")
+        {
+            let (emitted_admin, emitted_guardian): (Address, Option<Address>) =
+                soroban_sdk::FromVal::from_val(&env, &data);
+            assert_eq!(emitted_admin, admin);
+            if emitted_guardian.is_none() {
+                found_clear_event = true;
+            }
+        }
+    }
+    assert!(found_clear_event, "admin.guardian clear event must be emitted");
+}
+
+// Guardian is not cleared when no guardian was set
+#[test]
+fn test_transfer_admin_no_guardian_does_not_emit_guardian_event() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    // No guardian set
+    assert!(client.get_guardian().is_none());
+
+    // Transfer admin
+    client.transfer_admin(&admin, &new_admin);
+
+    // No admin.guardian event should be emitted
+    let events = env.events().all();
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        if topics.len() == 2
+            && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+            && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("guardian")
+        {
+            panic!("admin.guardian event should not be emitted when no guardian was set");
+        }
+    }
+}
+
+// Guardian is not cleared when no guardian was set on accept_admin_transfer
+#[test]
+fn test_accept_admin_transfer_no_guardian_does_not_emit_guardian_event() {
+    use soroban_sdk::{symbol_short, testutils::Events as _};
+
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    // No guardian set
+    assert!(client.get_guardian().is_none());
+
+    // Propose and accept admin transfer
+    client.propose_admin_transfer(&admin, &new_admin);
+    client.accept_admin_transfer(&new_admin);
+
+    // No admin.guardian event should be emitted
+    let events = env.events().all();
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        if topics.len() == 2
+            && Symbol::from_val(&env, &topics.get(0).unwrap()) == symbol_short!("admin")
+            && Symbol::from_val(&env, &topics.get(1).unwrap()) == symbol_short!("guardian")
+        {
+            panic!("admin.guardian event should not be emitted when no guardian was set");
+        }
+    }
+}
+
+// Former guardian cannot pause after transfer_admin
+#[test]
+fn test_former_guardian_cannot_pause_after_transfer_admin() {
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    client.set_guardian(&admin, &guardian);
+    client.transfer_admin(&admin, &new_admin);
+
+    // Former guardian should no longer be able to pause
+    assert_eq!(
+        client.try_pause(&guardian).unwrap_err().unwrap(),
+        ContractError::Unauthorized
+    );
+}
+
+// Former guardian cannot pause after accept_admin_transfer
+#[test]
+fn test_former_guardian_cannot_pause_after_accept_admin_transfer() {
+    let (env, admin, client) = setup();
+    let new_admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    client.set_guardian(&admin, &guardian);
+    client.propose_admin_transfer(&admin, &new_admin);
+    client.accept_admin_transfer(&new_admin);
+
+    // Former guardian should no longer be able to pause
+    assert_eq!(
+        client.try_pause(&guardian).unwrap_err().unwrap(),
+        ContractError::Unauthorized
+    );
+}
+
 // ── get_alerts_modified_since ─────────────────────────────────────────────
 
 // 18. Returns all alerts when since == 0
