@@ -1391,6 +1391,8 @@ impl WatcherRegistry {
         // Idempotent: unpausing a contract that is not paused is a no-op.
         if Self::is_paused(env.clone()) {
             env.storage().instance().set(&DataKey::Paused, &false);
+            env.events()
+                .publish((symbol_short!("admin"), symbol_short!("unpause")), (caller,));
             env.events().publish(
                 (symbol_short!("admin"), symbol_short!("unpause")),
                 (caller,),
