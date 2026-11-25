@@ -1700,16 +1700,7 @@ impl AlertRegistry {
 
         Self::persist_alert(&env, config_id, &config);
 
-        // Update active count if active status changed
-        if was_active != active {
-            let owner = config.owner.clone();
-            let active_count = Self::owner_active_count(&env, &owner);
-            if active {
-                Self::set_owner_active_count(&env, &owner, active_count + 1);
-            } else {
-                Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
-            }
-        }
+
 
         env.events().publish(
             (symbol_short!("alert"), symbol_short!("update")),
@@ -1820,16 +1811,7 @@ impl AlertRegistry {
 
         Self::persist_alert(&env, config_id, &config);
 
-        // Update active count if active status changed
-        if was_active != active {
-            let owner = config.owner.clone();
-            let active_count = Self::owner_active_count(&env, &owner);
-            if active {
-                Self::set_owner_active_count(&env, &owner, active_count + 1);
-            } else {
-                Self::set_owner_active_count(&env, &owner, active_count.saturating_sub(1));
-            }
-        }
+
 
         // Distinct topic from `update_alert`'s `alert.update`: an indexer can
         // tell an activation toggle (rules unchanged) from a rules rewrite
