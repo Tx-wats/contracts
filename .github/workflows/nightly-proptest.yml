@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  issues: write  # #630 — needed to open/close the failure-tracking issue
 
 jobs:
   nightly-proptest:
@@ -24,7 +25,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust 1.90 (pinned)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.90.0"
           targets: wasm32-unknown-unknown
@@ -44,11 +45,13 @@ jobs:
         run: |
           cargo build --release --target wasm32-unknown-unknown --locked -p alert-registry -p watcher-registry
 
+      # #630 — id exposes the outcome to the reporting step below; continue-on-error
+      # removed so the job actually fails when tests fail.
       - name: Nightly proptest sweep
+        id: sweep
         run: |
           set -o pipefail
           cargo test --workspace --locked -- --no-fail-fast
-        continue-on-error: true
 
       - name: Upload proptest regressions on failure
         if: failure()
@@ -59,3 +62,33 @@ jobs:
             **/proptest-regressions/**
           if-no-files-found: ignore
           retention-days: 30
+
+      # #630 — mirrors the pattern in check-testnet-deployments.yml: opens a
+      # deduplicated issue on failure and closes it again when the sweep recovers.
+      - name: Report proptest result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWEEP_OUTCOME: ${{ steps.sweep.outcome }}
+        run: |
+          title="Nightly proptest sweep failed"
+          issue_number=$(gh issue list \
+            --state open \
+            --search "in:title \"$title\"" \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+
+          if [[ "$SWEEP_OUTCOME" == "failure" ]]; then
+            if [[ -z "$issue_number" ]]; then
+              gh issue create \
+                --title "$title" \
+                --label "bug,ci,testing" \
+                --body "The nightly proptest sweep detected a property failure (PROPTEST_CASES=10000). Review the [workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) logs and check the uploaded \`proptest-regressions\` artifact for shrunk counterexamples."
+            else
+              echo "Existing failure issue already open: #$issue_number"
+            fi
+          elif [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --comment "The nightly proptest sweep passed in [workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          fi

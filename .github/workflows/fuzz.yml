@@ -8,17 +8,26 @@ on:
 permissions:
   contents: read
 
+env:
+  # #631 — pin a dated nightly so a moving nightly can't break the job
+  # out from under us overnight.
+  FUZZ_NIGHTLY: nightly-2026-10-01
+
 jobs:
   fuzz:
     name: Build and fuzz all targets
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+      # #631 — dated nightly pin instead of the floating @nightly ref
+      - name: Install pinned nightly Rust
+        uses: dtolnay/rust-toolchain@6a52aad76a94a5fbc50d567bb5be24419801c1fb # nightly
+        with:
+          toolchain: ${{ env.FUZZ_NIGHTLY }}
 
+      # #631 — cache covers both fuzz workspaces now
       - name: Cache cargo registry
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772115f6ec1 # v4.2.2
         with:
@@ -26,30 +35,44 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts/alert-registry/fuzz/target
-          key: ${{ runner.os }}-cargo-fuzz-nightly-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-fuzz-nightly-
+            contracts/watcher-registry/fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ env.FUZZ_NIGHTLY }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-fuzz-${{ env.FUZZ_NIGHTLY }}-
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      - name: Build all fuzz targets
+      # ── alert-registry (#427 original targets) ─────────────────────────────
+      - name: Build alert-registry fuzz targets
         working-directory: contracts/alert-registry
         run: |
-          cargo +nightly fuzz build validate_rule
-          cargo +nightly fuzz build register_alert
+          cargo "+$FUZZ_NIGHTLY" fuzz build validate_rule
+          cargo "+$FUZZ_NIGHTLY" fuzz build register_alert
 
-      - name: Fuzz validate_rule
+      - name: Fuzz alert-registry / validate_rule
         working-directory: contracts/alert-registry
-        run: cargo +nightly fuzz run validate_rule -- -max_total_time=60
+        run: cargo "+$FUZZ_NIGHTLY" fuzz run validate_rule -- -max_total_time=60
 
-      - name: Fuzz register_alert
+      - name: Fuzz alert-registry / register_alert
         working-directory: contracts/alert-registry
-        run: cargo +nightly fuzz run register_alert -- -max_total_time=60
+        run: cargo "+$FUZZ_NIGHTLY" fuzz run register_alert -- -max_total_time=60
 
-      - name: Upload crash artifacts
+      # ── watcher-registry (#427, #631 — previously never ran in CI) ────────
+      - name: Build watcher-registry fuzz targets
+        working-directory: contracts/watcher-registry
+        run: cargo "+$FUZZ_NIGHTLY" fuzz build watcher_registry_ops
+
+      - name: Fuzz watcher-registry / watcher_registry_ops
+        working-directory: contracts/watcher-registry
+        run: cargo "+$FUZZ_NIGHTLY" fuzz run watcher_registry_ops -- -max_total_time=60
+
+      # #631 — upload crash artifacts for both crates
+      - name: Upload crash artifacts (both crates)
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4.3.1
         with:
           name: fuzz-crashes-${{ github.run_id }}
-          path: contracts/alert-registry/fuzz/artifacts/
+          path: |
+            contracts/alert-registry/fuzz/artifacts/
+            contracts/watcher-registry/fuzz/artifacts/
           if-no-files-found: warn

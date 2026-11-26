@@ -17,7 +17,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Issue #124 — refuse to release a tag that CHANGELOG.md does not document.
       - name: Require a CHANGELOG section for this tag
@@ -35,7 +35,7 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust + wasm32 target
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: wasm32-unknown-unknown
@@ -84,7 +84,7 @@ jobs:
             --tag "${{ github.ref_name }}"
 
       - name: Create Pull Request with updated DEPLOYMENTS.md
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8
         with:
           commit-message: "chore: update DEPLOYMENTS.md for ${{ github.ref_name }}"
           branch: "deploy/update-deployments-${{ github.ref_name }}"
